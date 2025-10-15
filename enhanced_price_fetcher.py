@@ -128,24 +128,17 @@ class EnhancedPriceFetcher:
                 current_price = None
                 
                 if asset_type == 'stock':
-                    st.caption(f"      📊 Fetching stock price for {ticker}...")
+                    # Fetching stock price (silent)
                     current_price, source = self._get_stock_price_with_fallback(ticker)
-                    if current_price:
-                        st.caption(f"      ✅ Stock {ticker}: ₹{current_price:,.2f} (from {source})")
                     
                 elif asset_type == 'mutual_fund':
                     mf_count += 1
-                    st.caption(f"      📈 Fetching MF NAV for {ticker}...")
                     # Get fund name for enhanced AI fallback
                     fund_name = holding.get('stock_name', '')
                     current_price, source = self._get_mf_price_with_fallback(ticker, fund_name)
-                    if current_price:
-                        st.caption(f"      ✅ MF {ticker}: ₹{current_price:,.2f} (from {source})")
-                    else:
-                        st.caption(f"      ❌ MF {ticker}: Failed to fetch NAV")
                     
                 elif asset_type in ['pms', 'aif']:
-                    st.caption(f"      💰 Calculating {asset_type.upper()} value for {ticker}...")
+                    # Calculating PMS/AIF value (silent)
                     # Calculate PMS/AIF value using CAGR
                     if self.pms_aif_calculator:
                         # Get transaction details for CAGR calculation
@@ -171,12 +164,10 @@ class EnhancedPriceFetcher:
                     failed_count += 1
                     
             except Exception as e:
-                st.caption(f"      ❌ Error updating {holding.get('ticker', 'unknown')}: {str(e)}")
+                # Error updating holding (silent)
                 failed_count += 1
         
-        # Summary
-        st.caption(f"✅ Price update complete: {success_count} successful, {failed_count} failed")
-        st.caption(f"📈 Mutual Funds processed: {mf_count}")
+        # Summary (silent)
     
     def _get_stock_price_with_fallback(self, ticker: str) -> tuple:
         """
@@ -187,10 +178,10 @@ class EnhancedPriceFetcher:
         4. mftool (in case it's a mutual fund misclassified as stock)
         5. AI (OpenAI)
         """
-        st.caption(f"      🔄 Fetching {ticker} with fallback chain...")
+        # Fetching with fallback chain (silent)
         
         # Method 1: Try NSE
-        st.caption(f"      [1/5] Trying yfinance NSE...")
+        # Trying yfinance NSE (silent)
         try:
             nse_ticker = f"{ticker}.NS" if not ticker.endswith(('.NS', '.BO')) else ticker
             stock = yf.Ticker(nse_ticker)
@@ -199,13 +190,14 @@ class EnhancedPriceFetcher:
             if not hist.empty:
                 price = float(hist['Close'].iloc[-1])
                 if price > 0:
-                    st.caption(f"      ✅ Found on NSE: ₹{price:,.2f}")
+                    # Found on NSE (silent)
                     return price, 'yfinance_nse'
         except Exception as e:
-            st.caption(f"      ❌ NSE failed: {str(e)[:50]}")
+            pass
+            # NSE failed (silent)
         
         # Method 2: Try BSE
-        st.caption(f"      [2/5] Trying yfinance BSE...")
+        # Trying yfinance BSE (silent)
         try:
             bse_ticker = f"{ticker}.BO" if not ticker.endswith(('.NS', '.BO')) else ticker.replace('.NS', '.BO')
             stock = yf.Ticker(bse_ticker)

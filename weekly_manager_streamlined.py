@@ -46,8 +46,6 @@ class StreamlinedWeeklyManager:
             
             # Show unique tickers being analyzed
             unique_tickers = list(set([h['ticker'] for h in holdings]))
-            st.caption(f"📊 Found {len(holdings)} holdings ({len(unique_tickers)} unique tickers)")
-            st.caption(f"🎯 Tickers: {', '.join(unique_tickers[:10])}{'...' if len(unique_tickers) > 10 else ''}")
             
             # Get unique holdings (deduplicate by ticker)
             unique_holdings = {}
@@ -60,7 +58,7 @@ class StreamlinedWeeklyManager:
             current_date = datetime.now()
             start_date = current_date - timedelta(weeks=52)
             
-            st.caption(f"📅 Fetching last 52 weeks: {start_date.strftime('%Y-%m-%d')} to {current_date.strftime('%Y-%m-%d')}")
+            # Fetching last 52 weeks (silent)
             
             # OPTIMIZED: Fetch entire year for all holdings at once
             st.subheader("⚡ Bulk Yearly Fetch (1 API call per holding)")
@@ -106,26 +104,19 @@ class StreamlinedWeeklyManager:
             
             # Show unique tickers being analyzed
             unique_tickers = list(set([h['ticker'] for h in holdings]))
-            st.caption(f"📊 Found {len(holdings)} holdings ({len(unique_tickers)} unique tickers)")
-            st.caption(f"🎯 Tickers: {', '.join(unique_tickers[:10])}{'...' if len(unique_tickers) > 10 else ''}")
             
-            # Get missing weeks for user's transactions
-            st.caption("🔍 Checking for missing weekly prices...")
-            with st.spinner("Analyzing transaction weeks..."):
-                missing_weeks = self.db.get_missing_weeks_for_user(user_id)
+            # Get missing weeks for user's transactions (silent)
+            missing_weeks = self.db.get_missing_weeks_for_user(user_id)
             
             if not missing_weeks:
                 st.caption("✅ All weeks up-to-date - no missing prices found")
                 return {'success': True, 'message': 'All weeks up-to-date', 'fetched': 0}
             
-            st.caption(f"📅 Found {len(missing_weeks)} missing week(s) to fetch")
+            # Found missing weeks to fetch (silent)
             
             # Analyze missing weeks
             unique_tickers = list(set([m['ticker'] for m in missing_weeks]))
             unique_weeks = list(set([f"{m['year']}-W{m['week']:02d}" for m in missing_weeks]))
-            
-            st.caption(f"🎯 Unique tickers: {len(unique_tickers)} ({', '.join(unique_tickers[:3])}{'...' if len(unique_tickers) > 3 else ''})")
-            st.caption(f"📅 Unique weeks: {len(unique_weeks)} ({', '.join(unique_weeks[:3])}{'...' if len(unique_weeks) > 3 else ''})")
             
             # Group by week for bulk fetching
             week_groups = {}
@@ -135,15 +126,13 @@ class StreamlinedWeeklyManager:
                     week_groups[week_key] = []
                 week_groups[week_key].append(missing)
             
-            st.caption(f"🔄 Grouped into {len(week_groups)} week(s) for bulk fetching")
+            # Grouped into weeks for bulk fetching (silent)
             
             fetched_count = 0
             updated_tickers = set()
             failed_weeks = []
             
-            # Create progress bar
-            progress_bar = st.progress(0)
-            progress_text = st.empty()
+            # Process weeks (silent)
             
             # Process each week group
             for week_idx, (week_key, week_missing) in enumerate(week_groups.items(), 1):
@@ -151,16 +140,8 @@ class StreamlinedWeeklyManager:
                 year = int(year)
                 week_num = int(week_num)
                 
-                # Update progress
-                progress = week_idx / len(week_groups)
-                progress_bar.progress(progress)
-                progress_text.text(f"Processing week {week_idx}/{len(week_groups)}: {week_key}")
-                
-                st.caption(f"📅 [{week_idx}/{len(week_groups)}] Processing Week {week_num}, {year}...")
-                
                 # Get Monday of this week
                 week_monday = datetime.strptime(f'{year}-W{week_num:02d}-1', '%Y-W%W-%w')
-                st.caption(f"   📅 Week Monday: {week_monday.strftime('%Y-%m-%d')}")
                 
                 # Prepare bulk fetch data
                 tickers_with_info = []
@@ -182,16 +163,16 @@ class StreamlinedWeeklyManager:
                         ticker_names.append(stock['ticker'])
                 
                 # Show tickers being processed
-                st.caption(f"   🎯 {len(tickers_with_info)} tickers: {', '.join(ticker_names[:5])}{'...' if len(ticker_names) > 5 else ''}")
+                # Processing tickers (silent)
                 
                 # Bulk fetch prices for this week
                 if tickers_with_info:
-                    st.caption(f"   🔄 Fetching prices for {week_key}...")
+                    # Fetching prices for week (silent)
                     prices = self._fetch_week_prices_bulk(tickers_with_info, week_monday)
                     
                     # Save to database
                     if prices:
-                        st.caption(f"   💾 Storing {len(prices)} prices to database...")
+                        # Storing prices to database (silent)
                         self._save_week_prices(prices, week_monday, year, week_num)
                         fetched_count += len(prices)
                         
@@ -222,8 +203,6 @@ class StreamlinedWeeklyManager:
             with col3:
                 st.metric("⚠️ Failed Weeks", len(failed_weeks))
             
-            if updated_tickers:
-                st.caption(f"📈 Updated tickers: {', '.join(list(updated_tickers)[:10])}{'...' if len(updated_tickers) > 10 else ''}")
             
             if failed_weeks:
                 st.warning(f"⚠️ {len(failed_weeks)} weeks could not be fetched: {', '.join(failed_weeks[:5])}{'...' if len(failed_weeks) > 5 else ''}")
@@ -282,27 +261,27 @@ class StreamlinedWeeklyManager:
         prices = []
         
         # Try regular price fetcher first
-        st.caption(f"   🔄 Starting price fetch for {len(tickers_with_info)} tickers...")
+        # Starting price fetch (silent)
         
         for idx, (ticker, name, asset_type, date) in enumerate(tickers_with_info, 1):
-            st.caption(f"   [{idx}/{len(tickers_with_info)}] Fetching {ticker} ({asset_type})...")
+            # Fetching ticker (silent)
             
-            try:
-                if asset_type == 'stock':
-                    st.caption(f"   📈 Using stock price fetcher...")
+            
+            if asset_type == 'stock':
+                    # Using stock price fetcher (silent)
                     price = self.price_fetcher.get_current_price(ticker, asset_type)
-                elif asset_type == 'mutual_fund':
-                    st.caption(f"   📊 Using mutual fund price fetcher...")
+            elif asset_type == 'mutual_fund':
+                    # Using mutual fund price fetcher (silent)
                     price = self.price_fetcher.get_current_price(ticker, asset_type)
-                elif asset_type in ['pms', 'aif']:
-                    st.caption(f"   🏦 Calculating PMS/AIF NAV using CAGR...")
+            elif asset_type in ['pms', 'aif']:
+                    # Calculating PMS/AIF NAV using CAGR (silent)
                     # For PMS/AIF, use CAGR calculation (as per your requirements)
                     price = self._calculate_pms_aif_nav(ticker, asset_type, date)
-                else:
-                    st.caption(f"   ❓ Unknown asset type: {asset_type}")
+            else:
+                    # Unknown asset type (silent)
                     price = None
                 
-                if price:
+            if price:
                     prices.append({
                         'ticker': ticker,
                         'name': name,
@@ -310,11 +289,8 @@ class StreamlinedWeeklyManager:
                         'price': price,
                         'source': 'api'
                     })
-                    st.caption(f"   ✅ {ticker}: ₹{price:,.2f} (via {asset_type} API)")
-                else:
-                    st.caption(f"   ❌ {ticker}: No price found")
-            except Exception as e:
-                st.caption(f"   ⚠️ {ticker}: Error - {str(e)}")
+                    # Price found (silent)
+
         
         # Use bulk AI for remaining tickers
         remaining = [(t, n, a, d) for t, n, a, d in tickers_with_info 
@@ -374,10 +350,10 @@ class StreamlinedWeeklyManager:
             return None
     
     def _save_week_prices(self, prices: List[Dict[str, Any]], week_monday: datetime, year: int, week_num: int):
-        """
+            """
         Save week prices to historical_prices table
-        """
-        try:
+            """
+        
             price_records = []
             
             for price_data in prices:
@@ -401,10 +377,9 @@ class StreamlinedWeeklyManager:
             
             if price_records:
                 self.db.save_historical_prices_bulk(price_records)
-                st.caption(f"✅ Saved {len(price_records)} prices for Week {week_num}, {year}")
+                # Saved prices (silent)
         
-        except Exception as e:
-            st.caption(f"⚠️ Error saving week prices: {str(e)}")
+
     
     def get_52_week_navs(self, user_id: str) -> Dict[str, List[Dict[str, Any]]]:
         """
@@ -469,5 +444,5 @@ class StreamlinedWeeklyManager:
             return current_nav
             
         except Exception as e:
-            st.caption(f"⚠️ Error calculating PMS CAGR: {str(e)}")
+            # Error calculating PMS CAGR (silent)
             return None

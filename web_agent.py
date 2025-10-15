@@ -391,20 +391,13 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                 
                 weekly_manager = st.session_state.weekly_manager
                 
-                # Fetch missing weeks
-                st.caption("🔍 Checking for missing weeks...")
+                # Fetch missing weeks (silent)
                 result = weekly_manager.fetch_missing_weeks_till_current(user_id)
                 
                 if result['success']:
                     fetched_count = result.get('fetched', 0)
                     if fetched_count > 0:
                         st.success(f"✅ Fetched {fetched_count} missing week prices!")
-                        st.caption(f"📈 Updated {len(result.get('updated_tickers', []))} tickers")
-                        
-                        # Show which tickers were updated
-                        if 'updated_tickers' in result:
-                            updated_tickers = result['updated_tickers'][:5]
-                            st.caption(f"🎯 Updated: {', '.join(updated_tickers)}{'...' if len(result['updated_tickers']) > 5 else ''}")
                     else:
                         st.info("✅ All weeks already up-to-date")
                 else:
@@ -430,47 +423,19 @@ def main_dashboard():
     # Auto-fetch missing weeks on login (as per your image)
     # Only fetch once per session to avoid duplicate fetching
     if 'missing_weeks_fetched' not in st.session_state:
-        with st.sidebar.status("🔄 Checking for missing weeks..."):
-            st.sidebar.caption("🔍 Analyzing your holdings...")
+        # Auto-fetch missing weeks and update prices (silent background process)
+        holdings = db.get_user_holdings(user['id'])
+        if holdings:
+            # Auto-fetch missing weeks (silent)
+            result = weekly_manager.fetch_missing_weeks_till_current(user['id'])
             
-            # Get user holdings first
-            holdings = db.get_user_holdings(user['id'])
-            if holdings:
-                st.sidebar.caption(f"📊 Found {len(holdings)} holdings")
-                
-                # Show unique tickers
-                unique_tickers = list(set([h['ticker'] for h in holdings]))
-                st.sidebar.caption(f"🎯 Unique tickers: {', '.join(unique_tickers[:5])}{'...' if len(unique_tickers) > 5 else ''}")
-                
-                st.sidebar.caption("🔄 Checking for missing weekly prices...")
-                result = weekly_manager.fetch_missing_weeks_till_current(user['id'])
-                
-                if result['success']:
-                    fetched_count = result.get('fetched', 0)
-                    if fetched_count > 0:
-                        st.sidebar.success(f"✅ Fetched {fetched_count} missing week prices")
-                        st.sidebar.caption(f"📈 Updated {len(result.get('updated_tickers', []))} tickers")
-                        
-                        # Show which tickers were updated
-                        if 'updated_tickers' in result:
-                            updated_tickers = result['updated_tickers'][:3]  # Show first 3
-                            st.sidebar.caption(f"🎯 Updated: {', '.join(updated_tickers)}{'...' if len(result['updated_tickers']) > 3 else ''}")
-                    else:
-                        st.sidebar.success("✅ All weeks up-to-date")
-                        st.sidebar.caption("📊 No missing prices found")
-                else:
-                    st.sidebar.error(f"⚠️ Error: {result.get('error', 'Unknown error')}")
-                
-                # Auto-update live prices for all holdings (MF, PMS, AIF)
-                st.sidebar.caption("💰 Updating current prices...")
-                try:
-                    st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
-                    st.sidebar.success("✅ Current prices updated")
-                except Exception as e:
-                    st.sidebar.warning(f"⚠️ Price update: {str(e)[:50]}")
-            else:
-                st.sidebar.info("ℹ️ No holdings found - upload files first")
-                result = {'success': True, 'fetched': 0}
+            # Auto-update live prices (silent)
+            try:
+                st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
+            except Exception as e:
+                st.sidebar.warning(f"⚠️ Price update: {str(e)[:50]}")
+        else:
+            result = {'success': True, 'fetched': 0}
         
         # Mark as fetched to prevent re-fetching on page navigation
         st.session_state.missing_weeks_fetched = True
