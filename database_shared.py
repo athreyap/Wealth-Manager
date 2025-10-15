@@ -21,14 +21,9 @@ class SharedDatabaseManager:
             supabase_url = st.secrets["supabase"]["url"]
             supabase_key = st.secrets["supabase"]["key"]
             
-            # Debug: Show what we're reading (first/last chars only for security)
-            st.info(f"🔍 Debug - URL starts with: {supabase_url[:30]}... ends with: ...{supabase_url[-20:]}")
-            st.info(f"🔍 Debug - URL length: {len(supabase_url)} characters")
-            st.info(f"🔍 Debug - Key length: {len(supabase_key)} characters")
-            
             # Validate URL format
             if not supabase_url or not supabase_url.startswith("https://"):
-                raise ValueError(f"Invalid Supabase URL format. Must start with 'https://'. Got: {supabase_url[:50]}...")
+                raise ValueError(f"Invalid Supabase URL format. Must start with 'https://'")
             
             if not supabase_key or len(supabase_key) < 20:
                 raise ValueError("Invalid Supabase key. Key appears to be too short or empty.")
@@ -39,16 +34,11 @@ class SharedDatabaseManager:
                 supabase_key.strip()
             )
             
-            st.success("✅ Database connected successfully!")
-            
         except KeyError as e:
             st.error(f"❌ Missing Supabase configuration in secrets: {e}")
-            st.info("Please add your Supabase credentials in Streamlit Cloud Settings → Secrets")
             raise
         except Exception as e:
             st.error(f"❌ Database connection error: {str(e)}")
-            st.info("Please check your Supabase URL and key in the secrets configuration")
-            st.info(f"Error type: {type(e).__name__}")
             raise
     
     # ========================================================================
