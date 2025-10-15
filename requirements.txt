@@ -1,0 +1,34 @@
+# Streamlit and UI
+streamlit
+
+# Database
+supabase
+
+# AI and ML
+openai
+google-generativeai
+
+# Data Processing
+pandas
+numpy
+scipy
+
+# File Processing
+PyPDF2
+pdfplumber
+
+# Financial Data
+yfinance
+mftool
+indstocks
+
+# Visualization
+plotly
+
+# Utilities
+python-dateutil
+requests
+beautifulsoup4
+lxml
+html5lib
+
