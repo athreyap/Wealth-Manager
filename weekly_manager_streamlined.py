@@ -36,12 +36,12 @@ class StreamlinedWeeklyManager:
             from datetime import datetime, timedelta
             from fetch_yearly_bulk import fetch_yearly_prices_for_all_tickers, save_yearly_prices_to_db
             
-            st.caption("🔍 Analyzing user holdings and transaction weeks...")
+            #st.caption("🔍 Analyzing user holdings and transaction weeks...")
             
             # Get user holdings first
             holdings = self.db.get_user_holdings(user_id)
             if not holdings:
-                st.caption("ℹ️ No holdings found - nothing to fetch")
+                #st.caption("ℹ️ No holdings found - nothing to fetch")
                 return {'success': True, 'message': 'No holdings found', 'fetched': 0}
             
             # Show unique tickers being analyzed
@@ -93,12 +93,12 @@ class StreamlinedWeeklyManager:
         Matches your image: "fetch missing weeks till current week based on week of year"
         """
         try:
-            st.caption("🔍 Analyzing user holdings and transaction weeks...")
+            #st.caption("🔍 Analyzing user holdings and transaction weeks...")
             
             # Get user holdings first
             holdings = self.db.get_user_holdings(user_id)
             if not holdings:
-                st.caption("ℹ️ No holdings found - nothing to fetch")
+                #st.caption("ℹ️ No holdings found - nothing to fetch")
                 return {'success': True, 'message': 'No holdings found', 'fetched': 0}
             
             # Show unique tickers being analyzed
@@ -179,12 +179,12 @@ class StreamlinedWeeklyManager:
                         for price in prices:
                             updated_tickers.add(price.get('asset_symbol', 'Unknown'))
                         
-                        st.caption(f"   ✅ {week_key}: {len(prices)} prices stored successfully")
+                        #st.caption(f"   ✅ {week_key}: {len(prices)} prices stored successfully")
                     else:
                         # No prices fetched for this week
                         failed_weeks.append(week_key)
                 else:
-                    st.caption(f"   ⚠️ {week_key}: No ticker info found")
+                    #st.caption(f"   ⚠️ {week_key}: No ticker info found")
                     failed_weeks.append(week_key)
             
             # Clear progress indicators
@@ -296,7 +296,7 @@ class StreamlinedWeeklyManager:
                     if not any(p['ticker'] == t for p in prices)]
         
         if remaining and self.bulk_ai.available:
-            st.caption(f"   🤖 Trying bulk AI for {len(remaining)} failed tickers...")
+            #st.caption(f"   🤖 Trying bulk AI for {len(remaining)} failed tickers...")
             try:
                 # Prepare for bulk AI
                 ai_tickers = [(t, n, a) for t, n, a, d in remaining]
@@ -313,23 +313,25 @@ class StreamlinedWeeklyManager:
                             'source': 'ai_bulk'
                         })
                         ai_successful += 1
-                        st.caption(f"   ✅ {ticker}: ₹{ai_prices[ticker]:,.2f} (via AI)")
+                        #st.caption(f"   ✅ {ticker}: ₹{ai_prices[ticker]:,.2f} (via AI)")
                 
-                st.caption(f"   ✅ AI fetch: {ai_successful}/{len(remaining)} successful")
+                #st.caption(f"   ✅ AI fetch: {ai_successful}/{len(remaining)} successful")
             except Exception as e:
-                st.caption(f"   ❌ Bulk AI failed: {str(e)}")
+                pass
+#st.caption(f"   ❌ Bulk AI failed: {str(e)}")
         elif remaining:
-            st.caption(f"   ⚠️ Bulk AI not available for {len(remaining)} failed tickers")
+            pass
+#st.caption(f"   ⚠️ Bulk AI not available for {len(remaining)} failed tickers")
         
         # Final summary
         total_successful = len(prices)
         total_failed = len(tickers_with_info) - total_successful
         
-        st.caption(f"   🎉 Final result: {total_successful}/{len(tickers_with_info)} tickers successful")
+        #st.caption(f"   🎉 Final result: {total_successful}/{len(tickers_with_info)} tickers successful")
         if total_failed > 0:
             final_failed = [t for t, n, a, d in tickers_with_info 
                           if not any(p['ticker'] == t for p in prices)]
-            st.caption(f"   ⚠️ Failed: {', '.join(final_failed[:3])}{'...' if len(final_failed) > 3 else ''}")
+            #st.caption(f"   ⚠️ Failed: {', '.join(final_failed[:3])}{'...' if len(final_failed) > 3 else ''}")
         
         return prices
     

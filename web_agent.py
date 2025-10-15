@@ -243,20 +243,20 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     # Log ticker detection
                     asset_type = detect_ticker_type(ticker)
                     normalized_ticker = normalize_ticker(ticker, asset_type)
-                    st.caption(f"   🔍 Row {idx+1}: {ticker} → {normalized_ticker} ({asset_type})")
+                    #st.caption(f"   🔍 Row {idx+1}: {ticker} → {normalized_ticker} ({asset_type})")
                     
                     # Parse date
                     try:
                         trans_date = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
-                        st.caption(f"   📅 Date: {trans_date}")
+                        #st.caption(f"   📅 Date: {trans_date}")
                     except Exception as date_error:
                         trans_date = datetime.now().strftime('%Y-%m-%d')
-                        st.caption(f"   ⚠️ Date parsing failed, using today: {trans_date}")
+                        #st.caption(f"   ⚠️ Date parsing failed, using today: {trans_date}")
                     
                     # Get price - if not provided, fetch historical price for that date
                     price = row.get('price', 0)
                     if pd.isna(price) or price == '' or price == 0:
-                        st.caption(f"   💰 Price: Not provided, fetching historical price for {trans_date}...")
+                        ##st.caption(f"   💰 Price: Not provided, fetching historical price for {trans_date}...")
                         
                         # Fetch historical price for the transaction date
                         try:
@@ -270,16 +270,16 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                             )
                             if historical_price and historical_price > 0:
                                 price = historical_price
-                                st.caption(f"   ✅ Historical price: ₹{price:,.2f}")
+                                #st.caption(f"   ✅ Historical price: ₹{price:,.2f}")
                             else:
                                 price = 0
-                                st.caption(f"   ⚠️ Could not fetch historical price (using 0)")
+                                #st.caption(f"   ⚠️ Could not fetch historical price (using 0)")
                         except Exception as e:
                             price = 0
-                            st.caption(f"   ❌ Error fetching price: {str(e)[:50]}")
+                            #st.caption(f"   ❌ Error fetching price: {str(e)[:50]}")
                     else:
                         price = float(price)
-                        st.caption(f"   💰 Price: ₹{price:,.2f}")
+                        ##st.caption(f"   💰 Price: ₹{price:,.2f}")
                     
                     # Determine channel: check CSV column first, then use filename
                     channel = None
@@ -316,14 +316,15 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                             week_label = result['transaction']['week_label']
                             st.caption(f"   📅 Week calculated: {week_label}")
                         else:
-                            st.caption(f"   ⚠️ Week calculation may have failed")
+                            pass
+#st.caption(f"   ⚠️ Week calculation may have failed")
                     else:
                         errors += 1
-                        st.caption(f"   ❌ Database error: {result.get('error', 'Unknown error')}")
+                        #st.caption(f"   ❌ Database error: {result.get('error', 'Unknown error')}")
                 
                 except Exception as e:
                     errors += 1
-                    st.caption(f"   ❌ Error in row {idx+1}: {str(e)}")
+                    #st.caption(f"   ❌ Error in row {idx+1}: {str(e)}")
                 
                 # Update progress bar
                 if len(df) > 10:
@@ -2768,15 +2769,15 @@ def charts_page():
         if df_compare.empty:
             st.warning("⚠️ No valid holdings data available for comparison. Please check if prices are being fetched correctly.")
             # Debug information
-            st.caption(f"Debug: Found {len(holdings)} holdings, but none had valid price data")
+            #st.caption(f"Debug: Found {len(holdings)} holdings, but none had valid price data")
             if holdings:
-                st.caption("Sample holding data:")
+                #st.caption("Sample holding data:")
                 sample_holding = holdings[0]
-                st.caption(f"Ticker: {sample_holding.get('ticker')}, Current Price: {sample_holding.get('current_price')}, Average Price: {sample_holding.get('average_price')}")
+                #st.caption(f"Ticker: {sample_holding.get('ticker')}, Current Price: {sample_holding.get('current_price')}, Average Price: {sample_holding.get('average_price')}")
             return
         
         # Debug information
-        st.caption(f"✅ Loaded {len(df_compare)} holdings for comparison")
+        #st.caption(f"✅ Loaded {len(df_compare)} holdings for comparison")
         
         # Enhanced Comparison Options with Better UI
         st.markdown("### 📊 Select Comparison Type")
@@ -3126,7 +3127,7 @@ def charts_page():
                     historical_prices = db.get_historical_prices_for_stock_silent(stock_id)
                     
                     # Debug information
-                    st.caption(f"Debug: {ticker} - Found {len(historical_prices) if historical_prices else 0} historical prices")
+                    #st.caption(f"Debug: {ticker} - Found {len(historical_prices) if historical_prices else 0} historical prices")
                     
                     if historical_prices and len(historical_prices) > 0:
                         # Sort by date
@@ -3453,7 +3454,6 @@ def upload_files_page():
             st.caption("📈 Asset Type Breakdown:")
             for asset_type, count in asset_types.items():
                 st.caption(f"   • {asset_type}: {count} transactions")
-            
             # Channel breakdown
             st.caption("📁 Channel Breakdown:")
             for channel, count in channels.items():
@@ -3482,7 +3482,7 @@ def upload_files_page():
             # Week calculation status
             if missing_weeks:
                 st.warning(f"⚠️ {len(missing_weeks)} transactions missing week information")
-                st.caption("🔧 To fix this, run: `streamlit run fix_week_calculation.py`")
+                #st.caption("🔧 To fix this, run: `streamlit run fix_week_calculation.py`")
                 
                 # Show which transactions are missing week info
                 with st.expander("🔍 Transactions Missing Week Info"):
@@ -3503,7 +3503,7 @@ def upload_files_page():
     
     except Exception as e:
         st.error(f"❌ Error loading transactions: {str(e)}")
-        st.caption("🔧 This might be a database connection issue. Check your Supabase connection.")
+        #st.caption("🔧 This might be a database connection issue. Check your Supabase connection.")
 
 # ============================================================================
 # MAIN APP

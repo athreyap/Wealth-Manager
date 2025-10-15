@@ -68,7 +68,8 @@ def fetch_yearly_prices_for_all_tickers(holdings: List[Dict], start_date: dateti
                     all_prices[ticker] = weekly_prices
                     # Got weekly data (silent)
                 else:
-                    pass# No data found (silent)
+                    pass
+# No data found (silent)
             
             elif asset_type == 'mutual_fund':
                 # MUTUAL FUNDS: Use mftool for current NAV, replicate for weeks
@@ -93,9 +94,11 @@ def fetch_yearly_prices_for_all_tickers(holdings: List[Dict], start_date: dateti
                         all_prices[ticker] = weekly_prices
                         # MF NAV found (silent)
                     else:
-                        pass# MF NAV not found (silent)
+                        pass
+# MF NAV not found (silent)
                 except Exception as e:
-                    pass# MF Error (silent)
+                    pass
+# MF Error (silent)
             
             elif asset_type in ['pms', 'aif']:
                 pass
@@ -104,10 +107,12 @@ def fetch_yearly_prices_for_all_tickers(holdings: List[Dict], start_date: dateti
                 # PMS/AIF: Requires CAGR calculation (skipped for bulk fetch)
             
             else:
-                pass# Unknown asset type (silent)
+                pass
+# Unknown asset type (silent)
                 
         except Exception as e:
-            pass# Error fetching ticker (silent)
+            pass
+# Error fetching ticker (silent)
     
     return all_prices
 
@@ -175,7 +180,8 @@ def save_yearly_prices_to_db(db, all_prices: Dict[str, Dict[Tuple[int, int], flo
                     current_prices_updated += 1
                     # Updated live price (silent)
                 except Exception as e:
-                    pass# Could not update live price (silent)
+                    pass
+# Could not update live price (silent)
     
     # Total saved (silent)
     # Updated live prices (silent)

@@ -22,7 +22,7 @@ class BulkAIFetcher:
             self.available = True
         except Exception as e:
             self.available = False
-            st.caption(f"⚠️ Bulk AI fetcher not available: {str(e)}")
+            #st.caption(f"⚠️ Bulk AI fetcher not available: {str(e)}")
     
     def fetch_bulk_current_prices(
         self,
@@ -52,7 +52,8 @@ class BulkAIFetcher:
                 batch_prices = self._fetch_batch_current(batch)
                 all_prices.update(batch_prices)
             except Exception as e:
-                st.caption(f"⚠️ Batch {i//max_batch + 1} failed: {str(e)}")
+                pass
+#st.caption(f"⚠️ Batch {i//max_batch + 1} failed: {str(e)}")
         
         return all_prices
     
@@ -117,11 +118,11 @@ Rules:
                     except (ValueError, TypeError):
                         pass
             
-            st.caption(f"🤖 Bulk AI: Fetched {len(clean_prices)}/{len(batch)} prices")
+            #st.caption(f"🤖 Bulk AI: Fetched {len(clean_prices)}/{len(batch)} prices")
             return clean_prices
             
         except Exception as e:
-            st.caption(f"⚠️ Bulk AI error: {str(e)}")
+            #st.caption(f"⚠️ Bulk AI error: {str(e)}")
             return {}
     
     def fetch_bulk_historical_prices(
@@ -152,7 +153,8 @@ Rules:
                 batch_prices = self._fetch_batch_historical(batch)
                 all_prices.update(batch_prices)
             except Exception as e:
-                st.caption(f"⚠️ Historical batch {i//max_batch + 1} failed: {str(e)}")
+                pass
+#st.caption(f"⚠️ Historical batch {i//max_batch + 1} failed: {str(e)}")
         
         return all_prices
     
@@ -216,11 +218,11 @@ Rules:
                     except (ValueError, TypeError):
                         pass
             
-            st.caption(f"🤖 Bulk AI Historical: Fetched {len(clean_prices)}/{len(batch)} prices")
+            #st.caption(f"🤖 Bulk AI Historical: Fetched {len(clean_prices)}/{len(batch)} prices")
             return clean_prices
             
         except Exception as e:
-            st.caption(f"⚠️ Bulk historical AI error: {str(e)}")
+            #st.caption(f"⚠️ Bulk historical AI error: {str(e)}")
             return {}
     
     def fetch_missing_weeks_bulk(

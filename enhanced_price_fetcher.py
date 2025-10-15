@@ -30,7 +30,7 @@ class EnhancedPriceFetcher:
             self.ai_available = True
         except Exception as e:
             self.ai_available = False
-            st.caption(f"⚠️ OpenAI not available: {str(e)}")
+            #st.caption(f"⚠️ OpenAI not available: {str(e)}")
         
         # Initialize PMS/AIF calculator
         try:
@@ -38,7 +38,7 @@ class EnhancedPriceFetcher:
             self.pms_aif_calculator = PMS_AIF_Calculator()
         except Exception as e:
             self.pms_aif_calculator = None
-            st.caption(f"⚠️ PMS/AIF calculator not available: {str(e)}")
+            #st.caption(f"⚠️ PMS/AIF calculator not available: {str(e)}")
     
     def get_current_price(self, ticker: str, asset_type: str, fund_name: str = None) -> Optional[float]:
         """
@@ -72,7 +72,7 @@ class EnhancedPriceFetcher:
                 try:
                     # Try to get transaction context from cache or use conservative estimate
                     # This is a simplified version - full context should be provided by caller
-                    st.caption(f"      💰 Calculating PMS/AIF value using CAGR...")
+                    ##st.caption(f"      💰 Calculating PMS/AIF value using CAGR...")
                     
                     # Use conservative CAGR estimates
                     conservative_cagr = 0.12 if asset_type == 'aif' else 0.10
@@ -82,7 +82,7 @@ class EnhancedPriceFetcher:
                     price = None
                     source = 'cagr_calculation_required'
                 except Exception as e:
-                    st.caption(f"      ⚠️ PMS/AIF calculation error: {str(e)}")
+                    ##st.caption(f"      ⚠️ PMS/AIF calculation error: {str(e)}")
                     price = None
                     source = 'cagr_error'
             else:
@@ -122,7 +122,7 @@ class EnhancedPriceFetcher:
                 stock_id = holding.get('stock_id')
                 
                 if not ticker or not stock_id:
-                    st.caption(f"      ⚠️ Skipping holding with missing ticker or stock_id")
+                    #st.caption(f"      ⚠️ Skipping holding with missing ticker or stock_id")
                     continue
                 
                 current_price = None
@@ -153,7 +153,7 @@ class EnhancedPriceFetcher:
                                 ticker, investment_date, investment_amount, is_aif=(asset_type == 'aif')
                             )
                             current_price = result['current_value'] / float(first_transaction['quantity'])
-                            #st.caption(f"      ✅ {asset_type.upper()} {ticker}: ₹{current_price:,.2f}")
+                            ##st.caption(f"      ✅ {asset_type.upper()} {ticker}: ₹{current_price:,.2f}")
                 
                 # Update live_price in stock_master
                 if current_price and current_price > 0:
@@ -209,7 +209,8 @@ class EnhancedPriceFetcher:
                     # Found on BSE
                     return price, 'yfinance_bse'
         except Exception as e:
-            pass# BSE failed
+            pass
+# BSE failed
         
         # Method 3: Try without suffix
         # Trying yfinance without suffix
@@ -225,12 +226,14 @@ class EnhancedPriceFetcher:
                         # Found without suffix
                         return price, 'yfinance_raw'
             except Exception as e:
-                pass# Raw ticker failed
+                pass
+# Raw ticker failed
         else:
-            pass# Skipped (no suffix to remove)
+            pass
+# Skipped (no suffix to remove)
         
         # Method 4: Try mftool (in case it's a mutual fund)
-        #st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")
+        ##st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")
         try:
             from mftool import Mftool
             mf = Mftool()
@@ -242,10 +245,11 @@ class EnhancedPriceFetcher:
             if quote and 'nav' in quote:
                 price = float(quote['nav'])
                 if price > 0:
-                    st.caption(f"      ✅ Found as MF on mftool: ₹{price:,.2f}")
+                    #st.caption(f"      ✅ Found as MF on mftool: ₹{price:,.2f}")
                     return price, 'mftool'
         except Exception as e:
-            pass# mftool failed
+            pass
+# mftool failed
         
         # Method 5: AI Fallback (if available)
         # Trying AI (OpenAI) as last resort
@@ -256,11 +260,14 @@ class EnhancedPriceFetcher:
                     # AI found price
                     return price, 'ai_openai'
                 else:
-                    pass# AI couldn't find price
+                    pass
+                # AI couldn't find price
             except Exception as e:
-                pass#st.caption(f"      ❌ AI failed: {str(e)[:50]}")
+                pass
+            # AI failed
         else:
-            pass# AI not available
+            pass
+        # AI not available
         
         # All methods failed
         return None, 'not_found'
@@ -297,7 +304,8 @@ class EnhancedPriceFetcher:
                 # No NAV data found for scheme
                 pass
         except Exception as e:
-            pass# mftool failed
+            pass
+# mftool failed
         
         # Method 2: AI Fallback with Enhanced Context
         # Trying AI (OpenAI) with enhanced context
@@ -318,11 +326,14 @@ class EnhancedPriceFetcher:
                     # AI found NAV
                     return price, 'ai_openai_enhanced'
                 else:
-                    pass# AI couldn't find NAV
+                    # AI couldn't find NAV
+                    pass
             except Exception as e:
-                pass# AI failed
+                # AI failed
+                pass
         else:
-            pass# AI not available
+            # AI not available
+            pass
         
         # All methods failed for MF
         return None, 'not_found'
@@ -494,10 +505,10 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                 try:
                     price = float(text)
                     if price > 0 and price < 1000000:  # Sanity check (price between 0 and 10L)
-                        st.caption(f"🤖 AI found price for {ticker}: ₹{price:.2f}")
+                        #st.caption(f"🤖 AI found price for {ticker}: ₹{price:.2f}")
                         return price
                     else:
-                        st.caption(f"⚠️ AI returned unrealistic price: {price}")
+                        #st.caption(f"⚠️ AI returned unrealistic price: {price}")
                         return None
                 except ValueError:
                     # Try to extract first number from text
@@ -505,13 +516,13 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                     if match:
                         price = float(match.group(1))
                         if price > 0 and price < 1000000:
-                            st.caption(f"🤖 AI found price for {ticker}: ₹{price:.2f}")
+                            #st.caption(f"🤖 AI found price for {ticker}: ₹{price:.2f}")
                             return price
             
             return None
             
         except Exception as e:
-            st.caption(f"⚠️ AI error for {ticker}: {str(e)}")
+            #st.caption(f"⚠️ AI error for {ticker}: {str(e)}")
             return None
     
     def get_historical_price(self, ticker: str, asset_type: str, date: str, fund_name: str = None) -> Optional[float]:
@@ -533,7 +544,7 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
         Stock: yfinance NSE → yfinance BSE → yfinance raw → mftool → AI
         MF: mftool → AI
         """
-        st.caption(f"      📅 Fetching historical prices for {ticker} ({start_date} to {end_date})...")
+        #st.caption(f"      📅 Fetching historical prices for {ticker} ({start_date} to {end_date})...")
         
         try:
             if asset_type == 'stock':
@@ -560,11 +571,11 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                                     'price_date': date.strftime('%Y-%m-%d'),
                                     'volume': int(row['Volume'])
                                 })
-                            st.caption(f"      ✅ Found {len(prices)} historical prices on {suffix_name}")
+                            #st.caption(f"      ✅ Found {len(prices)} historical prices on {suffix_name}")
                             return prices
                         else:
                             # Try broader date range (±7 days) to find closest date
-                            st.caption(f"      🔄 {suffix_name}: No exact date, trying ±7 days...")
+                            #st.caption(f"      🔄 {suffix_name}: No exact date, trying ±7 days...")
                             from datetime import datetime, timedelta
                             import pytz
                             
@@ -600,7 +611,7 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                                 
                                 if closest_date:
                                     closest_price = float(hist_expanded.loc[closest_date, 'Close'])
-                                    st.caption(f"      ✅ {suffix_name}: Found closest price on {closest_date.strftime('%Y-%m-%d')} (±{min_diff} days): ₹{closest_price:,.2f}")
+                                    #st.caption(f"      ✅ {suffix_name}: Found closest price on {closest_date.strftime('%Y-%m-%d')} (±{min_diff} days): ₹{closest_price:,.2f}")
                                     
                                     return [{
                                         'asset_symbol': ticker,
@@ -610,14 +621,17 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                                         'volume': int(hist_expanded.loc[closest_date, 'Volume'])
                                     }]
                                 else:
-                                    pass# No data in expanded range
+                                    pass
+# No data in expanded range
                             else:
-                                pass# No data found
+                                pass
+# No data found
                     except Exception as e:
-                        pass# Suffix failed
+                        pass
+# Suffix failed
                 
                 # Try mftool (in case it's a mutual fund)
-                #st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")
+                ##st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")
                 try:
                     from mftool import Mftool
                     mf = Mftool()
@@ -644,14 +658,17 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                                     'price_date': row['date'].strftime('%Y-%m-%d'),
                                     'volume': None
                                 })
-                            st.caption(f"      ✅ Found {len(prices)} historical NAVs on mftool")
+                            #st.caption(f"      ✅ Found {len(prices)} historical NAVs on mftool")
                             return prices
                         else:
-                            pass#st.caption(f"      ❌ mftool: No data in date range")
+                            pass
+##st.caption(f"      ❌ mftool: No data in date range")
                     else:
-                        pass#st.caption(f"      ❌ mftool: No historical data")
+                        pass
+##st.caption(f"      ❌ mftool: No historical data")
                 except Exception as e:
-                    pass# mftool failed
+                    pass
+# mftool failed
             
             elif asset_type == 'mutual_fund':
                 # Try mftool
@@ -682,14 +699,18 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                                     'price_date': row['date'].strftime('%Y-%m-%d'),
                                     'volume': None
                                 })
-                            pass#st.caption(f"      ✅ Found {len(prices)} historical NAVs")
+                            pass
+##st.caption(f"      ✅ Found {len(prices)} historical NAVs")
                             return prices
                         else:
-                            pass#st.caption(f"      ❌ mftool: No data in date range")
+                            pass
+##st.caption(f"      ❌ mftool: No data in date range")
                     else:
-                        pass#st.caption(f"      ❌ mftool: No historical data")
+                        pass
+##st.caption(f"      ❌ mftool: No historical data")
                 except Exception as e:
-                    pass# mftool failed
+                    pass
+# mftool failed
             
             # AI FALLBACK for historical prices
             # If yfinance/mftool failed, try AI for the target date
@@ -702,12 +723,12 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                     target_date = pd.to_datetime(start_date) + (pd.to_datetime(end_date) - pd.to_datetime(start_date)) / 2
                     target_date_str = target_date.strftime('%Y-%m-%d')
                     
-                    st.caption(f"      🤖 Asking AI for price around {target_date_str}...")
+                    #st.caption(f"      🤖 Asking AI for price around {target_date_str}...")
                     
                     price = self._get_historical_price_from_ai(ticker, asset_type, target_date_str, fund_name)
                     
                     if price:
-                        st.caption(f"      ✅ AI found historical price: ₹{price:,.2f}")
+                        #st.caption(f"      ✅ AI found historical price: ₹{price:,.2f}")
                         return [{
                             'asset_symbol': ticker,
                             'asset_type': asset_type,
@@ -716,7 +737,7 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                             'volume': None
                         }]
                     else:
-                        st.caption(f"      ❌ AI couldn't find historical price for {target_date}")
+                        #st.caption(f"      ❌ AI couldn't find historical price for {target_date}")
                         
                         # Final fallback: Try to get current price for recent dates
                         from datetime import datetime
@@ -725,10 +746,10 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                         
                         # If target date is within last 6 months, try current price
                         if (current_dt - target_dt).days < 180:
-                            st.caption(f"      🔄 Target date is recent, trying current price as fallback...")
+                            #st.caption(f"      🔄 Target date is recent, trying current price as fallback...")
                             current_price = self._get_price_from_ai(ticker, asset_type)
                             if current_price:
-                                st.caption(f"      ✅ Using current price as fallback: ₹{current_price:,.2f}")
+                                #st.caption(f"      ✅ Using current price as fallback: ₹{current_price:,.2f}")
                                 return [{
                                     'asset_symbol': ticker,
                                     'asset_type': asset_type,
@@ -737,9 +758,11 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                                     'volume': None
                                 }]
                 except Exception as e:
-                    pass# AI failedpass
+                    # AI failed
+                    pass
             else:
-               pass # AI not available
+                # AI not available
+                pass
             
             # All methods failed for historical prices
             return []
@@ -838,7 +861,7 @@ If you cannot find it, return: NOT_FOUND"""
                 try:
                     price = float(text)
                     if 0 < price < 1000000:
-                        st.caption(f"🤖 AI found historical price for {ticker} on {target_date}: ₹{price:.2f}")
+                        #st.caption(f"🤖 AI found historical price for {ticker} on {target_date}: ₹{price:.2f}")
                         return price
                 except ValueError:
                     pass
@@ -846,7 +869,7 @@ If you cannot find it, return: NOT_FOUND"""
             return None
             
         except Exception as e:
-            st.caption(f"⚠️ AI historical fetch error: {str(e)}")
+            #st.caption(f"⚠️ AI historical fetch error: {str(e)}")
             return None
     
     def get_pms_aif_price_with_context(
@@ -899,7 +922,7 @@ If you cannot find it, return: NOT_FOUND"""
             return current_price
             
         except Exception as e:
-            st.caption(f"⚠️ PMS/AIF calculation error for {ticker}: {str(e)}")
+            #st.caption(f"⚠️ PMS/AIF calculation error for {ticker}: {str(e)}")
             return transaction_price  # Fallback
     
     def clear_cache(self):

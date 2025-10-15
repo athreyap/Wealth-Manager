@@ -266,7 +266,8 @@ class SharedDatabaseManager:
                 'last_updated': datetime.now().isoformat()
             }).eq('id', stock_id).execute()
         except Exception as e:
-            st.caption(f"⚠️ Update stock price error: {str(e)}")
+            # Update stock price error
+            pass
     
     def get_transactions_by_stock(self, user_id: str, stock_id: str) -> List[Dict[str, Any]]:
         """Get all transactions for a specific stock"""
@@ -274,7 +275,7 @@ class SharedDatabaseManager:
             response = self.supabase.table('user_transactions').select('*').eq('user_id', user_id).eq('stock_id', stock_id).order('transaction_date').execute()
             return response.data
         except Exception as e:
-            st.caption(f"⚠️ Get transactions by stock error: {str(e)}")
+            #st.caption(f"⚠️ Get transactions by stock error: {str(e)}")
             return []
     
     def get_all_unique_stocks(self) -> List[Dict[str, Any]]:
@@ -479,7 +480,8 @@ class SharedDatabaseManager:
                 ).eq('portfolio_id', portfolio_id).eq('stock_id', stock_id).execute()
         
         except Exception as e:
-            st.caption(f"⚠️ Update holdings error: {str(e)}")
+            pass
+#st.caption(f"⚠️ Update holdings error: {str(e)}")
     
     def get_user_holdings(self, user_id: str, portfolio_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get user holdings with stock details (uses view)"""
@@ -561,12 +563,12 @@ class SharedDatabaseManager:
         Used to determine which weeks need historical prices
         """
         try:
-            st.caption(f"      🔍 Querying user_transactions for user {user_id[:8]}...")
+            #st.caption(f"      🔍 Querying user_transactions for user {user_id[:8]}...")
             response = self.supabase.table('user_transactions').select(
                 'iso_year, iso_week'
             ).eq('user_id', user_id).execute()
             
-            st.caption(f"      📊 Found {len(response.data)} transaction records")
+            #st.caption(f"      📊 Found {len(response.data)} transaction records")
             
             # Get unique combinations
             weeks = set()
@@ -574,7 +576,7 @@ class SharedDatabaseManager:
                 if row['iso_year'] and row['iso_week']:
                     weeks.add((row['iso_year'], row['iso_week']))
             
-            st.caption(f"      ✅ Extracted {len(weeks)} unique (year, week) combinations")
+            #st.caption(f"      ✅ Extracted {len(weeks)} unique (year, week) combinations")
             return list(weeks)
         except Exception as e:
             st.error(f"❌ Error getting transaction weeks: {str(e)}")
@@ -592,7 +594,7 @@ class SharedDatabaseManager:
         try:
             from datetime import datetime, timedelta
             
-            st.caption("   🔍 Step 1: Getting user transactions...")
+            #st.caption("   🔍 Step 1: Getting user transactions...")
             
             # Get all transactions with their weeks
             response = self.supabase.table('user_transactions').select(
@@ -600,7 +602,7 @@ class SharedDatabaseManager:
             ).eq('user_id', user_id).execute()
             
             if not response.data:
-                st.caption("   ⚠️ No transactions found")
+                #st.caption("   ⚠️ No transactions found")
                 return []
             
             # Get unique stock IDs and transaction weeks
@@ -614,8 +616,8 @@ class SharedDatabaseManager:
                     transaction_weeks.add((row['iso_year'], row['iso_week']))
             
             stock_ids = list(stock_ids)
-            st.caption(f"   ✅ Found {len(stock_ids)} unique stocks")
-            st.caption(f"   ✅ Found {len(transaction_weeks)} transaction weeks")
+            #st.caption(f"   ✅ Found {len(stock_ids)} unique stocks")
+            #st.caption(f"   ✅ Found {len(transaction_weeks)} transaction weeks")
             
             # Calculate last 52 weeks
             current_date = datetime.now()
@@ -624,7 +626,7 @@ class SharedDatabaseManager:
             current_year, current_week, _ = current_date.isocalendar()
             start_year, start_week, _ = start_date.isocalendar()
             
-            st.caption(f"   📅 Last 52 weeks: {start_year}-W{start_week:02d} to {current_year}-W{current_week:02d}")
+            #st.caption(f"   📅 Last 52 weeks: {start_year}-W{start_week:02d} to {current_year}-W{current_week:02d}")
             
             # Generate all weeks in the last 52 weeks
             last_52_weeks = []
@@ -637,10 +639,10 @@ class SharedDatabaseManager:
             
             # Combine transaction weeks + last 52 weeks (unique)
             all_weeks = list(set(transaction_weeks) | set(last_52_weeks))
-            st.caption(f"   ✅ Total weeks to check: {len(all_weeks)} (transaction weeks + last 52 weeks)")
+            #st.caption(f"   ✅ Total weeks to check: {len(all_weeks)} (transaction weeks + last 52 weeks)")
             
             # Get stock details
-            st.caption("   🔍 Step 2: Getting stock details from stock_master...")
+            #st.caption("   🔍 Step 2: Getting stock details from stock_master...")
             stock_details = {}
             for stock_id in stock_ids:
                 stock_response = self.supabase.table('stock_master').select(
@@ -651,10 +653,10 @@ class SharedDatabaseManager:
                     stock = stock_response.data[0]
                     stock_details[stock_id] = stock['ticker']
             
-            st.caption(f"   ✅ Retrieved details for {len(stock_details)} stocks")
+            #st.caption(f"   ✅ Retrieved details for {len(stock_details)} stocks")
             
             # OPTIMIZATION: Get ALL existing prices for this user's stocks in ONE query
-            st.caption("   🔍 Step 3: Checking existing prices (bulk query)...")
+            #st.caption("   🔍 Step 3: Checking existing prices (bulk query)...")
             
             existing_prices = {}
             if stock_ids:
@@ -668,13 +670,13 @@ class SharedDatabaseManager:
                     key = (row['stock_id'], row['iso_year'], row['iso_week'])
                     existing_prices[key] = True
                 
-                st.caption(f"   ✅ Found {len(existing_prices)} existing price records")
+                #st.caption(f"   ✅ Found {len(existing_prices)} existing price records")
             
             # Check which combinations are missing
             missing_weeks = []
             total_checks = len(stock_ids) * len(all_weeks)
             
-            st.caption(f"   📊 Checking {total_checks} combinations ({len(stock_ids)} stocks × {len(all_weeks)} weeks)")
+            #st.caption(f"   📊 Checking {total_checks} combinations ({len(stock_ids)} stocks × {len(all_weeks)} weeks)")
             
             for stock_id in stock_ids:
                 ticker = stock_details.get(stock_id, 'Unknown')
@@ -689,8 +691,8 @@ class SharedDatabaseManager:
                             'week': week
                         })
             
-            st.caption(f"   ✅ Found {len(missing_weeks)} missing week prices to fetch")
-            st.caption(f"   📈 Includes: Transaction weeks + Last 52 weeks")
+            #st.caption(f"   ✅ Found {len(missing_weeks)} missing week prices to fetch")
+            #st.caption(f"   📈 Includes: Transaction weeks + Last 52 weeks")
             
             return missing_weeks
             

@@ -95,7 +95,7 @@ class PMS_AIF_Calculator:
                 'calculation_method': 'CAGR-based calculation'
             }
             
-            st.caption(f"💰 {ticker}: ₹{investment_amount:,.0f} → ₹{current_value:,.0f} ({percentage_gain:.2f}%) using {cagr_period}")
+            ##st.caption(f"💰 {ticker}: ₹{investment_amount:,.0f} → ₹{current_value:,.0f} ({percentage_gain:.2f}%) using {cagr_period}")
             
             return result
             
@@ -309,7 +309,7 @@ class PMS_AIF_Calculator:
             return weekly_values
             
         except Exception as e:
-            st.caption(f"⚠️ Error generating weekly values: {str(e)}")
+            #st.caption(f"⚠️ Error generating weekly values: {str(e)}")
             return []
     
     def calculate_pms_aif_for_holding(self, holding: Dict[str, Any], transaction: Dict[str, Any]) -> Dict[str, Any]:
@@ -356,7 +356,7 @@ class PMS_AIF_Calculator:
             }
             
         except Exception as e:
-            st.caption(f"⚠️ Error calculating PMS/AIF for {holding['asset_symbol']}: {str(e)}")
+            #st.caption(f"⚠️ Error calculating PMS/AIF for {holding['asset_symbol']}: {str(e)}")
             
             # Return zero-growth fallback
             return {
