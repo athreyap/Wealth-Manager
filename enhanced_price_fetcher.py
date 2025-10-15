@@ -109,7 +109,7 @@ class EnhancedPriceFetcher:
             holdings: List of holding records
             db_manager: Database manager instance
         """
-        st.caption("🔄 Updating live prices for all holdings...")
+        # Silent price update
         
         success_count = 0
         failed_count = 0
@@ -153,14 +153,14 @@ class EnhancedPriceFetcher:
                                 ticker, investment_date, investment_amount, is_aif=(asset_type == 'aif')
                             )
                             current_price = result['current_value'] / float(first_transaction['quantity'])
-                            st.caption(f"      ✅ {asset_type.upper()} {ticker}: ₹{current_price:,.2f}")
+                            #st.caption(f"      ✅ {asset_type.upper()} {ticker}: ₹{current_price:,.2f}")
                 
                 # Update live_price in stock_master
                 if current_price and current_price > 0:
                     db_manager.update_stock_live_price(stock_id, current_price)
                     success_count += 1
                 else:
-                    st.caption(f"      ⚠️ Could not get price for {ticker} ({asset_type})")
+                    # Could not get price
                     failed_count += 1
                     
             except Exception as e:
@@ -206,13 +206,13 @@ class EnhancedPriceFetcher:
             if not hist.empty:
                 price = float(hist['Close'].iloc[-1])
                 if price > 0:
-                    st.caption(f"      ✅ Found on BSE: ₹{price:,.2f}")
+                    # Found on BSE
                     return price, 'yfinance_bse'
         except Exception as e:
-            st.caption(f"      ❌ BSE failed: {str(e)[:50]}")
+            pass# BSE failed
         
         # Method 3: Try without suffix
-        st.caption(f"      [3/5] Trying yfinance without suffix...")
+        # Trying yfinance without suffix
         if ticker.endswith(('.NS', '.BO')):
             try:
                 clean_ticker = ticker.replace('.NS', '').replace('.BO', '')
@@ -222,15 +222,15 @@ class EnhancedPriceFetcher:
                 if not hist.empty:
                     price = float(hist['Close'].iloc[-1])
                     if price > 0:
-                        st.caption(f"      ✅ Found without suffix: ₹{price:,.2f}")
+                        # Found without suffix
                         return price, 'yfinance_raw'
             except Exception as e:
-                st.caption(f"      ❌ Raw ticker failed: {str(e)[:50]}")
+                pass# Raw ticker failed
         else:
-            st.caption(f"      ⏭️ Skipped (no suffix to remove)")
+            pass# Skipped (no suffix to remove)
         
         # Method 4: Try mftool (in case it's a mutual fund)
-        st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")
+        #st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")
         try:
             from mftool import Mftool
             mf = Mftool()
@@ -245,24 +245,24 @@ class EnhancedPriceFetcher:
                     st.caption(f"      ✅ Found as MF on mftool: ₹{price:,.2f}")
                     return price, 'mftool'
         except Exception as e:
-            st.caption(f"      ❌ mftool failed: {str(e)[:50]}")
+            pass# mftool failed
         
         # Method 5: AI Fallback (if available)
-        st.caption(f"      [5/5] Trying AI (OpenAI) as last resort...")
+        # Trying AI (OpenAI) as last resort
         if self.ai_available:
             try:
                 price = self._get_price_from_ai(ticker, 'stock')
                 if price:
-                    st.caption(f"      ✅ AI found price: ₹{price:,.2f}")
+                    # AI found price
                     return price, 'ai_openai'
                 else:
-                    st.caption(f"      ❌ AI couldn't find price")
+                    pass# AI couldn't find price
             except Exception as e:
-                st.caption(f"      ❌ AI failed: {str(e)[:50]}")
+                pass#st.caption(f"      ❌ AI failed: {str(e)[:50]}")
         else:
-            st.caption(f"      ⚠️ AI not available")
+            pass# AI not available
         
-        st.caption(f"      ❌ All methods failed for {ticker}")
+        # All methods failed
         return None, 'not_found'
     
     def _get_mf_price_with_fallback(self, ticker: str, fund_name: str = None) -> tuple:
@@ -271,39 +271,36 @@ class EnhancedPriceFetcher:
         1. mftool (AMFI API)
         2. AI (OpenAI)
         """
-        st.caption(f"      🔄 Fetching MF {ticker} with fallback chain...")
+        # Fetching MF with fallback chain
         
         # Method 1: Try mftool
-        st.caption(f"      [1/2] Trying mftool (AMFI API)...")
+        # Trying mftool (AMFI API)
         try:
             from mftool import Mftool
             mf = Mftool()
             
             # Extract scheme code - remove any prefix
             scheme_code = ticker.replace('MF_', '').replace('mf_', '').strip()
-            st.caption(f"      🔍 Using scheme code: {scheme_code}")
+            # Using scheme code
             
             quote = mf.get_scheme_quote(scheme_code)
             
             if quote and 'nav' in quote:
                 price = float(quote['nav'])
                 if price > 0:
-                    st.caption(f"      ✅ Found on mftool: ₹{price:,.2f}")
-                    st.caption(f"      📊 Scheme: {quote.get('scheme_name', 'N/A')}")
+                    # Found on mftool
                     return price, 'mftool'
                 else:
-                    st.caption(f"      ❌ mftool returned invalid NAV: {price}")
-                    st.caption(f"      💡 Scheme might be closed/merged: {quote.get('scheme_name', 'N/A')}")
+                    # Invalid NAV returned
+                    pass
             else:
-                st.caption(f"      ❌ mftool: No NAV data found for scheme {scheme_code}")
-                st.caption(f"      💡 This scheme code is INVALID or doesn't exist in AMFI database")
-                st.caption(f"      🔧 Consider updating to correct AMFI scheme code")
+                # No NAV data found for scheme
+                pass
         except Exception as e:
-            st.caption(f"      ❌ mftool failed: {str(e)[:100]}")
-            st.caption(f"      💡 Scheme code might be invalid or mftool API issue")
+            pass# mftool failed
         
         # Method 2: AI Fallback with Enhanced Context
-        st.caption(f"      [2/2] Trying AI (OpenAI) with enhanced context...")
+        # Trying AI (OpenAI) with enhanced context
         if self.ai_available:
             try:
                 # Use provided fund name or try to get from context
@@ -311,27 +308,23 @@ class EnhancedPriceFetcher:
                     fund_name = self._get_fund_name_from_context(ticker)
                 
                 if fund_name:
-                    st.caption(f"      🤖 Asking AI for NAV of '{fund_name}' (Code: {ticker})...")
+                    # Asking AI for NAV
                     price = self._get_mf_price_from_ai_enhanced(ticker, fund_name)
                 else:
-                    st.caption(f"      🤖 Asking AI for NAV of scheme {ticker}...")
+                    # Asking AI for NAV of scheme
                     price = self._get_price_from_ai(ticker, 'mutual_fund')
                 
                 if price:
-                    st.caption(f"      ✅ AI found NAV: ₹{price:,.2f}")
+                    # AI found NAV
                     return price, 'ai_openai_enhanced'
                 else:
-                    st.caption(f"      ❌ AI couldn't find NAV")
+                    pass# AI couldn't find NAV
             except Exception as e:
-                st.caption(f"      ❌ AI failed: {str(e)[:100]}")
+                pass# AI failed
         else:
-            st.caption(f"      ⚠️ AI not available (check OpenAI API key in secrets)")
+            pass# AI not available
         
-        st.caption(f"      ❌ All methods failed for MF {ticker}")
-        st.caption(f"      🔧 SUGGESTION: Scheme code {ticker} is invalid")
-        st.caption(f"      📋 To fix: Find correct AMFI scheme code from fund house website")
-        st.caption(f"      🔍 Or use fund name search in mftool.get_scheme_codes()")
-        st.caption(f"      💡 Manual intervention required - check scheme code or add price manually")
+        # All methods failed for MF
         return None, 'not_found'
     
     def _get_fund_name_from_context(self, ticker: str) -> Optional[str]:
@@ -395,7 +388,7 @@ class EnhancedPriceFetcher:
             return None
             
         except Exception as e:
-            st.caption(f"      ❌ Enhanced AI fallback failed: {str(e)[:100]}")
+            # Enhanced AI fallback failed
             return None
     
     def _get_bond_price(self, ticker: str) -> tuple:
@@ -548,7 +541,7 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                 suffixes = ['.NS', '.BO', '']
                 for idx, suffix in enumerate(suffixes, 1):
                     suffix_name = 'NSE' if suffix == '.NS' else 'BSE' if suffix == '.BO' else 'raw'
-                    st.caption(f"      [{idx}/5] Trying yfinance {suffix_name}...")
+                    # Trying yfinance
                     
                     try:
                         test_ticker = f"{ticker}{suffix}" if suffix else ticker
@@ -617,14 +610,14 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                                         'volume': int(hist_expanded.loc[closest_date, 'Volume'])
                                     }]
                                 else:
-                                    st.caption(f"      ❌ {suffix_name}: No data in expanded range")
+                                    pass# No data in expanded range
                             else:
-                                st.caption(f"      ❌ {suffix_name}: No data found")
+                                pass# No data found
                     except Exception as e:
-                        st.caption(f"      ❌ {suffix_name} failed: {str(e)[:50]}")
+                        pass# Suffix failed
                 
                 # Try mftool (in case it's a mutual fund)
-                st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")
+                #st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")
                 try:
                     from mftool import Mftool
                     mf = Mftool()
@@ -654,15 +647,15 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                             st.caption(f"      ✅ Found {len(prices)} historical NAVs on mftool")
                             return prices
                         else:
-                            st.caption(f"      ❌ mftool: No data in date range")
+                            pass#st.caption(f"      ❌ mftool: No data in date range")
                     else:
-                        st.caption(f"      ❌ mftool: No historical data")
+                        pass#st.caption(f"      ❌ mftool: No historical data")
                 except Exception as e:
-                    st.caption(f"      ❌ mftool failed: {str(e)[:50]}")
+                    pass# mftool failed
             
             elif asset_type == 'mutual_fund':
                 # Try mftool
-                st.caption(f"      [1/2] Trying mftool (AMFI API)...")
+                # Trying mftool (AMFI API)
                 try:
                     from mftool import Mftool
                     mf = Mftool()
@@ -689,19 +682,19 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                                     'price_date': row['date'].strftime('%Y-%m-%d'),
                                     'volume': None
                                 })
-                            st.caption(f"      ✅ Found {len(prices)} historical NAVs")
+                            pass#st.caption(f"      ✅ Found {len(prices)} historical NAVs")
                             return prices
                         else:
-                            st.caption(f"      ❌ mftool: No data in date range")
+                            pass#st.caption(f"      ❌ mftool: No data in date range")
                     else:
-                        st.caption(f"      ❌ mftool: No historical data")
+                        pass#st.caption(f"      ❌ mftool: No historical data")
                 except Exception as e:
-                    st.caption(f"      ❌ mftool failed: {str(e)[:50]}")
+                    pass# mftool failed
             
             # AI FALLBACK for historical prices
             # If yfinance/mftool failed, try AI for the target date
             fallback_step = '[5/5]' if asset_type == 'stock' else '[2/2]'
-            st.caption(f"      {fallback_step} Trying AI (OpenAI) as last resort...")
+            # Trying AI (OpenAI) as last resort
             
             if self.ai_available:
                 try:
@@ -744,15 +737,15 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                                     'volume': None
                                 }]
                 except Exception as e:
-                    st.caption(f"      ❌ AI failed: {str(e)[:50]}")
+                    pass# AI failedpass
             else:
-                st.caption(f"      ⚠️ AI not available")
+               pass # AI not available
             
-            st.caption(f"      ❌ All methods failed for historical prices of {ticker}")
+            # All methods failed for historical prices
             return []
             
         except Exception as e:
-            st.caption(f"      ❌ Historical price error for {ticker}: {str(e)[:50]}")
+            # Historical price error
             return []
     
     def _get_historical_price_from_ai(self, ticker: str, asset_type: str, target_date: str, fund_name: str = None) -> Optional[float]:

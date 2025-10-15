@@ -37,7 +37,7 @@ def fetch_yearly_prices_for_all_tickers(holdings: List[Dict], start_date: dateti
             # Update progress
             progress = idx / len(holdings)
             progress_bar.progress(progress)
-            status_text.text(f"📊 Processing {ticker} ({asset_type})... [{idx}/{len(holdings)}]")
+            # Silent processing - no status updates
         
         weekly_prices = {}
         

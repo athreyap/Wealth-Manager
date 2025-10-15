@@ -62,7 +62,7 @@ class PMS_AIF_Calculator:
                 cagr = self.conservative_aif_cagr if is_aif else self.conservative_pms_cagr
                 cagr_period = "Conservative Estimate"
                 source = "Estimated (SEBI data unavailable)"
-                st.caption(f"⚠️ Using conservative {cagr*100:.0f}% CAGR for {ticker}")
+                # Using conservative CAGR
             
             # Calculate current value
             current_value = investment_amount * ((1 + cagr) ** years_elapsed)
@@ -148,7 +148,7 @@ class PMS_AIF_Calculator:
             return None
             
         except Exception as e:
-            st.caption(f"⚠️ SEBI fetch error for {ticker}: {str(e)}")
+            # SEBI fetch error
             return None
     
     def _extract_best_cagr(self, sebi_data: pd.DataFrame) -> Optional[Dict[str, Any]]:
@@ -225,7 +225,7 @@ class PMS_AIF_Calculator:
             return None
             
         except Exception as e:
-            st.caption(f"⚠️ SEBI PMS fetch error: {str(e)}")
+            # SEBI PMS fetch error
             return None
     
     def _fetch_aif_from_sebi(self, ticker: str) -> Optional[pd.DataFrame]:
@@ -248,7 +248,7 @@ class PMS_AIF_Calculator:
             return None
             
         except Exception as e:
-            st.caption(f"⚠️ SEBI AIF fetch error: {str(e)}")
+            # SEBI AIF fetch error
             return None
     
     def _generate_weekly_values(

@@ -423,6 +423,48 @@ def main_dashboard():
     # Auto-fetch missing weeks on login (as per your image)
     # Only fetch once per session to avoid duplicate fetching
     if 'missing_weeks_fetched' not in st.session_state:
+        # Show loading animation during initial setup
+        with st.spinner("🔄 Initializing your portfolio..."):
+            # Create a nice loading container
+            loading_container = st.container()
+            with loading_container:
+                st.markdown("""
+                <div style="text-align: center; padding: 20px; background: linear-gradient(90deg, #f0f2f6, #e1e5e9); border-radius: 10px; margin: 10px 0;">
+                    <div style="font-size: 18px; color: #1f2937; margin-bottom: 10px;">
+                        🚀 Setting up your wealth management dashboard...
+                    </div>
+                    <div style="font-size: 14px; color: #6b7280;">
+                        • Analyzing holdings and transactions<br>
+                        • Fetching latest market prices<br>
+                        • Calculating portfolio performance<br>
+                        • Preparing insights and analytics
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Add a progress bar
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                # Simulate progress steps
+                steps = [
+                    "🔍 Analyzing user holdings and transaction weeks...",
+                    "📊 Processing portfolio data...",
+                    "💰 Fetching latest market prices...",
+                    "📈 Calculating performance metrics...",
+                    "🎯 Preparing personalized insights...",
+                    "✅ Dashboard ready!"
+                ]
+                
+                for i, step in enumerate(steps):
+                    progress_bar.progress((i + 1) / len(steps))
+                    status_text.text(step)
+                    time.sleep(0.5)  # Small delay for visual effect
+                
+                # Clear the loading animation
+                loading_container.empty()
+                progress_bar.empty()
+                status_text.empty()
         # Auto-fetch missing weeks and update prices (silent background process)
             holdings = db.get_user_holdings(user['id'])
             if holdings:
@@ -518,9 +560,20 @@ def main_dashboard():
         if 'chat_history' not in st.session_state:
             st.session_state.chat_history = []
         
-        # Load PDF context from database on first load
-        if 'pdf_context' not in st.session_state or not st.session_state.pdf_context:
-            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+        # Always load PDF context from database to ensure older session PDFs are included
+        st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+        
+        # Show PDF context status and refresh option
+        pdf_count = len(db.get_user_pdfs(user['id']))
+        if pdf_count > 0:
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.caption(f"📚 Loaded {pdf_count} PDFs from database for AI context")
+            with col2:
+                if st.button("🔄", key="refresh_pdf_context", help="Refresh PDF context from database"):
+                    st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+                    st.success("PDF context refreshed!")
+                    st.rerun()
         
         # Get portfolio context (cached)
         holdings = get_cached_holdings(user['id'])

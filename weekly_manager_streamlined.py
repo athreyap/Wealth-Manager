@@ -78,7 +78,7 @@ class StreamlinedWeeklyManager:
                     'message': f'Fetched {total_saved} prices for {len(all_prices)} tickers'
                 }
             else:
-                st.warning("⚠️ No prices fetched")
+                # No prices fetched
                 return {'success': True, 'fetched': 0}
             
         except Exception as e:
@@ -181,7 +181,7 @@ class StreamlinedWeeklyManager:
                         
                         st.caption(f"   ✅ {week_key}: {len(prices)} prices stored successfully")
                     else:
-                        st.caption(f"   ⚠️ {week_key}: No prices fetched (will retry later)")
+                        # No prices fetched for this week
                         failed_weeks.append(week_key)
                 else:
                     st.caption(f"   ⚠️ {week_key}: No ticker info found")
