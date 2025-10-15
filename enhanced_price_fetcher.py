@@ -111,6 +111,10 @@ class EnhancedPriceFetcher:
         """
         st.caption("🔄 Updating live prices for all holdings...")
         
+        success_count = 0
+        failed_count = 0
+        mf_count = 0
+        
         for holding in holdings:
             try:
                 ticker = holding.get('ticker')
@@ -118,19 +122,28 @@ class EnhancedPriceFetcher:
                 stock_id = holding.get('stock_id')
                 
                 if not ticker or not stock_id:
+                    st.caption(f"      ⚠️ Skipping holding with missing ticker or stock_id")
                     continue
                 
                 current_price = None
                 
                 if asset_type == 'stock':
-                    # Get current stock price
-                    current_price, _ = self._get_stock_price_with_fallback(ticker)
+                    st.caption(f"      📊 Fetching stock price for {ticker}...")
+                    current_price, source = self._get_stock_price_with_fallback(ticker)
+                    if current_price:
+                        st.caption(f"      ✅ Stock {ticker}: ₹{current_price:,.2f} (from {source})")
                     
                 elif asset_type == 'mutual_fund':
-                    # Get current MF NAV
-                    current_price, _ = self._get_mf_price_with_fallback(ticker)
+                    mf_count += 1
+                    st.caption(f"      📈 Fetching MF NAV for {ticker}...")
+                    current_price, source = self._get_mf_price_with_fallback(ticker)
+                    if current_price:
+                        st.caption(f"      ✅ MF {ticker}: ₹{current_price:,.2f} (from {source})")
+                    else:
+                        st.caption(f"      ❌ MF {ticker}: Failed to fetch NAV")
                     
                 elif asset_type in ['pms', 'aif']:
+                    st.caption(f"      💰 Calculating {asset_type.upper()} value for {ticker}...")
                     # Calculate PMS/AIF value using CAGR
                     if self.pms_aif_calculator:
                         # Get transaction details for CAGR calculation
@@ -145,16 +158,23 @@ class EnhancedPriceFetcher:
                                 ticker, investment_date, investment_amount, is_aif=(asset_type == 'aif')
                             )
                             current_price = result['current_value'] / float(first_transaction['quantity'])
+                            st.caption(f"      ✅ {asset_type.upper()} {ticker}: ₹{current_price:,.2f}")
                 
                 # Update live_price in stock_master
                 if current_price and current_price > 0:
                     db_manager.update_stock_live_price(stock_id, current_price)
-                    st.caption(f"      ✅ Updated {ticker}: ₹{current_price:,.2f}")
+                    success_count += 1
                 else:
-                    st.caption(f"      ⚠️ Could not get price for {ticker}")
+                    st.caption(f"      ⚠️ Could not get price for {ticker} ({asset_type})")
+                    failed_count += 1
                     
             except Exception as e:
                 st.caption(f"      ❌ Error updating {holding.get('ticker', 'unknown')}: {str(e)}")
+                failed_count += 1
+        
+        # Summary
+        st.caption(f"✅ Price update complete: {success_count} successful, {failed_count} failed")
+        st.caption(f"📈 Mutual Funds processed: {mf_count}")
     
     def _get_stock_price_with_fallback(self, ticker: str) -> tuple:
         """
@@ -265,8 +285,9 @@ class EnhancedPriceFetcher:
             from mftool import Mftool
             mf = Mftool()
             
-            # Extract scheme code
-            scheme_code = ticker.replace('MF_', '') if ticker.startswith('MF_') else ticker
+            # Extract scheme code - remove any prefix
+            scheme_code = ticker.replace('MF_', '').replace('mf_', '').strip()
+            st.caption(f"      🔍 Using scheme code: {scheme_code}")
             
             quote = mf.get_scheme_quote(scheme_code)
             
@@ -274,18 +295,22 @@ class EnhancedPriceFetcher:
                 price = float(quote['nav'])
                 if price > 0:
                     st.caption(f"      ✅ Found on mftool: ₹{price:,.2f}")
+                    st.caption(f"      📊 Scheme: {quote.get('scheme_name', 'N/A')}")
                     return price, 'mftool'
                 else:
                     st.caption(f"      ❌ mftool returned invalid NAV: {price}")
             else:
-                st.caption(f"      ❌ mftool: No NAV data found")
+                st.caption(f"      ❌ mftool: No NAV data found for scheme {scheme_code}")
+                st.caption(f"      💡 Tip: Verify scheme code is correct (6-digit AMFI code)")
         except Exception as e:
-            st.caption(f"      ❌ mftool failed: {str(e)[:50]}")
+            st.caption(f"      ❌ mftool failed: {str(e)[:100]}")
+            st.caption(f"      💡 Scheme code might be invalid or mftool API issue")
         
         # Method 2: AI Fallback
         st.caption(f"      [2/2] Trying AI (OpenAI) as last resort...")
         if self.ai_available:
             try:
+                st.caption(f"      🤖 Asking AI for NAV of scheme {ticker}...")
                 price = self._get_price_from_ai(ticker, 'mutual_fund')
                 if price:
                     st.caption(f"      ✅ AI found NAV: ₹{price:,.2f}")
@@ -293,11 +318,12 @@ class EnhancedPriceFetcher:
                 else:
                     st.caption(f"      ❌ AI couldn't find NAV")
             except Exception as e:
-                st.caption(f"      ❌ AI failed: {str(e)[:50]}")
+                st.caption(f"      ❌ AI failed: {str(e)[:100]}")
         else:
-            st.caption(f"      ⚠️ AI not available")
+            st.caption(f"      ⚠️ AI not available (check OpenAI API key in secrets)")
         
         st.caption(f"      ❌ All methods failed for MF {ticker}")
+        st.caption(f"      💡 Manual intervention required - check scheme code or add price manually")
         return None, 'not_found'
     
     def _get_bond_price(self, ticker: str) -> tuple:
