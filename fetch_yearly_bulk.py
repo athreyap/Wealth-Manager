@@ -24,13 +24,20 @@ def fetch_yearly_prices_for_all_tickers(holdings: List[Dict], start_date: dateti
     """
     all_prices = {}
     
-    st.caption(f"📊 Fetching yearly data for {len(holdings)} holdings...")
-    
-    for idx, holding in enumerate(holdings, 1):
-        ticker = holding['ticker']
-        asset_type = holding.get('asset_type', 'stock')
+    # Show stock market loader
+    with st.spinner("📈 Fetching market data..."):
+        # Create a progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
-        st.caption(f"   [{idx}/{len(holdings)}] Fetching {ticker} ({asset_type})...")
+        for idx, holding in enumerate(holdings, 1):
+            ticker = holding['ticker']
+            asset_type = holding.get('asset_type', 'stock')
+            
+            # Update progress
+            progress = idx / len(holdings)
+            progress_bar.progress(progress)
+            status_text.text(f"📊 Processing {ticker} ({asset_type})... [{idx}/{len(holdings)}]")
         
         weekly_prices = {}
         
@@ -45,7 +52,7 @@ def fetch_yearly_prices_for_all_tickers(holdings: List[Dict], start_date: dateti
                 
                 if hist.empty:
                     # Try BSE
-                    st.caption(f"      Trying BSE...")
+                    # Trying BSE (silent)
                     yf_ticker = f"{ticker}.BO" if not ticker.endswith(('.NS', '.BO')) else ticker.replace('.NS', '.BO')
                     stock = yf.Ticker(yf_ticker)
                     hist = stock.history(start=start_date, end=end_date, interval='1wk')
@@ -59,9 +66,9 @@ def fetch_yearly_prices_for_all_tickers(holdings: List[Dict], start_date: dateti
                             weekly_prices[(year, week)] = price
                     
                     all_prices[ticker] = weekly_prices
-                    st.caption(f"      ✅ Got {len(weekly_prices)} weeks of data")
+                    # Got weekly data (silent)
                 else:
-                    st.caption(f"      ⚠️ No data found")
+                    pass# No data found (silent)
             
             elif asset_type == 'mutual_fund':
                 # MUTUAL FUNDS: Use mftool for current NAV, replicate for weeks
@@ -84,22 +91,23 @@ def fetch_yearly_prices_for_all_tickers(holdings: List[Dict], start_date: dateti
                             temp_date += timedelta(weeks=1)
                         
                         all_prices[ticker] = weekly_prices
-                        st.caption(f"      ✅ MF NAV: ₹{current_nav:,.2f} (applied to all weeks)")
+                        # MF NAV found (silent)
                     else:
-                        st.caption(f"      ⚠️ MF NAV not found")
+                        pass# MF NAV not found (silent)
                 except Exception as e:
-                    st.caption(f"      ❌ MF Error: {str(e)[:50]}")
+                    pass# MF Error (silent)
             
             elif asset_type in ['pms', 'aif']:
+                pass
                 # PMS/AIF: Use CAGR calculation or fixed NAV
                 # For now, skip - these need special handling with transaction context
-                st.caption(f"      ℹ️ PMS/AIF: Requires CAGR calculation (skipped for bulk fetch)")
+                # PMS/AIF: Requires CAGR calculation (skipped for bulk fetch)
             
             else:
-                st.caption(f"      ⚠️ Unknown asset type: {asset_type}")
+                pass# Unknown asset type (silent)
                 
         except Exception as e:
-            st.caption(f"      ❌ Error: {str(e)[:50]}")
+            pass# Error fetching ticker (silent)
     
     return all_prices
 
@@ -113,7 +121,7 @@ def save_yearly_prices_to_db(db, all_prices: Dict[str, Dict[Tuple[int, int], flo
         db: Database manager instance
         all_prices: Dict of {ticker: {(year, week): price}}
     """
-    st.caption(f"💾 Saving prices to database...")
+    # Saving prices to database (silent)
     
     total_saved = 0
     current_prices_updated = 0
@@ -156,7 +164,7 @@ def save_yearly_prices_to_db(db, all_prices: Dict[str, Dict[Tuple[int, int], flo
         if price_records:
             db.save_historical_prices_bulk(price_records)
             total_saved += len(price_records)
-            st.caption(f"   ✅ {ticker}: Saved {len(price_records)} weeks")
+            # Saved weeks (silent)
             
             # Update live_price in stock_master with the most recent week's price
             if latest_price:
@@ -165,11 +173,11 @@ def save_yearly_prices_to_db(db, all_prices: Dict[str, Dict[Tuple[int, int], flo
                         'live_price': latest_price
                     }).eq('id', stock_id).execute()
                     current_prices_updated += 1
-                    st.caption(f"      💰 Updated live price: ₹{latest_price:,.2f}")
+                    # Updated live price (silent)
                 except Exception as e:
-                    st.caption(f"      ⚠️ Could not update live price: {str(e)[:50]}")
+                    pass# Could not update live price (silent)
     
-    st.caption(f"✅ Total saved: {total_saved} price records")
-    st.caption(f"💰 Updated {current_prices_updated} live prices")
+    # Total saved (silent)
+    # Updated live prices (silent)
     return total_saved
 

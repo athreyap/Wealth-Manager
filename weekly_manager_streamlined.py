@@ -60,8 +60,7 @@ class StreamlinedWeeklyManager:
             
             # Fetching last 52 weeks (silent)
             
-            # OPTIMIZED: Fetch entire year for all holdings at once
-            st.subheader("⚡ Bulk Yearly Fetch (1 API call per holding)")
+            # OPTIMIZED: Fetch entire year for all holdings at once (silent)
             all_prices = fetch_yearly_prices_for_all_tickers(unique_holdings_list, start_date, current_date)
             
             # Save to database
