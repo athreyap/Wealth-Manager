@@ -88,16 +88,56 @@ class SharedDatabaseManager:
     def save_pdf(self, user_id: str, filename: str, pdf_text: str, ai_summary: str = None) -> Dict[str, Any]:
         """Save PDF content to database"""
         try:
+            # Clean text to remove null bytes and other problematic characters
+            cleaned_text = self._clean_text_for_db(pdf_text) if pdf_text else ""
+            cleaned_summary = self._clean_text_for_db(ai_summary) if ai_summary else None
+            
             response = self.supabase.table('user_pdfs').insert({
                 'user_id': user_id,
                 'filename': filename,
-                'pdf_text': pdf_text,
-                'ai_summary': ai_summary
+                'pdf_text': cleaned_text,
+                'ai_summary': cleaned_summary
             }).execute()
             
             return {'success': True, 'pdf': response.data[0]}
         except Exception as e:
             return {'success': False, 'error': str(e)}
+    
+    def _clean_text_for_db(self, text: str) -> str:
+        """Clean text to remove characters that PostgreSQL can't handle"""
+        if not text:
+            return ""
+        
+        import re
+        
+        # Convert to string if not already
+        text = str(text)
+        
+        # Remove ALL null bytes and variants
+        text = text.replace('\x00', ' ')
+        text = text.replace('\u0000', ' ')
+        text = text.replace('\\x00', ' ')
+        text = text.replace('\\u0000', ' ')
+        
+        # Remove all control characters except newline and tab
+        # This removes characters from 0x00-0x1F except \n (0x0A) and \t (0x09)
+        text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', ' ', text)
+        
+        # Remove any remaining non-printable characters
+        text = ''.join(char if char.isprintable() or char in '\n\t\r ' else ' ' for char in text)
+        
+        # Normalize multiple spaces
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Trim
+        text = text.strip()
+        
+        # Limit length to avoid database issues (max 1MB of text)
+        max_length = 1000000
+        if len(text) > max_length:
+            text = text[:max_length] + "... [truncated]"
+        
+        return text
     
     def get_user_pdfs(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all PDFs for a user"""

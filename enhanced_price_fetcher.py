@@ -40,7 +40,7 @@ class EnhancedPriceFetcher:
             self.pms_aif_calculator = None
             st.caption(f"⚠️ PMS/AIF calculator not available: {str(e)}")
     
-    def get_current_price(self, ticker: str, asset_type: str) -> Optional[float]:
+    def get_current_price(self, ticker: str, asset_type: str, fund_name: str = None) -> Optional[float]:
         """
         Get current price with complete fallback chain
         
@@ -65,7 +65,7 @@ class EnhancedPriceFetcher:
         if asset_type == 'stock':
             price, source = self._get_stock_price_with_fallback(ticker)
         elif asset_type == 'mutual_fund':
-            price, source = self._get_mf_price_with_fallback(ticker)
+            price, source = self._get_mf_price_with_fallback(ticker, fund_name)
         elif asset_type in ['pms', 'aif']:
             # For PMS/AIF, calculate using CAGR if context provided
             if hasattr(self, 'pms_aif_calculator') and self.pms_aif_calculator:
@@ -136,7 +136,9 @@ class EnhancedPriceFetcher:
                 elif asset_type == 'mutual_fund':
                     mf_count += 1
                     st.caption(f"      📈 Fetching MF NAV for {ticker}...")
-                    current_price, source = self._get_mf_price_with_fallback(ticker)
+                    # Get fund name for enhanced AI fallback
+                    fund_name = holding.get('stock_name', '')
+                    current_price, source = self._get_mf_price_with_fallback(ticker, fund_name)
                     if current_price:
                         st.caption(f"      ✅ MF {ticker}: ₹{current_price:,.2f} (from {source})")
                     else:
@@ -271,7 +273,7 @@ class EnhancedPriceFetcher:
         st.caption(f"      ❌ All methods failed for {ticker}")
         return None, 'not_found'
     
-    def _get_mf_price_with_fallback(self, ticker: str) -> tuple:
+    def _get_mf_price_with_fallback(self, ticker: str, fund_name: str = None) -> tuple:
         """
         Mutual Fund price with fallback:
         1. mftool (AMFI API)
@@ -299,22 +301,33 @@ class EnhancedPriceFetcher:
                     return price, 'mftool'
                 else:
                     st.caption(f"      ❌ mftool returned invalid NAV: {price}")
+                    st.caption(f"      💡 Scheme might be closed/merged: {quote.get('scheme_name', 'N/A')}")
             else:
                 st.caption(f"      ❌ mftool: No NAV data found for scheme {scheme_code}")
-                st.caption(f"      💡 Tip: Verify scheme code is correct (6-digit AMFI code)")
+                st.caption(f"      💡 This scheme code is INVALID or doesn't exist in AMFI database")
+                st.caption(f"      🔧 Consider updating to correct AMFI scheme code")
         except Exception as e:
             st.caption(f"      ❌ mftool failed: {str(e)[:100]}")
             st.caption(f"      💡 Scheme code might be invalid or mftool API issue")
         
-        # Method 2: AI Fallback
-        st.caption(f"      [2/2] Trying AI (OpenAI) as last resort...")
+        # Method 2: AI Fallback with Enhanced Context
+        st.caption(f"      [2/2] Trying AI (OpenAI) with enhanced context...")
         if self.ai_available:
             try:
-                st.caption(f"      🤖 Asking AI for NAV of scheme {ticker}...")
-                price = self._get_price_from_ai(ticker, 'mutual_fund')
+                # Use provided fund name or try to get from context
+                if not fund_name:
+                    fund_name = self._get_fund_name_from_context(ticker)
+                
+                if fund_name:
+                    st.caption(f"      🤖 Asking AI for NAV of '{fund_name}' (Code: {ticker})...")
+                    price = self._get_mf_price_from_ai_enhanced(ticker, fund_name)
+                else:
+                    st.caption(f"      🤖 Asking AI for NAV of scheme {ticker}...")
+                    price = self._get_price_from_ai(ticker, 'mutual_fund')
+                
                 if price:
                     st.caption(f"      ✅ AI found NAV: ₹{price:,.2f}")
-                    return price, 'ai_openai'
+                    return price, 'ai_openai_enhanced'
                 else:
                     st.caption(f"      ❌ AI couldn't find NAV")
             except Exception as e:
@@ -323,8 +336,75 @@ class EnhancedPriceFetcher:
             st.caption(f"      ⚠️ AI not available (check OpenAI API key in secrets)")
         
         st.caption(f"      ❌ All methods failed for MF {ticker}")
+        st.caption(f"      🔧 SUGGESTION: Scheme code {ticker} is invalid")
+        st.caption(f"      📋 To fix: Find correct AMFI scheme code from fund house website")
+        st.caption(f"      🔍 Or use fund name search in mftool.get_scheme_codes()")
         st.caption(f"      💡 Manual intervention required - check scheme code or add price manually")
         return None, 'not_found'
+    
+    def _get_fund_name_from_context(self, ticker: str) -> Optional[str]:
+        """Get fund name from database context if available"""
+        try:
+            # Try to get fund name from database or cache
+            # This would need to be passed from the calling context
+            # For now, return None and let the caller provide context
+            return None
+        except:
+            return None
+    
+    def _get_mf_price_from_ai_enhanced(self, ticker: str, fund_name: str) -> Optional[float]:
+        """
+        Enhanced AI fallback for mutual funds using both code and name
+        """
+        try:
+            # Enhanced prompt with both scheme code and fund name
+            prompt = f"""
+            Find the current NAV (Net Asset Value) for this Indian mutual fund:
+            
+            Scheme Code: {ticker}
+            Fund Name: {fund_name}
+            
+            Please search for the current NAV of this mutual fund. Look for:
+            1. The exact fund name or similar variations
+            2. The scheme code if available
+            3. Current NAV as of today or most recent date
+            
+            IMPORTANT:
+            - Return ONLY the NAV value as a number (e.g., 45.67)
+            - Do not include currency symbols, text, or explanations
+            - If you cannot find the exact fund, try similar fund names
+            - Focus on Indian mutual funds and AMFI data
+            
+            Examples of what to return:
+            - 45.67
+            - 123.45
+            - 78.90
+            
+            Current NAV: """
+            
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=50,
+                temperature=0.1,
+                timeout=30
+            )
+            
+            ai_response = response.choices[0].message.content.strip()
+            
+            # Extract number from response
+            import re
+            numbers = re.findall(r'\d+\.?\d*', ai_response)
+            if numbers:
+                price = float(numbers[0])
+                if 0.1 <= price <= 10000:  # Reasonable NAV range
+                    return price
+            
+            return None
+            
+        except Exception as e:
+            st.caption(f"      ❌ Enhanced AI fallback failed: {str(e)[:100]}")
+            return None
     
     def _get_bond_price(self, ticker: str) -> tuple:
         """Bond price fetching (limited sources)"""
@@ -449,20 +529,20 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
             st.caption(f"⚠️ AI error for {ticker}: {str(e)}")
             return None
     
-    def get_historical_price(self, ticker: str, asset_type: str, date: str) -> Optional[float]:
+    def get_historical_price(self, ticker: str, asset_type: str, date: str, fund_name: str = None) -> Optional[float]:
         """
         Get historical price for a specific date
         """
         try:
             # Use the existing method but with a single day range
-            prices = self.get_historical_prices(ticker, asset_type, date, date)
+            prices = self.get_historical_prices(ticker, asset_type, date, date, fund_name)
             if prices and len(prices) > 0:
                 return prices[0].get('price')
             return None
         except Exception as e:
             return None
     
-    def get_historical_prices(self, ticker: str, asset_type: str, start_date: str, end_date: str) -> list:
+    def get_historical_prices(self, ticker: str, asset_type: str, start_date: str, end_date: str, fund_name: str = None) -> list:
         """
         Get historical prices with complete fallback chain:
         Stock: yfinance NSE → yfinance BSE → yfinance raw → mftool → AI
@@ -639,7 +719,7 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
                     
                     st.caption(f"      🤖 Asking AI for price around {target_date_str}...")
                     
-                    price = self._get_historical_price_from_ai(ticker, asset_type, target_date_str)
+                    price = self._get_historical_price_from_ai(ticker, asset_type, target_date_str, fund_name)
                     
                     if price:
                         st.caption(f"      ✅ AI found historical price: ₹{price:,.2f}")
@@ -683,7 +763,7 @@ If you cannot find the NAV, return exactly: NOT_FOUND"""
             st.caption(f"      ❌ Historical price error for {ticker}: {str(e)[:50]}")
             return []
     
-    def _get_historical_price_from_ai(self, ticker: str, asset_type: str, target_date: str) -> Optional[float]:
+    def _get_historical_price_from_ai(self, ticker: str, asset_type: str, target_date: str, fund_name: str = None) -> Optional[float]:
         """
         Get historical price from AI for a specific date
         
@@ -722,7 +802,23 @@ If you cannot find it, return: NOT_FOUND"""
                 system_prompt = """You are a mutual fund expert with access to historical NAV data.
 Your task is to find the NAV for a specific date and return ONLY the numeric value."""
                 
-                user_prompt = f"""Find the NAV (Net Asset Value) for mutual fund code {ticker} on date: {target_date}
+                # Enhanced prompt with fund name if available
+                if fund_name:
+                    user_prompt = f"""Find the NAV (Net Asset Value) for this Indian mutual fund on date: {target_date}
+
+Fund Details:
+- Scheme Code: {ticker}
+- Fund Name: {fund_name}
+
+Search for the exact fund name or similar variations. If exact date not available, find the nearest available date within the same week.
+
+Return format: Just the number, nothing else.
+Example: 250.75
+
+Do NOT include currency symbols, words, or explanations.
+If you cannot find it, return: NOT_FOUND"""
+                else:
+                    user_prompt = f"""Find the NAV (Net Asset Value) for mutual fund code {ticker} on date: {target_date}
 
 If exact date not available, find the nearest available date within the same week.
 

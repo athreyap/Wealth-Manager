@@ -260,10 +260,13 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                         
                         # Fetch historical price for the transaction date
                         try:
+                            # Get fund name for enhanced AI fallback
+                            fund_name = row.get('stock_name', ticker) if asset_type == 'mutual_fund' else None
                             historical_price = price_fetcher.get_historical_price(
                                 normalized_ticker, 
                                 asset_type, 
-                                trans_date
+                                trans_date,
+                                fund_name
                             )
                             if historical_price and historical_price > 0:
                                 price = historical_price
@@ -677,6 +680,58 @@ def main_dashboard():
                 st.session_state.chat_history = []
                 st.rerun()
         
+        # MF Scheme Code Helper
+        st.markdown("---")
+        with st.expander("🔧 Mutual Fund Scheme Code Helper", expanded=False):
+            st.markdown("**Find correct AMFI scheme codes for your mutual funds:**")
+            
+            if st.button("🔍 Check Invalid MF Scheme Codes", key="check_mf_codes"):
+                with st.spinner("Checking mutual fund scheme codes..."):
+                    try:
+                        from mftool import Mftool
+                        mf = Mftool()
+                        
+                        # Get user's holdings
+                        holdings = get_cached_holdings(user['id'])
+                        mf_holdings = [h for h in holdings if h.get('asset_type') == 'mutual_fund']
+                        
+                        invalid_codes = []
+                        valid_codes = []
+                        
+                        for holding in mf_holdings:
+                            ticker = holding.get('ticker', '')
+                            quote = mf.get_scheme_quote(ticker)
+                            
+                            if quote and quote.get('nav') and float(quote.get('nav', 0)) > 0:
+                                valid_codes.append({
+                                    'ticker': ticker,
+                                    'name': quote.get('scheme_name', 'N/A'),
+                                    'nav': quote.get('nav', 'N/A')
+                                })
+                            else:
+                                invalid_codes.append(ticker)
+                        
+                        if invalid_codes:
+                            st.warning(f"❌ **Invalid scheme codes found:** {', '.join(invalid_codes)}")
+                            st.info("💡 **Solution:** Update these codes with correct AMFI scheme codes from fund house websites")
+                            
+                            # Show search help
+                            st.markdown("**🔍 How to find correct scheme codes:**")
+                            st.markdown("1. Visit the fund house website (HDFC, ICICI, SBI, etc.)")
+                            st.markdown("2. Look for 'Direct Plan - Growth' option")
+                            st.markdown("3. Copy the 6-digit AMFI scheme code")
+                            st.markdown("4. Update your CSV file with correct codes")
+                        else:
+                            st.success("✅ All mutual fund scheme codes are valid!")
+                        
+                        if valid_codes:
+                            st.markdown("**✅ Valid scheme codes:**")
+                            for code in valid_codes[:5]:  # Show first 5
+                                st.caption(f"• {code['ticker']}: {code['name'][:50]}... (NAV: ₹{code['nav']})")
+                            
+                    except Exception as e:
+                        st.error(f"Error checking scheme codes: {str(e)}")
+        
         # PDF Library Section
         st.markdown("---")
         st.markdown("**📚 Your PDF Library**")
@@ -724,62 +779,124 @@ def main_dashboard():
                         import pdfplumber
                         openai.api_key = st.secrets["api_keys"]["open_ai"]
                         
-                        # Extract text from PDF
+                        # Enhanced PDF extraction with tables and structure
                         pdf_text = ""
+                        tables_found = []
+                        page_count = 0
+                        
+                        st.info("🔍 Extracting content from PDF (text, tables, structure)...")
+                        
                         with pdfplumber.open(uploaded_pdf) as pdf:
-                            for page in pdf.pages:
+                            page_count = len(pdf.pages)
+                            for page_num, page in enumerate(pdf.pages, 1):
+                                # Extract text
                                 page_text = page.extract_text()
                                 if page_text:
-                                    pdf_text += page_text + "\n"
+                                    pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+                                
+                                # Extract tables
+                                tables = page.extract_tables()
+                                if tables:
+                                    for table_idx, table in enumerate(tables, 1):
+                                        tables_found.append({
+                                            'page': page_num,
+                                            'table_num': table_idx,
+                                            'rows': len(table),
+                                            'cols': len(table[0]) if table else 0
+                                        })
                         
                         if pdf_text:
-                            # Truncate if too long (OpenAI has token limits)
-                            pdf_text_for_ai = pdf_text[:8000] + "..." if len(pdf_text) > 8000 else pdf_text
+                            st.success(f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, found {len(tables_found)} tables")
                             
-                            # Create analysis prompt
+                            # Truncate if too long (OpenAI has token limits)
+                            pdf_text_for_ai = pdf_text[:10000] + "..." if len(pdf_text) > 10000 else pdf_text
+                            
+                            # Prepare tables summary
+                            tables_summary = ""
+                            if tables_found:
+                                tables_summary = f"\n📊 Tables Found: {len(tables_found)}\n"
+                                for t in tables_found[:5]:  # Show first 5 tables
+                                    tables_summary += f"  • Page {t['page']}: {t['rows']} rows × {t['cols']} columns\n"
+                            
+                            # Enhanced analysis prompt with structured output
                             analysis_prompt = f"""
-                            Portfolio Context:
+                            Analyze this PDF document comprehensively for portfolio management insights.
+                            
+                            📄 DOCUMENT INFO:
+                            - Filename: {uploaded_pdf.name}
+                            - Pages: {page_count}
+                            {tables_summary}
+                            
+                            💼 USER'S PORTFOLIO:
                             {portfolio_summary}
                             
-                            PDF Content to Analyze:
+                            📝 PDF CONTENT:
                             {pdf_text_for_ai}
                             
-                            Please analyze this PDF document in the context of the user's portfolio. Provide:
-                            1. Key insights relevant to their investments
-                            2. Any recommendations based on the document
-                            3. How this information might affect their portfolio strategy
-                            4. Specific actionable items if any
+                            Please provide a STRUCTURED analysis using this format:
                             
-                            Keep the response concise but informative, and use emojis appropriately.
+                            📋 **DOCUMENT SUMMARY**
+                            [2-3 sentences describing what this PDF contains]
+                            
+                            📊 **KEY METRICS & DATA**
+                            [Extract specific numbers, percentages, dates, returns mentioned]
+                            • Metric: Value
+                            • Metric: Value
+                            
+                            📈 **INSIGHTS FROM CHARTS/TABLES**
+                            [Describe trends, patterns, or comparisons shown in tables/graphs]
+                            
+                            💡 **MAIN FINDINGS**
+                            [3-5 key takeaways from the document]
+                            
+                            🎯 **PORTFOLIO RELEVANCE**
+                            [How this information relates to the user's current holdings]
+                            
+                            ⚡ **RECOMMENDED ACTIONS**
+                            [Specific, actionable next steps - if applicable]
+                            
+                            Use actual numbers and be specific. Focus on actionable insights.
                             """
+                            
+                            st.info("🤖 AI analyzing PDF content...")
                             
                             response = openai.chat.completions.create(
                                 model="gpt-4o-mini",
                                 messages=[
-                                    {"role": "system", "content": "You are a professional portfolio analyst. Analyze PDF documents in the context of the user's portfolio and provide actionable insights. Be specific and practical."},
+                                    {"role": "system", "content": "You are an expert financial analyst specializing in portfolio management. Extract structured insights from documents including text, tables, and charts. Focus on numbers, trends, and actionable recommendations. Use clear formatting with emojis."},
                                     {"role": "user", "content": analysis_prompt}
                                 ],
                                 temperature=0.7,
-                                max_tokens=500
+                                max_tokens=1500
                             )
                             
                             ai_analysis = response.choices[0].message.content
+                            
+                            # Clean PDF text before saving (remove null bytes and control characters)
+                            import re
+                            cleaned_pdf_text = pdf_text.replace('\x00', ' ').replace('\u0000', ' ')
+                            cleaned_pdf_text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', ' ', cleaned_pdf_text)
+                            cleaned_pdf_text = ''.join(char if char.isprintable() or char in '\n\t\r ' else ' ' for char in cleaned_pdf_text)
+                            cleaned_pdf_text = re.sub(r'\s+', ' ', cleaned_pdf_text).strip()
                             
                             # Save PDF to database
                             save_result = db.save_pdf(
                                 user_id=user['id'],
                                 filename=uploaded_pdf.name,
-                                pdf_text=pdf_text,  # Store full text
+                                pdf_text=cleaned_pdf_text,  # Store cleaned text
                                 ai_summary=ai_analysis
                             )
                             
                             if save_result['success']:
                                 st.success(f"✅ PDF '{uploaded_pdf.name}' saved to database!")
+                                # Refresh the page to update the PDF library count
+                                st.rerun()
                             else:
                                 st.warning(f"⚠️ PDF analyzed but not saved: {save_result.get('error', 'Unknown error')}")
                             
-                            # Display AI analysis
-                            st.markdown(f'<div class="ai-response-box"><strong>📄 PDF Analysis:</strong><br><br>{ai_analysis}</div>', unsafe_allow_html=True)
+                            # Display enhanced AI analysis with better formatting
+                            st.markdown("### 📄 Comprehensive PDF Analysis")
+                            st.markdown(f'<div class="ai-response-box">{ai_analysis}</div>', unsafe_allow_html=True)
                             
                             # Store in chat history
                             st.session_state.chat_history.append({
@@ -1435,8 +1552,8 @@ def charts_page():
     
     user = st.session_state.user
     
-    # Get holdings without logging
-    holdings = db.get_user_holdings_silent(user['id'])
+    # Use cached holdings data (same as portfolio overview)
+    holdings = get_cached_holdings(user['id'])
     
     if not holdings:
         st.info("No holdings found. Upload transaction files to see charts.")
