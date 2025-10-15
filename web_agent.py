@@ -424,22 +424,22 @@ def main_dashboard():
     # Only fetch once per session to avoid duplicate fetching
     if 'missing_weeks_fetched' not in st.session_state:
         # Auto-fetch missing weeks and update prices (silent background process)
-        holdings = db.get_user_holdings(user['id'])
-        if holdings:
+            holdings = db.get_user_holdings(user['id'])
+            if holdings:
             # Auto-fetch missing weeks (silent)
-            result = weekly_manager.fetch_missing_weeks_till_current(user['id'])
-            
+                result = weekly_manager.fetch_missing_weeks_till_current(user['id'])
+                
             # Auto-update live prices (silent)
-            try:
-                st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ Price update: {str(e)[:50]}")
-        else:
-            result = {'success': True, 'fetched': 0}
+                try:
+                    st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
+                except Exception as e:
+                    st.sidebar.warning(f"⚠️ Price update: {str(e)[:50]}")
+            else:
+                result = {'success': True, 'fetched': 0}
         
         # Mark as fetched to prevent re-fetching on page navigation
-        st.session_state.missing_weeks_fetched = True
-        st.session_state.last_fetch_time = datetime.now()
+            st.session_state.missing_weeks_fetched = True
+            st.session_state.last_fetch_time = datetime.now()
     else:
         # Already fetched this session
         if 'last_fetch_time' in st.session_state:
@@ -528,61 +528,8 @@ def main_dashboard():
         # Get cached portfolio summary
         portfolio_summary = get_cached_portfolio_summary(holdings)
         
-        # Quick insights buttons with better styling
-        st.markdown("**💬 Ask about your portfolio**")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("📊 Health", key="sidebar_health", use_container_width=True, help="Get portfolio health analysis"):
-                with st.spinner("🔍 Analyzing..."):
-                    try:
-                        import openai
-                        openai.api_key = st.secrets["api_keys"]["open_ai"]
-                        
-                        response = openai.chat.completions.create(
-                            model="gpt-4o-mini",
-                            messages=[
-                                {"role": "system", "content": "You are a professional portfolio analyst. Provide a comprehensive health check with specific insights about performance, risk, and recommendations. Use emojis and be encouraging but realistic. Give detailed analysis."},
-                                {"role": "user", "content": f"{portfolio_summary}"}
-                            ],
-                            temperature=0.7,
-                            max_tokens=800
-                        )
-                        
-                        ai_response = response.choices[0].message.content
-                        # Display full response with scrollable container
-                        st.markdown(f'<div class="ai-response-box" style="max-height: 500px; overflow-y: auto;">{ai_response}</div>', unsafe_allow_html=True)
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)[:50]}")
-        
-        with col2:
-            if st.button("💡 Tips", key="sidebar_tips", use_container_width=True, help="Get actionable investment tips"):
-                with st.spinner("💭 Thinking..."):
-                    try:
-                        import openai
-                        openai.api_key = st.secrets["api_keys"]["open_ai"]
-                        
-                        response = openai.chat.completions.create(
-                            model="gpt-4o-mini",
-                            messages=[
-                                {"role": "system", "content": "You are a smart portfolio advisor. Give 3-5 specific, actionable tips based on the portfolio data. Be practical and include emojis. Focus on optimization opportunities. Provide complete, detailed recommendations."},
-                                {"role": "user", "content": f"{portfolio_summary}"}
-                            ],
-                            temperature=0.7,
-                            max_tokens=800
-                        )
-                        
-                        ai_response = response.choices[0].message.content
-                        # Display full response with scrollable container
-                        st.markdown(f'<div class="ai-response-box" style="max-height: 500px; overflow-y: auto;">{ai_response}</div>', unsafe_allow_html=True)
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)[:50]}")
-        
-        with col3:
-            if st.button("📄 PDF", key="sidebar_pdf", use_container_width=True, help="Upload PDF for analysis"):
-                st.info("📄 Use the PDF upload section below to analyze documents!")
+        # Get user PDFs for the session
+        user_pdfs = db.get_user_pdfs(user['id'])
         
         # Enhanced chat interface
         st.markdown("---")
@@ -601,10 +548,16 @@ def main_dashboard():
                     import openai
                     openai.api_key = st.secrets["api_keys"]["open_ai"]
                     
-                    # Include PDF context if available
+                    # Include PDF context from database if available
                     pdf_context_text = ""
                     if st.session_state.pdf_context:
-                        pdf_context_text = f"\n\n📄 Uploaded Document Context:\n{st.session_state.pdf_context[:2000]}..."  # Limit PDF context
+                        pdf_context_text = f"\n\n📄 Available Documents Context:\n{st.session_state.pdf_context[:3000]}..."  # Increased limit for better context
+                    
+                    # Also include recent PDF summaries for better context
+                    recent_pdfs = db.get_user_pdfs(user['id'])
+                    if recent_pdfs:
+                        pdf_summaries = "\n".join([f"• {pdf['filename']}: {pdf.get('ai_summary', 'No summary')[:200]}..." for pdf in recent_pdfs[:3]])
+                        pdf_context_text += f"\n\n📚 Recent Document Summaries:\n{pdf_summaries}"
                     
                     full_context = f"Portfolio Data:\n{portfolio_summary}{pdf_context_text}\n\nUser Question: {user_question}"
                     
@@ -697,30 +650,88 @@ def main_dashboard():
                     except Exception as e:
                         st.error(f"Error checking scheme codes: {str(e)}")
         
-        # PDF Library Section
+        # PDF Library Section - Enhanced
         st.markdown("---")
         st.markdown("**📚 Your PDF Library**")
         
-        user_pdfs = db.get_user_pdfs(user['id'])
         if user_pdfs:
             st.caption(f"📄 {len(user_pdfs)} document(s) stored")
             
-            with st.expander(f"View Saved PDFs ({len(user_pdfs)})", expanded=False):
-                for pdf in user_pdfs:
-                    col1, col2 = st.columns([3, 1])
+            # Show PDFs in a more accessible way
+            for pdf in user_pdfs:
+                with st.expander(f"📄 {pdf['filename'][:30]}{'...' if len(pdf['filename']) > 30 else ''}", expanded=False):
+                    col1, col2 = st.columns([4, 1])
                     with col1:
-                        st.markdown(f"**📄 {pdf['filename']}**")
-                        st.caption(f"Uploaded: {pdf['uploaded_at'][:10]}")
+                        st.markdown(f"**File:** {pdf['filename']}")
+                        st.caption(f"📅 Uploaded: {pdf['uploaded_at'][:10]}")
+                        
                         if pdf.get('ai_summary'):
-                            with st.expander("View AI Summary", expanded=False):
-                                st.info(pdf['ai_summary'])
+                            st.markdown("**🤖 AI Summary:**")
+                            st.info(pdf['ai_summary'])
+                        
+                        # Add button to use this PDF for analysis
+                        if st.button(f"🔍 Analyze {pdf['filename'][:20]}...", key=f"analyze_{pdf['id']}", help="Use this PDF for AI analysis"):
+                            try:
+                                import openai
+                                openai.api_key = st.secrets["api_keys"]["open_ai"]
+                                
+                                # Get portfolio context
+                                portfolio_summary = get_cached_portfolio_summary(holdings)
+                                
+                                # Analyze the stored PDF
+                                analysis_prompt = f"""
+                                Analyze this stored PDF document for portfolio management insights.
+                                
+                                📄 DOCUMENT INFO:
+                                - Filename: {pdf['filename']}
+                                - Uploaded: {pdf['uploaded_at'][:10]}
+                                
+                                💼 USER'S PORTFOLIO:
+                                {portfolio_summary}
+                                
+                                📝 PDF CONTENT:
+                                {pdf.get('pdf_text', '')[:5000]}...
+                                
+                                🤖 PREVIOUS AI SUMMARY:
+                                {pdf.get('ai_summary', 'No previous summary')}
+                                
+                                Please provide a fresh analysis focusing on:
+                                1. Key insights from the document
+                                2. How it relates to the user's current portfolio
+                                3. Actionable recommendations
+                                4. Any new information not covered in the previous summary
+                                
+                                Format your response clearly with headings and bullet points.
+                                """
+                                
+                                response = openai.chat.completions.create(
+                                    model="gpt-4o-mini",
+                                    messages=[{"role": "user", "content": analysis_prompt}],
+                                    temperature=0.7,
+                                    max_tokens=1000
+                                )
+                                
+                                fresh_analysis = response.choices[0].message.content
+                                
+                                # Display the fresh analysis
+                                st.markdown("### 🔍 Fresh PDF Analysis")
+                                st.markdown(f'<div class="ai-response-box">{fresh_analysis}</div>', unsafe_allow_html=True)
+                                
+                                # Store in chat history
+                                st.session_state.chat_history.append({
+                                    "q": f"Analyze stored PDF: {pdf['filename']}", 
+                                    "a": fresh_analysis
+                                })
+                                
+                            except Exception as e:
+                                st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
+                    
                     with col2:
                         if st.button("🗑️", key=f"del_{pdf['id']}", help="Delete this PDF"):
                             if db.delete_pdf(pdf['id']):
                                 st.success("Deleted!")
                                 st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
                                 st.rerun()
-                    st.markdown("---")
         else:
             st.caption("No PDFs uploaded yet")
         
@@ -2661,31 +2672,58 @@ def charts_page():
         
         # Prepare comparison data
         comparison_data = []
+        if not holdings:
+            st.warning("⚠️ No holdings found. Please upload transaction files first.")
+            return
+        
         for holding in holdings:
-            current_price = holding.get('current_price')
-            if current_price is None or current_price == 0:
-                current_price = holding.get('average_price', 0)
-            current_value = float(current_price) * float(holding['total_quantity'])
-            investment = float(holding['total_quantity']) * float(holding['average_price'])
-            pnl = current_value - investment
-            pnl_pct = (pnl / investment * 100) if investment > 0 else 0
-            
-            stars, grade, rating = get_performance_rating(pnl_pct)
-            
-            comparison_data.append({
-                'ticker': holding['ticker'],
-                'stock_name': holding['stock_name'],
-                'asset_type': holding.get('asset_type', 'Unknown'),
-                'channel': holding.get('channel', 'Direct'),
-                'investment': investment,
-                'current_value': current_value,
-                'pnl': pnl,
-                'pnl_pct': pnl_pct,
-                'rating': stars,
-                'grade': grade
-            })
+            try:
+                current_price = holding.get('current_price')
+                if current_price is None or current_price == 0:
+                    current_price = holding.get('average_price', 0)
+                
+                # Ensure we have valid numeric values
+                if current_price is None or current_price == 0:
+                    continue  # Skip holdings with no price data
+                
+                current_value = float(current_price) * float(holding['total_quantity'])
+                investment = float(holding['total_quantity']) * float(holding['average_price'])
+                pnl = current_value - investment
+                pnl_pct = (pnl / investment * 100) if investment > 0 else 0
+                
+                stars, grade, rating = get_performance_rating(pnl_pct)
+                
+                comparison_data.append({
+                    'ticker': holding['ticker'],
+                    'stock_name': holding['stock_name'],
+                    'asset_type': holding.get('asset_type', 'Unknown'),
+                    'channel': holding.get('channel', 'Unknown'),
+                    'sector': holding.get('sector', 'Unknown'),
+                    'investment': investment,
+                    'current_value': current_value,
+                    'pnl': pnl,
+                    'pnl_pct': pnl_pct,
+                    'rating': stars,
+                    'grade': grade
+                })
+            except (ValueError, TypeError) as e:
+                st.warning(f"⚠️ Skipping holding {holding.get('ticker', 'Unknown')}: Invalid data")
+                continue
         
         df_compare = pd.DataFrame(comparison_data)
+        
+        if df_compare.empty:
+            st.warning("⚠️ No valid holdings data available for comparison. Please check if prices are being fetched correctly.")
+            # Debug information
+            st.caption(f"Debug: Found {len(holdings)} holdings, but none had valid price data")
+            if holdings:
+                st.caption("Sample holding data:")
+                sample_holding = holdings[0]
+                st.caption(f"Ticker: {sample_holding.get('ticker')}, Current Price: {sample_holding.get('current_price')}, Average Price: {sample_holding.get('average_price')}")
+            return
+        
+        # Debug information
+        st.caption(f"✅ Loaded {len(df_compare)} holdings for comparison")
         
         # Enhanced Comparison Options with Better UI
         st.markdown("### 📊 Select Comparison Type")
@@ -3013,29 +3051,105 @@ def charts_page():
                 
                 holding_comparison = df_compare[df_compare['ticker'].isin(selected_tickers)]
                 
-                # Performance comparison chart
+                # Historical Performance Line Chart
                 fig_holdings = go.Figure()
                 
-                fig_holdings.add_trace(go.Bar(
-                    name='P&L %',
-                    x=holding_comparison['ticker'],
-                    y=holding_comparison['pnl_pct'],
-                    marker_color=holding_comparison['pnl_pct'].apply(
-                        lambda x: 'green' if x >= 0 else 'red'
-                    ),
-                    text=holding_comparison['pnl_pct'].round(2),
-                    texttemplate='%{text}%',
-                    textposition='outside'
-                ))
+                # Get historical data for each selected holding
+                for _, holding in holding_comparison.iterrows():
+                    ticker = holding['ticker']
+                    stock_name = holding['stock_name']
+                    
+                    # Get stock_id from the original holdings data
+                    stock_id = None
+                    for h in holdings:
+                        if h['ticker'] == ticker:
+                            stock_id = h['stock_id']
+                            break
+                    
+                    if not stock_id:
+                        continue  # Skip if stock_id not found
+                    
+                    # Get historical prices for this stock_id
+                    historical_prices = db.get_historical_prices_for_stock_silent(stock_id)
+                    
+                    # Debug information
+                    st.caption(f"Debug: {ticker} - Found {len(historical_prices) if historical_prices else 0} historical prices")
+                    
+                    if historical_prices and len(historical_prices) > 0:
+                        # Sort by date
+                        historical_prices.sort(key=lambda x: x['price_date'])
+                        
+                        # Prepare data for line chart
+                        dates = [price['price_date'] for price in historical_prices]
+                        prices = [price['price'] for price in historical_prices]
+                        
+                        # Calculate percentage change from first price
+                        if len(prices) > 0:
+                            first_price = prices[0]
+                            pct_changes = [((price - first_price) / first_price) * 100 for price in prices]
+                            
+                            # Add line trace
+                            fig_holdings.add_trace(go.Scatter(
+                                x=dates,
+                                y=pct_changes,
+                                mode='lines+markers',
+                                name=f"{ticker} - {stock_name[:20]}{'...' if len(stock_name) > 20 else ''}",
+                                line=dict(width=2),
+                                marker=dict(size=4),
+                                hovertemplate=f"<b>{ticker}</b><br>" +
+                                            "Date: %{x}<br>" +
+                                            "Price: ₹%{customdata:.2f}<br>" +
+                                            "Change: %{y:.2f}%<br>" +
+                                            "<extra></extra>",
+                                customdata=prices
+                            ))
                 
+                # Update layout for line chart
                 fig_holdings.update_layout(
-                    title="Holdings Performance Comparison",
-                    xaxis_title="Ticker",
-                    yaxis_title="P&L %",
-                    height=400
+                    title="📈 Historical Performance Comparison - Selected Holdings",
+                    xaxis_title="Date",
+                    yaxis_title="Price Change (%)",
+                    height=500,
+                    hovermode='x unified',
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    ),
+                    xaxis=dict(
+                        showgrid=True,
+                        gridwidth=1,
+                        gridcolor='rgba(128,128,128,0.2)'
+                    ),
+                    yaxis=dict(
+                        showgrid=True,
+                        gridwidth=1,
+                        gridcolor='rgba(128,128,128,0.2)',
+                        zeroline=True,
+                        zerolinecolor='rgba(128,128,128,0.5)'
+                    )
                 )
                 
-                st.plotly_chart(fig_holdings, use_container_width=True)
+                if fig_holdings.data:
+                    st.plotly_chart(fig_holdings, use_container_width=True)
+                else:
+                    st.warning("⚠️ No historical data available for selected holdings. This could be because:")
+                    st.caption("• Historical prices haven't been fetched yet")
+                    st.caption("• The holdings don't have price history in the database")
+                    st.caption("• Try running 'Update Prices' to fetch historical data")
+                
+                # Add summary statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("📊 Holdings Selected", len(selected_holdings))
+                with col2:
+                    avg_performance = holding_comparison['pnl_pct'].mean()
+                    st.metric("📈 Average Performance", f"{avg_performance:+.1f}%")
+                with col3:
+                    best_performer = holding_comparison.loc[holding_comparison['pnl_pct'].idxmax()]
+                    st.metric("🏆 Best Performer", f"{best_performer['ticker']} ({best_performer['pnl_pct']:+.1f}%)")
                 
                 # Detailed comparison table
                 comparison_table = holding_comparison[['ticker', 'stock_name', 'rating', 'grade', 'investment', 'current_value', 'pnl', 'pnl_pct']]
