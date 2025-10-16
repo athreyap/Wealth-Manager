@@ -278,7 +278,8 @@ def login_page():
         password = st.text_input("Password", type="password", key="login_password")
         
         if st.button("Login"):
-            user = db.login_user(username, password)
+            # Convert username to lowercase for case-insensitive login
+            user = db.login_user(username.lower(), password)
             if user:
                 st.session_state.user = user
                 st.success("Login successful!")
@@ -309,7 +310,8 @@ def login_page():
             elif not username:
                 st.error("Username is required")
             else:
-                result = db.register_user(username, password, full_name, email)
+                # Convert username to lowercase for case-insensitive registration
+                result = db.register_user(username.lower(), password, full_name, email)
                 if result['success']:
                     user = result['user']
                     st.session_state.user = user
