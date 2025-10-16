@@ -18,7 +18,41 @@ import time
 import warnings
 import functools
 from typing import Dict, List, Any, Optional
+import sys
+import os
 warnings.filterwarnings('ignore')
+
+# Add current directory to Python path for AI agents import
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+# Also add the current working directory as a fallback
+cwd = os.getcwd()
+if cwd not in sys.path:
+    sys.path.insert(0, cwd)
+
+# Import AI agents
+AI_AGENTS_AVAILABLE = False
+try:
+    from ai_agents.agent_manager import get_agent_manager, run_ai_analysis, get_ai_recommendations, get_ai_alerts
+    from ai_agents.ai_file_processor import AIFileProcessor
+    AI_AGENTS_AVAILABLE = True
+    import logging
+    logging.info("✅ AI Agents imported successfully")
+except ImportError as e:
+    import logging
+    logging.error(f"❌ AI Agents import failed: {e}")
+    # Try to show more helpful error in Streamlit
+    if 'ai_agents' in str(e):
+        logging.error(f"   Current directory: {os.getcwd()}")
+        logging.error(f"   ai_agents exists: {os.path.exists('ai_agents')}")
+        logging.error(f"   ai_agents/__init__.py exists: {os.path.exists('ai_agents/__init__.py')}")
+        logging.error(f"   Python path: {sys.path[:5]}")
+        logging.error(f"   File directory: {os.path.dirname(os.path.abspath(__file__))}")
+except Exception as e:
+    import logging
+    logging.error(f"❌ AI Agents error: {e}")
 
 # Performance optimization decorators
 @st.cache_data(ttl=300)  # Cache for 5 minutes
@@ -627,15 +661,24 @@ def main_dashboard():
                 st.rerun()
     
     # Navigation
-    page = st.sidebar.radio(
-        "Choose a page:",
-        [
+    navigation_options = [
             "🏠 Portfolio Overview",
             "📊 P&L Analysis",
-            "📈 Charts & Analytics",
-            "🤖 AI Assistant",
+        "📈 Charts & Analytics",
+        "🤖 AI Assistant",
             "📁 Upload More Files"
         ]
+    
+    # Add AI Insights page if agents are available
+    if AI_AGENTS_AVAILABLE:
+        navigation_options.insert(-1, "🧠 AI Insights")
+    
+    # Add User Profile page
+    navigation_options.insert(-1, "👤 Profile Settings")
+    
+    page = st.sidebar.radio(
+        "Choose a page:",
+        navigation_options
     )
     
     st.sidebar.markdown("---")
@@ -665,6 +708,10 @@ def main_dashboard():
         charts_page()
     elif page == "🤖 AI Assistant":
         ai_assistant_page()
+    elif page == "🧠 AI Insights" and AI_AGENTS_AVAILABLE:
+        ai_insights_page()
+    elif page == "👤 Profile Settings":
+        user_profile_page()
     elif page == "📁 Upload More Files":
         upload_files_page()
 
@@ -725,6 +772,27 @@ def portfolio_overview_page():
     st.header("🏠 Portfolio Overview")
     
     user = st.session_state.user
+    
+    # Add AI-powered proactive alerts if available
+    if AI_AGENTS_AVAILABLE:
+        try:
+            alerts = get_ai_alerts()
+            if alerts:
+                st.markdown("### 🚨 AI Alerts")
+                for alert in alerts[:3]:  # Show top 3 alerts
+                    severity_emoji = {
+                        "high": "🔴",
+                        "medium": "🟡",
+                        "low": "🟢"
+                    }.get(alert.get("severity", "low"), "🟢")
+                    
+                    with st.expander(f"{severity_emoji} {alert.get('title', 'Alert')}", expanded=(alert.get("severity") == "high")):
+                        st.markdown(f"**{alert.get('description', 'No description')}**")
+                        st.markdown(f"*Recommendation: {alert.get('recommendation', 'No recommendation')}*")
+                st.markdown("---")
+        except Exception as e:
+            # Silently handle errors to not disrupt the main page
+            pass
     
     # Add smart manual update prices button
     col1, col2, col3 = st.columns([1, 1, 4])
@@ -3517,8 +3585,824 @@ Use emojis appropriately and be encouraging but data-focused."""},
     st.caption("• 'Should I rebalance my portfolio?'")
     st.caption("• 'Upload a research report for analysis'")
 
+def ai_insights_page():
+    """AI Insights page with agent analysis and recommendations"""
+    st.header("🧠 AI Insights")
+    st.caption("Powered by specialized AI agents for portfolio analysis")
+    
+    if not AI_AGENTS_AVAILABLE:
+        st.error("AI agents are not available. Please check the installation.")
+        return
+    
+    # Get user data
+    user = st.session_state.user
+    db = st.session_state.db
+    
+    # Get holdings data
+    holdings = get_cached_holdings(user['id'])
+    
+    if not holdings:
+        st.info("No holdings found. Upload transaction files to see AI insights.")
+        return
+    
+    # Get PDF context for enhanced AI analysis
+    pdf_context = db.get_all_pdfs_text(user['id'])
+    
+    # Create tabs for different AI insights
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "🎯 Smart Recommendations", 
+        "📊 Portfolio Analysis", 
+        "🔍 Market Insights",
+        "🔮 Scenario Analysis",
+        "💡 Investment Recommendations",
+        "⚙️ Agent Status"
+    ])
+    
+    with tab1:
+        st.subheader("🎯 Smart Recommendations")
+        
+        # Run AI analysis
+        with st.spinner("🤖 AI agents analyzing your portfolio..."):
+            try:
+                # Get user profile from database
+                user_profile_data = db.get_user_profile(user['id'])
+                user_profile = {
+                    "user_id": user['id'],
+                    "risk_tolerance": user_profile_data.get('risk_tolerance', 'moderate'),
+                    "goals": user_profile_data.get('investment_goals', []),
+                    "rebalancing_frequency": user_profile_data.get('rebalancing_frequency', 'quarterly'),
+                    "tax_optimization": user_profile_data.get('tax_optimization', True),
+                    "esg_investing": user_profile_data.get('esg_investing', False),
+                    "international_exposure": user_profile_data.get('international_exposure', 20)
+                }
+                
+                # Run comprehensive AI analysis with PDF insights
+                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context)
+                
+                if "error" in analysis_result:
+                    st.error(f"Analysis error: {analysis_result['error']}")
+                else:
+                    # Display top recommendations
+                    recommendations = get_ai_recommendations(5)
+                    
+                    if recommendations:
+                        st.success(f"✅ Found {len(recommendations)} AI recommendations")
+                        
+                        for i, rec in enumerate(recommendations, 1):
+                            severity_color = {
+                                "high": "🔴",
+                                "medium": "🟡", 
+                                "low": "🟢"
+                            }.get(rec.get("severity", "low"), "🟢")
+                            
+                            with st.expander(f"{severity_color} {rec.get('title', 'Recommendation')}", expanded=(rec.get("severity") == "high")):
+                                st.markdown(f"**Description:** {rec.get('description', 'No description')}")
+                                st.markdown(f"**Recommendation:** {rec.get('recommendation', 'No recommendation')}")
+                                
+                                if rec.get("data"):
+                                    st.json(rec["data"])
+                    else:
+                        st.info("🎉 No urgent recommendations found. Your portfolio looks well-balanced!")
+                        
+            except Exception as e:
+                st.error(f"Error running AI analysis: {str(e)}")
+    
+    with tab2:
+        st.subheader("📊 Portfolio Analysis")
+        
+        try:
+            # Run fresh portfolio analysis
+            with st.spinner("🤖 AI analyzing your portfolio..."):
+                user_profile_data = db.get_user_profile(user['id'])
+                user_profile = {
+                    "user_id": user['id'],
+                    "risk_tolerance": user_profile_data.get('risk_tolerance', 'moderate'),
+                    "goals": user_profile_data.get('investment_goals', []),
+                    "rebalancing_frequency": user_profile_data.get('rebalancing_frequency', 'quarterly'),
+                    "tax_optimization": user_profile_data.get('tax_optimization', True),
+                    "esg_investing": user_profile_data.get('esg_investing', False),
+                    "international_exposure": user_profile_data.get('international_exposure', 20)
+                }
+                
+                # Get portfolio-specific insights from the analysis with PDF context
+                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context)
+                
+                if analysis_result and "portfolio_insights" in analysis_result:
+                    # Get portfolio insights directly
+                    portfolio_insights = analysis_result["portfolio_insights"]
+                    
+                    if portfolio_insights:
+                        st.success(f"📈 Portfolio analysis complete - {len(portfolio_insights)} insights found")
+                        
+                        for insight in portfolio_insights:
+                            severity_emoji = {
+                                "high": "🚨",
+                                "medium": "⚠️",
+                                "low": "ℹ️"
+                            }.get(insight.get("severity", "low"), "ℹ️")
+                            
+                            st.markdown(f"**{severity_emoji} {insight.get('title', 'Insight')}**")
+                            st.markdown(f"{insight.get('description', 'No description')}")
+                            st.markdown(f"*Recommendation: {insight.get('recommendation', 'No recommendation')}*")
+                            
+                            # Show additional data if available
+                            if insight.get("data"):
+                                with st.expander("📊 Detailed Analysis", expanded=False):
+                                    st.json(insight["data"])
+                            
+                            st.markdown("---")
+                    else:
+                        st.info("No specific portfolio insights at this time.")
+                else:
+                    st.info("No specific portfolio insights at this time.")
+                
+        except Exception as e:
+            st.error(f"Error getting portfolio insights: {str(e)}")
+    
+    with tab3:
+        st.subheader("🔍 Market Insights")
+        
+        try:
+            # Run fresh market analysis
+            with st.spinner("🤖 AI analyzing market conditions..."):
+                user_profile_data = db.get_user_profile(user['id'])
+                user_profile = {
+                    "user_id": user['id'],
+                    "risk_tolerance": user_profile_data.get('risk_tolerance', 'moderate'),
+                    "goals": user_profile_data.get('investment_goals', []),
+                    "rebalancing_frequency": user_profile_data.get('rebalancing_frequency', 'quarterly'),
+                    "tax_optimization": user_profile_data.get('tax_optimization', True),
+                    "esg_investing": user_profile_data.get('esg_investing', False),
+                    "international_exposure": user_profile_data.get('international_exposure', 20)
+                }
+                
+                # Get market-specific insights from the analysis with PDF context
+                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context)
+                
+                if analysis_result and "market_insights" in analysis_result:
+                    # Get market insights directly
+                    market_insights = analysis_result["market_insights"]
+                    
+                    if market_insights:
+                        st.success(f"📊 Market analysis complete - {len(market_insights)} insights found")
+                        
+                        for insight in market_insights:
+                            severity_emoji = {
+                                "high": "🚨",
+                                "medium": "⚠️",
+                                "low": "ℹ️"
+                            }.get(insight.get("severity", "low"), "ℹ️")
+                            
+                            st.markdown(f"**{severity_emoji} {insight.get('title', 'Market Insight')}**")
+                            st.markdown(f"{insight.get('description', 'No description')}")
+                            st.markdown(f"*Recommendation: {insight.get('recommendation', 'No recommendation')}*")
+                            
+                            # Show additional data if available
+                            if insight.get("data"):
+                                with st.expander("📊 Market Data", expanded=False):
+                                    st.json(insight["data"])
+                            
+                            st.markdown("---")
+                    else:
+                        st.info("No specific market insights at this time.")
+                else:
+                    st.info("No specific market insights at this time.")
+                
+        except Exception as e:
+            st.error(f"Error getting market insights: {str(e)}")
+    
+    with tab4:
+        st.subheader("🔮 Scenario Analysis")
+        
+        try:
+            # Run fresh scenario analysis
+            with st.spinner("🤖 AI running scenario analysis..."):
+                user_profile_data = db.get_user_profile(user['id'])
+                user_profile = {
+                    "user_id": user['id'],
+                    "risk_tolerance": user_profile_data.get('risk_tolerance', 'moderate'),
+                    "goals": user_profile_data.get('investment_goals', []),
+                    "rebalancing_frequency": user_profile_data.get('rebalancing_frequency', 'quarterly'),
+                    "tax_optimization": user_profile_data.get('tax_optimization', True),
+                    "esg_investing": user_profile_data.get('esg_investing', False),
+                    "international_exposure": user_profile_data.get('international_exposure', 20)
+                }
+                
+                # Get scenario-specific insights from the analysis with PDF context
+                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context)
+                
+                if analysis_result and "scenario_insights" in analysis_result:
+                    # Get scenario insights directly
+                    scenario_insights = analysis_result["scenario_insights"]
+                    
+                    if scenario_insights:
+                        st.success(f"🔮 Scenario analysis complete - {len(scenario_insights)} scenarios analyzed")
+                        
+                        # Group scenarios by type
+                        scenario_types = {}
+                        for insight in scenario_insights:
+                            scenario_type = insight.get("type", "unknown")
+                            if scenario_type not in scenario_types:
+                                scenario_types[scenario_type] = []
+                            scenario_types[scenario_type].append(insight)
+                        
+                        # Display scenarios by type
+                        for scenario_type, scenarios in scenario_types.items():
+                            st.markdown(f"**{scenario_type.replace('_', ' ').title()} Scenarios:**")
+                            
+                            for scenario in scenarios:
+                                severity_emoji = {
+                                    "high": "🚨",
+                                    "medium": "⚠️",
+                                    "low": "ℹ️"
+                                }.get(scenario.get("severity", "low"), "ℹ️")
+                                
+                                with st.expander(f"{severity_emoji} {scenario.get('title', 'Scenario')}", expanded=(scenario.get("severity") == "high")):
+                                    st.markdown(f"**{scenario.get('description', 'No description')}**")
+                                    st.markdown(f"*Recommendation: {scenario.get('recommendation', 'No recommendation')}*")
+                                    
+                                    if scenario.get("data"):
+                                        st.json(scenario["data"])
+                                st.markdown("---")
+                    else:
+                        st.info("No scenario analysis available at this time.")
+                else:
+                    st.info("No scenario analysis available at this time.")
+                
+        except Exception as e:
+            st.error(f"Error getting scenario insights: {str(e)}")
+    
+    with tab5:
+        st.subheader("💡 Investment Recommendations")
+        st.caption("AI-powered suggestions for new holdings to complement your portfolio")
+        
+        try:
+            # Run fresh analysis to get recommendations
+            with st.spinner("🤖 AI analyzing investment opportunities..."):
+                user_profile_data = db.get_user_profile(user['id'])
+                user_profile = {
+                    "user_id": user['id'],
+                    "risk_tolerance": user_profile_data.get('risk_tolerance', 'moderate'),
+                    "goals": user_profile_data.get('investment_goals', []),
+                    "rebalancing_frequency": user_profile_data.get('rebalancing_frequency', 'quarterly'),
+                    "tax_optimization": user_profile_data.get('tax_optimization', True),
+                    "esg_investing": user_profile_data.get('esg_investing', False),
+                    "international_exposure": user_profile_data.get('international_exposure', 20)
+                }
+                
+                # Get investment recommendations from analysis with PDF insights  
+                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context)
+                
+                if analysis_result and "investment_recommendations" in analysis_result:
+                    # Get investment recommendations directly
+                    investment_recommendations = analysis_result["investment_recommendations"]
+                    
+                    if investment_recommendations:
+                        st.success(f"💼 Found {len(investment_recommendations)} investment opportunities for you")
+                        
+                        # Group recommendations by type
+                        recommendation_types = {
+                            "sell_recommendation": {"title": "🔴 SELL Recommendations", "icon": "📉", "recommendations": [], "color": "red"},
+                            "stock_recommendation": {"title": "📈 BUY: Stock Recommendations", "icon": "🏢", "recommendations": [], "color": "green"},
+                            "mutual_fund_recommendation": {"title": "📊 BUY: Mutual Fund Recommendations", "icon": "💰", "recommendations": [], "color": "green"},
+                            "pms_recommendation": {"title": "🎯 BUY: PMS Recommendations", "icon": "💼", "recommendations": [], "color": "green"},
+                            "bond_recommendation": {"title": "🔐 BUY: Bond Recommendations", "icon": "📜", "recommendations": [], "color": "green"},
+                            "diversification_opportunity": {"title": "🌈 Diversification Opportunities", "icon": "🎨", "recommendations": [], "color": "blue"},
+                            "investment_recommendation": {"title": "💡 General Investment Opportunities", "icon": "✨", "recommendations": [], "color": "blue"}
+                        }
+                        
+                        for rec in investment_recommendations:
+                            rec_type = rec.get("type", "investment_recommendation")
+                            if rec_type in recommendation_types:
+                                recommendation_types[rec_type]["recommendations"].append(rec)
+                        
+                        # Display recommendations by type
+                        for rec_type, rec_group in recommendation_types.items():
+                            if rec_group["recommendations"]:
+                                st.markdown(f"### {rec_group['icon']} {rec_group['title']}")
+                                
+                                for rec in rec_group["recommendations"]:
+                                    # Create expandable card for each recommendation
+                                    with st.expander(f"**{rec.get('title', 'Investment Opportunity')}**", expanded=True):
+                                        # Severity indicator
+                                        severity_emoji = {
+                                            "high": "🔥 High Priority",
+                                            "medium": "⚡ Medium Priority", 
+                                            "low": "💡 Consider"
+                                        }.get(rec.get("severity", "medium"), "💡 Consider")
+                                        
+                                        st.markdown(f"**Priority:** {severity_emoji}")
+                                        
+                                        # Description
+                                        st.markdown("**📝 Why This Investment:**")
+                                        st.markdown(rec.get('description', 'No description available'))
+                                        
+                                        # Recommendation/Action
+                                        st.markdown("**🎯 Action Plan:**")
+                                        st.markdown(rec.get('recommendation', 'No recommendation available'))
+                                        
+                                        # Investment details
+                                        if rec.get('data'):
+                                            data = rec['data']
+                                            
+                                            # Check if this is a SELL recommendation
+                                            if data.get('action') == 'SELL':
+                                                st.markdown("**🔴 SELL Details:**")
+                                                
+                                                col1, col2, col3 = st.columns(3)
+                                                
+                                                with col1:
+                                                    if data.get('ticker'):
+                                                        st.metric("Ticker to Sell", data['ticker'])
+                                                    if data.get('current_holding_quantity'):
+                                                        st.metric("Current Holding", f"{data['current_holding_quantity']:,} shares")
+                                                
+                                                with col2:
+                                                    if data.get('suggested_sell_quantity'):
+                                                        st.metric("Sell Quantity", f"{data['suggested_sell_quantity']:,} shares", 
+                                                                delta=f"-{data.get('percentage_to_sell', 0)}%", delta_color="inverse")
+                                                    if data.get('funds_freed'):
+                                                        st.metric("Funds Freed", f"₹{data['funds_freed']:,.0f}")
+                                                
+                                                with col3:
+                                                    if data.get('value_after_sale') is not None:
+                                                        st.metric("Value After Sale", f"₹{data['value_after_sale']:,.0f}")
+                                                    if data.get('current_loss'):
+                                                        st.metric("Current Loss", f"₹{abs(data['current_loss']):,.0f}", 
+                                                                delta=f"{data.get('loss_percentage', 0):.1f}%", delta_color="inverse")
+                                                
+                                                # Reason for sell
+                                                if data.get('reason'):
+                                                    st.error(f"⚠️ **Reason to Sell:** {data['reason']}")
+                                                
+                                                # Rebalancing strategy
+                                                if data.get('rebalancing_strategy'):
+                                                    st.success(f"♻️ **Rebalancing Plan:** {data['rebalancing_strategy']}")
+                                                
+                                                # Tax consideration
+                                                if data.get('tax_consideration'):
+                                                    st.info(f"💰 **Tax Impact:** {data['tax_consideration']}")
+                                                
+                                                # Why now
+                                                if data.get('why_now'):
+                                                    st.warning(f"⏰ **Why Sell Now:** {data['why_now']}")
+                                            
+                                            else:
+                                                # BUY recommendation details
+                                                st.markdown("**📊 Investment Details:**")
+                                                
+                                                col1, col2, col3 = st.columns(3)
+                                                
+                                                with col1:
+                                                    if data.get('ticker'):
+                                                        st.metric("Ticker", data['ticker'])
+                                                    if data.get('asset_type'):
+                                                        st.markdown(f"**Asset Type:** {data['asset_type']}")
+                                                
+                                                with col2:
+                                                    if data.get('sector'):
+                                                        st.markdown(f"**Sector:** {data['sector']}")
+                                                    if data.get('risk_level'):
+                                                        st.markdown(f"**Risk Level:** {data['risk_level']}")
+                                                
+                                                with col3:
+                                                    if data.get('suggested_allocation_percentage'):
+                                                        st.metric("Suggested Allocation", f"{data['suggested_allocation_percentage']}%")
+                                                    if data.get('expected_return'):
+                                                        st.markdown(f"**Expected Return:** {data['expected_return']}")
+                                                
+                                                # Investment thesis
+                                                if data.get('investment_thesis'):
+                                                    st.info(f"💡 **Investment Thesis:** {data['investment_thesis']}")
+                                                
+                                                # Why now
+                                                if data.get('why_now'):
+                                                    st.success(f"⏰ **Why Now:** {data['why_now']}")
+                                                
+                                                # Suggested amount
+                                                if data.get('suggested_amount'):
+                                                    st.markdown(f"**💵 Suggested Investment:** ₹{data['suggested_amount']:,.0f}")
+                                        
+                                        st.markdown("---")
+                                
+                                st.markdown("")  # Add spacing between groups
+                    else:
+                        st.info("No specific investment recommendations at this time. Your portfolio appears well-balanced!")
+                else:
+                    st.info("No investment recommendations available. Run analysis to generate recommendations.")
+                
+        except Exception as e:
+            st.error(f"Error getting investment recommendations: {str(e)}")
+    
+    with tab6:
+        st.subheader("⚙️ Agent Status")
+        
+        try:
+            # Get agent status
+            agent_manager = get_agent_manager()
+            agent_status = agent_manager.get_agent_status()
+            
+            st.markdown("**🤖 AI Agent Status:**")
+            
+            for agent_id, status in agent_status.items():
+                status_emoji = {
+                    "active": "🟢",
+                    "analyzing": "🟡",
+                    "error": "🔴",
+                    "initialized": "🔵"
+                }.get(status.get("status", "unknown"), "⚪")
+                
+                st.markdown(f"**{status_emoji} {status.get('agent_name', agent_id)}**")
+                st.markdown(f"Status: {status.get('status', 'unknown')}")
+                st.markdown(f"Last Update: {status.get('last_update', 'never')}")
+                
+                if status.get("capabilities"):
+                    st.markdown(f"Capabilities: {', '.join(status['capabilities'])}")
+                
+                st.markdown("---")
+            
+            # Show analysis summary
+            summary = agent_manager.get_recommendations_summary()
+            if summary and "summary" in summary:
+                st.markdown("**📊 Analysis Summary:**")
+                st.json(summary["summary"])
+            
+            # Show performance metrics
+            try:
+                from ai_agents.performance_optimizer import performance_optimizer
+                perf_report = performance_optimizer.get_performance_report()
+                
+                st.markdown("**⚡ Performance Metrics:**")
+                cache_stats = perf_report["cache_statistics"]
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Cache Hit Rate", f"{cache_stats['hit_rate']:.1f}%")
+                with col2:
+                    st.metric("Avg Response Time", f"{cache_stats['avg_response_time']:.2f}s")
+                with col3:
+                    st.metric("Cache Size", cache_stats['cache_size'])
+                with col4:
+                    st.metric("Total Requests", cache_stats['total_requests'])
+                
+                # Show optimization recommendations
+                recommendations = perf_report.get("recommendations", [])
+                if recommendations:
+                    st.markdown("**💡 Optimization Recommendations:**")
+                    for rec in recommendations:
+                        st.info(rec)
+                        
+            except ImportError:
+                pass
+                
+        except Exception as e:
+            st.error(f"Error getting agent status: {str(e)}")
+    
+    # Add refresh button
+    if st.button("🔄 Refresh AI Analysis"):
+        # Clear any cached analysis
+        if 'agent_manager' in st.session_state:
+            del st.session_state.agent_manager
+        st.rerun()
+
+def user_profile_page():
+    """User Profile Settings page"""
+    st.header("👤 Profile Settings")
+    st.caption("Manage your investment preferences and goals")
+    
+    user = st.session_state.user
+    db = st.session_state.db
+    
+    # Get current user profile
+    user_profile = db.get_user_profile(user['id'])
+    if not user_profile:
+        st.error("Could not load user profile")
+        return
+    
+    # Add info box at the top explaining personalization
+    st.info("""
+    💡 **Your profile directly impacts AI recommendations!** 
+    
+    The AI analyzes your risk tolerance, goals, and preferences to suggest investments that match YOUR needs.
+    Update your settings below to get more personalized recommendations.
+    """)
+    
+    # Create tabs for different settings
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "🎯 Investment Goals",
+        "⚖️ Risk Preferences", 
+        "📊 Profile Summary",
+        "🤖 How AI Uses Your Profile"
+    ])
+    
+    with tab1:
+        st.subheader("🎯 Investment Goals")
+        st.caption("Set and manage your financial goals")
+        
+        # Display current goals
+        current_goals = user_profile.get('investment_goals', [])
+        
+        if current_goals:
+            st.markdown("**Current Goals:**")
+            for i, goal in enumerate(current_goals):
+                with st.expander(f"Goal {i+1}: {goal.get('type', 'Unknown').title()}", expanded=False):
+                    col1, col2 = st.columns([3, 1])
+                    
+                    with col1:
+                        st.markdown(f"**Type:** {goal.get('type', 'Unknown')}")
+                        st.markdown(f"**Target Amount:** ₹{goal.get('target_amount', 0):,.0f}")
+                        st.markdown(f"**Timeline:** {goal.get('timeline_years', 0)} years")
+                        st.markdown(f"**Current Progress:** ₹{goal.get('current_progress', 0):,.0f}")
+                        
+                        if goal.get('description'):
+                            st.markdown(f"**Description:** {goal.get('description')}")
+                    
+                    with col2:
+                        if st.button("🗑️ Delete", key=f"delete_goal_{i}"):
+                            result = db.delete_investment_goal(user['id'], goal.get('id'))
+                            if result['success']:
+                                st.success("Goal deleted!")
+                                st.rerun()
+                            else:
+                                st.error(f"Error: {result['error']}")
+        else:
+            st.info("No investment goals set yet. Add your first goal below!")
+        
+        st.markdown("---")
+        
+        # Add new goal form
+        st.markdown("**Add New Goal:**")
+        
+        with st.form("add_goal_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                goal_type = st.selectbox(
+                    "Goal Type:",
+                    ["retirement", "education", "emergency_fund", "home_purchase", "vacation", "other"],
+                    key="new_goal_type"
+                )
+                
+                target_amount = st.number_input(
+                    "Target Amount (₹):",
+                    min_value=10000,
+                    max_value=100000000,
+                    value=1000000,
+                    step=10000,
+                    key="new_target_amount"
+                )
+            
+            with col2:
+                timeline_years = st.number_input(
+                    "Timeline (Years):",
+                    min_value=1,
+                    max_value=50,
+                    value=10,
+                    key="new_timeline"
+                )
+                
+                current_progress = st.number_input(
+                    "Current Progress (₹):",
+                    min_value=0,
+                    max_value=target_amount,
+                    value=0,
+                    step=10000,
+                    key="new_progress"
+                )
+            
+            description = st.text_area(
+                "Description (Optional):",
+                placeholder="Describe your goal...",
+                key="new_description"
+            )
+            
+            if st.form_submit_button("➕ Add Goal"):
+                new_goal = {
+                    "type": goal_type,
+                    "target_amount": target_amount,
+                    "timeline_years": timeline_years,
+                    "current_progress": current_progress,
+                    "description": description
+                }
+                
+                result = db.add_investment_goal(user['id'], new_goal)
+                if result['success']:
+                    st.success("Goal added successfully!")
+                    st.rerun()
+                else:
+                    st.error(f"Error: {result['error']}")
+    
+    with tab2:
+        st.subheader("⚖️ Risk Preferences")
+        st.caption("Configure your risk tolerance and investment preferences")
+        
+        # Risk tolerance settings
+        current_risk = user_profile.get('risk_tolerance', 'moderate')
+        
+        with st.form("risk_settings_form"):
+            st.markdown("**Risk Tolerance:**")
+            
+            risk_options = {
+                "conservative": {
+                    "name": "Conservative",
+                    "description": "Low risk, stable returns. Focus on capital preservation.",
+                    "allocation": "40% Stocks, 50% Bonds, 10% Alternatives"
+                },
+                "moderate": {
+                    "name": "Moderate", 
+                    "description": "Balanced risk and return. Growth with some stability.",
+                    "allocation": "60% Stocks, 30% Bonds, 10% Alternatives"
+                },
+                "aggressive": {
+                    "name": "Aggressive",
+                    "description": "High risk, high potential returns. Growth-focused.",
+                    "allocation": "80% Stocks, 15% Bonds, 5% Alternatives"
+                }
+            }
+            
+            selected_risk = st.radio(
+                "Select your risk tolerance:",
+                list(risk_options.keys()),
+                format_func=lambda x: f"{risk_options[x]['name']}: {risk_options[x]['description']}",
+                index=list(risk_options.keys()).index(current_risk)
+            )
+            
+            # Show allocation preview
+            st.markdown("**Recommended Allocation:**")
+            st.info(risk_options[selected_risk]['allocation'])
+            
+            # Additional preferences
+            st.markdown("**Additional Preferences:**")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                rebalancing_frequency = st.selectbox(
+                    "Rebalancing Frequency:",
+                    ["monthly", "quarterly", "semi_annually", "annually"],
+                    index=1  # Default to quarterly
+                )
+                
+                tax_optimization = st.checkbox(
+                    "Enable Tax Optimization",
+                    value=True,
+                    help="AI will suggest tax-efficient strategies"
+                )
+            
+            with col2:
+                esg_investing = st.checkbox(
+                    "ESG Investing Preference",
+                    value=False,
+                    help="Consider Environmental, Social, and Governance factors"
+                )
+                
+                international_exposure = st.slider(
+                    "International Exposure (%)",
+                    min_value=0,
+                    max_value=50,
+                    value=20,
+                    help="Percentage of portfolio in international markets"
+                )
+            
+            if st.form_submit_button("💾 Save Risk Preferences"):
+                # Update user profile
+                profile_data = {
+                    "risk_tolerance": selected_risk,
+                    "rebalancing_frequency": rebalancing_frequency,
+                    "tax_optimization": tax_optimization,
+                    "esg_investing": esg_investing,
+                    "international_exposure": international_exposure
+                }
+                
+                result = db.update_user_profile(user['id'], profile_data)
+                if result['success']:
+                    st.success("Risk preferences updated successfully!")
+                    # Update session state
+                    st.session_state.user = result['user']
+                    st.rerun()
+                else:
+                    st.error(f"Error: {result['error']}")
+    
+    with tab3:
+        st.subheader("📊 Profile Summary")
+        st.caption("Overview of your investment profile")
+        
+        # Display current profile
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Basic Information:**")
+            st.markdown(f"**Name:** {user_profile.get('full_name', 'N/A')}")
+            st.markdown(f"**Username:** {user_profile.get('username', 'N/A')}")
+            st.markdown(f"**Email:** {user_profile.get('email', 'N/A')}")
+            st.markdown(f"**Member Since:** {user_profile.get('created_at', 'N/A')[:10] if user_profile.get('created_at') else 'N/A'}")
+        
+        with col2:
+            st.markdown("**Investment Preferences:**")
+            st.markdown(f"**Risk Tolerance:** {user_profile.get('risk_tolerance', 'moderate').title()}")
+            st.markdown(f"**Rebalancing:** {user_profile.get('rebalancing_frequency', 'quarterly').title()}")
+            st.markdown(f"**Tax Optimization:** {'Yes' if user_profile.get('tax_optimization') else 'No'}")
+            st.markdown(f"**ESG Investing:** {'Yes' if user_profile.get('esg_investing') else 'No'}")
+            st.markdown(f"**International Exposure:** {user_profile.get('international_exposure', 20)}%")
+        
+        # Goals summary
+        goals = user_profile.get('investment_goals', [])
+        if goals:
+            st.markdown("**Investment Goals Summary:**")
+            
+            total_target = sum(goal.get('target_amount', 0) for goal in goals)
+            total_progress = sum(goal.get('current_progress', 0) for goal in goals)
+            progress_pct = (total_progress / total_target * 100) if total_target > 0 else 0
+            
+            st.markdown(f"**Total Goals:** {len(goals)}")
+            st.markdown(f"**Total Target:** ₹{total_target:,.0f}")
+            st.markdown(f"**Total Progress:** ₹{total_progress:,.0f} ({progress_pct:.1f}%)")
+            
+            # Progress bar
+            st.progress(progress_pct / 100)
+        else:
+            st.info("No investment goals set yet.")
+        
+        # AI Agent Integration
+        if AI_AGENTS_AVAILABLE:
+            st.markdown("**AI Agent Integration:**")
+            st.success("✅ AI agents are using your profile for personalized recommendations")
+            
+            # Show how profile affects AI recommendations
+            st.markdown("**How your profile affects AI recommendations:**")
+            st.markdown(f"• **Risk-based allocation:** AI uses your {user_profile.get('risk_tolerance', 'moderate')} risk tolerance")
+            st.markdown(f"• **Goal-based analysis:** AI considers your {len(goals)} investment goals")
+            st.markdown(f"• **Tax optimization:** {'Enabled' if user_profile.get('tax_optimization') else 'Disabled'}")
+            st.markdown(f"• **ESG preferences:** {'Considered' if user_profile.get('esg_investing') else 'Not considered'}")
+        else:
+            st.warning("⚠️ AI agents not available - profile settings won't affect recommendations")
+            
+            with st.expander("ℹ️ How to enable AI agents"):
+                st.markdown("""
+                **To enable AI agents, ensure:**
+                
+                1. ✅ All files in `ai_agents/` directory exist:
+                   - `__init__.py`
+                   - `base_agent.py`
+                   - `communication.py`
+                   - `portfolio_agent.py`
+                   - `market_agent.py`
+                   - `strategy_agent.py`
+                   - `scenario_agent.py`
+                   - `agent_manager.py`
+                   - `performance_optimizer.py`
+                
+                2. ✅ Required packages installed:
+                   - `pandas`, `numpy` (already in requirements.txt)
+                
+                3. ✅ Restart the Streamlit application:
+                   ```bash
+                   streamlit run web_agent.py
+                   ```
+                
+                4. ✅ Check the terminal for any import errors
+                
+                **Note**: If you're on Streamlit Cloud, the app will auto-restart after deployment.
+                """)
+
+def process_file_with_ai(uploaded_file, filename, user_id):
+    """
+    Universal AI-powered file processor
+    Handles CSV, PDF, Excel, and any other file format
+    Returns extracted transactions ready for database storage
+    """
+    if not AI_AGENTS_AVAILABLE:
+        st.error("🚫 AI agents not available. Please check your configuration.")
+        return None
+    
+    try:
+        # Initialize AI File Processor
+        file_processor = AIFileProcessor()
+        
+        # Process file with AI
+        with st.spinner(f"🤖 AI is analyzing {filename} and extracting transactions..."):
+            transactions = file_processor.process_file(uploaded_file, filename)
+        
+        if not transactions:
+            st.warning(f"⚠️ No transactions found in {filename}")
+            return None
+        
+        # Enhance transactions with metadata
+        for trans in transactions:
+            # If price is 0 or missing, it will be fetched automatically later
+            if not trans.get('price') or trans['price'] == 0:
+                trans['price'] = 0  # Will trigger automatic price fetching
+        
+        return transactions
+        
+    except Exception as e:
+        st.error(f"❌ Error processing file {filename}: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return None
+
 def upload_files_page():
-    """Enhanced upload more files page"""
+    """Enhanced upload more files page with AI PDF extraction"""
     st.header("📁 Upload More Files")
     
     # Add custom CSS for better styling
@@ -3588,14 +4472,99 @@ def upload_files_page():
         - `channel`: Channel/platform name (optional - will use filename if missing)
         """)
     
-    # File uploader with enhanced styling
-    uploaded_files = st.file_uploader(
-        "📁 Choose CSV files to upload",
-        type=['csv'],
-        accept_multiple_files=True,
-        help="Select one or more CSV files containing your transaction data. Files will be processed automatically.",
-        key="upload_files_main"
-    )
+    # AI-powered file extraction section
+    if AI_AGENTS_AVAILABLE:
+        st.markdown("""
+        <div class="upload-section">
+            <h3>🤖 AI-Powered Transaction Extraction</h3>
+            <p>Upload ANY file type (PDF, CSV, Excel) and let AI automatically extract transaction data!</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.info("💡 **AI processes all file types**: CSV, PDF, Excel (XLSX/XLS), and Text files. Just upload and let AI handle the rest!")
+        
+        # Universal file uploader
+        uploaded_files = st.file_uploader(
+            "📁 Choose files to upload (CSV, PDF, Excel, etc.)",
+            type=['csv', 'pdf', 'xlsx', 'xls', 'txt'],
+            accept_multiple_files=True,
+            key="ai_file_uploader",
+            help="Upload transaction files in any format - AI will extract the data automatically"
+        )
+        
+        if uploaded_files:
+            for uploaded_file in uploaded_files:
+                file_type = uploaded_file.name.split('.')[-1].upper()
+                st.markdown(f"**🤖 AI Processing: {uploaded_file.name}** ({file_type})")
+                
+                # Extract transactions using AI (works for ALL file types)
+                transactions = process_file_with_ai(uploaded_file, uploaded_file.name, user['id'])
+                
+                if transactions:
+                    st.success(f"✅ AI extracted {len(transactions)} transactions from {uploaded_file.name}")
+                    
+                    # Display extracted transactions
+                    with st.expander(f"View {len(transactions)} extracted transactions", expanded=True):
+                        # Create DataFrame for display
+                        df = pd.DataFrame(transactions)
+                        
+                        # Display summary
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Total Transactions", len(transactions))
+                        with col2:
+                            total_value = sum(t.get('quantity', 0) * t.get('price', 0) for t in transactions)
+                            st.metric("Total Value", f"₹{total_value:,.0f}" if total_value > 0 else "Price to be fetched")
+                        with col3:
+                            asset_types = set(t.get('asset_type', 'unknown') for t in transactions)
+                            st.metric("Asset Types", len(asset_types))
+                        with col4:
+                            channels = set(t.get('channel', 'unknown') for t in transactions)
+                            st.metric("Channels", len(channels))
+                        
+                        # Display transactions table
+                        st.dataframe(df, use_container_width=True)
+                        
+                        # Upload to database button
+                        if st.button(f"📥 Upload {len(transactions)} transactions to portfolio", key=f"upload_{uploaded_file.name}"):
+                            # Process and upload transactions
+                            success_count = 0
+                            for transaction in transactions:
+                                try:
+                                    # Convert AI extracted data to database format
+                                    result = db.add_transaction(
+                                        user_id=user['id'],
+                                        ticker=transaction.get('ticker'),
+                                        stock_name=transaction.get('stock_name'),
+                                        scheme_name=transaction.get('scheme_name'),
+                                        quantity=transaction.get('quantity', 0),
+                                        price=transaction.get('price', 0),  # 0 triggers auto-fetch
+                                        transaction_date=transaction.get('date'),
+                                        transaction_type=transaction.get('transaction_type', 'buy'),
+                                        asset_type=transaction.get('asset_type', 'stock'),
+                                        channel=transaction.get('channel', 'Direct'),
+                                        sector=transaction.get('sector'),
+                                        filename=uploaded_file.name
+                                    )
+                                    if result.get('success'):
+                                        success_count += 1
+                                except Exception as e:
+                                    st.error(f"Error uploading transaction: {e}")
+                            
+                            if success_count > 0:
+                                st.success(f"✅ Successfully uploaded {success_count} transactions to your portfolio!")
+                                st.rerun()
+                            else:
+                                st.error("❌ Failed to upload transactions")
+    else:
+        # File uploader with enhanced styling
+        uploaded_files = st.file_uploader(
+            "📁 Choose CSV files to upload",
+            type=['csv'],
+            accept_multiple_files=True,
+            help="Select one or more CSV files containing your transaction data. Files will be processed automatically.",
+            key="upload_files_main"
+        )
     
     # Show file preview
     if uploaded_files:

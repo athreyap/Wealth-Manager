@@ -49,16 +49,23 @@ class SharedDatabaseManager:
         """Hash password"""
         return hashlib.sha256(password.encode()).hexdigest()
     
-    def register_user(self, username: str, password: str, full_name: str, email: str = None) -> Dict[str, Any]:
-        """Register new user with username"""
+    def register_user(self, username: str, password: str, full_name: str, email: str = None, risk_tolerance: str = "moderate") -> Dict[str, Any]:
+        """Register new user with username (case-insensitive)"""
         try:
             password_hash = self.hash_password(password)
             
+            # Store username in lowercase for case-insensitive login
+            username_lower = username.lower()
+            
             response = self.supabase.table('users').insert({
-                'username': username,
+                'username': username_lower,
                 'email': email,
                 'password_hash': password_hash,
-                'full_name': full_name
+                'full_name': full_name,
+                'risk_tolerance': risk_tolerance,
+                'investment_goals': [],
+                'created_at': datetime.now().isoformat(),
+                'updated_at': datetime.now().isoformat()
             }).execute()
             
             return {'success': True, 'user': response.data[0]}
@@ -66,12 +73,15 @@ class SharedDatabaseManager:
             return {'success': False, 'error': str(e)}
     
     def login_user(self, username: str, password: str) -> Optional[Dict[str, Any]]:
-        """Login user with username"""
+        """Login user with username (case-insensitive)"""
         try:
             password_hash = self.hash_password(password)
             
+            # Make username case-insensitive by converting to lowercase
+            username_lower = username.lower()
+            
             response = self.supabase.table('users').select('*').eq(
-                'username', username
+                'username', username_lower
             ).eq('password_hash', password_hash).execute()
             
             if response.data and len(response.data) > 0:
@@ -278,6 +288,98 @@ class SharedDatabaseManager:
             return None
         except Exception as e:
             return None
+    
+    def update_user_profile(self, user_id: str, profile_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update user profile settings"""
+        try:
+            # Add updated timestamp
+            profile_data['updated_at'] = datetime.now().isoformat()
+            
+            response = self.supabase.table('users').update(profile_data).eq('id', user_id).execute()
+            
+            if response.data:
+                return {'success': True, 'user': response.data[0]}
+            return {'success': False, 'error': 'No data updated'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def get_user_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get user profile with settings"""
+        try:
+            response = self.supabase.table('users').select('*').eq('id', user_id).execute()
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            return None
+    
+    def add_investment_goal(self, user_id: str, goal: Dict[str, Any]) -> Dict[str, Any]:
+        """Add investment goal to user profile"""
+        try:
+            # Get current user profile
+            user_profile = self.get_user_profile(user_id)
+            if not user_profile:
+                return {'success': False, 'error': 'User not found'}
+            
+            # Get current goals
+            current_goals = user_profile.get('investment_goals', [])
+            
+            # Add new goal with ID
+            goal['id'] = f"goal_{int(datetime.now().timestamp())}"
+            goal['created_at'] = datetime.now().isoformat()
+            current_goals.append(goal)
+            
+            # Update user profile
+            return self.update_user_profile(user_id, {'investment_goals': current_goals})
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def update_investment_goal(self, user_id: str, goal_id: str, goal_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update specific investment goal"""
+        try:
+            # Get current user profile
+            user_profile = self.get_user_profile(user_id)
+            if not user_profile:
+                return {'success': False, 'error': 'User not found'}
+            
+            # Get current goals
+            current_goals = user_profile.get('investment_goals', [])
+            
+            # Find and update goal
+            for i, goal in enumerate(current_goals):
+                if goal.get('id') == goal_id:
+                    goal_data['updated_at'] = datetime.now().isoformat()
+                    current_goals[i].update(goal_data)
+                    break
+            else:
+                return {'success': False, 'error': 'Goal not found'}
+            
+            # Update user profile
+            return self.update_user_profile(user_id, {'investment_goals': current_goals})
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def delete_investment_goal(self, user_id: str, goal_id: str) -> Dict[str, Any]:
+        """Delete investment goal"""
+        try:
+            # Get current user profile
+            user_profile = self.get_user_profile(user_id)
+            if not user_profile:
+                return {'success': False, 'error': 'User not found'}
+            
+            # Get current goals
+            current_goals = user_profile.get('investment_goals', [])
+            
+            # Remove goal
+            current_goals = [goal for goal in current_goals if goal.get('id') != goal_id]
+            
+            # Update user profile
+            return self.update_user_profile(user_id, {'investment_goals': current_goals})
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
     
     def get_transactions_by_stock(self, user_id: str, stock_id: str) -> List[Dict[str, Any]]:
         """Get all transactions for a specific stock"""
