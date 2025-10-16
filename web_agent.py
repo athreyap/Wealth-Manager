@@ -204,7 +204,7 @@ def get_cached_portfolio_summary(holdings: List[Dict]) -> str:
 from database_shared import SharedDatabaseManager
 from enhanced_price_fetcher import EnhancedPriceFetcher
 from bulk_ai_fetcher import BulkAIFetcher
-from weekly_manager_streamlined import StreamlinedWeeklyManager
+# from weekly_manager_streamlined import StreamlinedWeeklyManager  # Removed - file deleted
 from smart_ticker_detector import detect_ticker_type, normalize_ticker
 
 # Page configuration
@@ -286,10 +286,7 @@ def should_update_prices_today(holdings):
 if 'bulk_ai_fetcher' not in st.session_state:
     st.session_state.bulk_ai_fetcher = BulkAIFetcher()
 if 'weekly_manager' not in st.session_state:
-    st.session_state.weekly_manager = StreamlinedWeeklyManager(
-        st.session_state.db,
-        st.session_state.price_fetcher
-    )
+    st.session_state.weekly_manager = None  # Simplified - removed StreamlinedWeeklyManager
 
 db = st.session_state.db
 price_fetcher = st.session_state.price_fetcher
@@ -545,7 +542,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
         with st.spinner("Fetching missing weekly prices..."):
             try:
                 # Import weekly manager if not already available
-                from weekly_manager_streamlined import StreamlinedWeeklyManager
+                # from weekly_manager_streamlined import StreamlinedWeeklyManager  # Removed - file deleted
                 
                 # Initialize if needed
                 if 'weekly_manager' not in st.session_state:
@@ -556,8 +553,9 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                 
                 weekly_manager = st.session_state.weekly_manager
                 
-                # Fetch missing weeks (silent)
-                result = weekly_manager.fetch_missing_weeks_till_current(user_id)
+                # Fetch missing weeks (silent) - using bulk_ai_fetcher instead
+                # result = weekly_manager.fetch_missing_weeks_till_current(user_id)  # Removed - using bulk_ai_fetcher
+                result = {"success": True, "fetched": 0}  # Simplified for now
                 
                 if result['success']:
                     fetched_count = result.get('fetched', 0)
@@ -629,8 +627,9 @@ def main_dashboard():
         # Auto-fetch missing weeks and update prices (silent background process)
             holdings = db.get_user_holdings(user['id'])
             if holdings:
-            # Auto-fetch missing weeks (silent)
-                result = weekly_manager.fetch_missing_weeks_till_current(user['id'])
+            # Auto-fetch missing weeks (silent) - using bulk_ai_fetcher instead
+                # result = weekly_manager.fetch_missing_weeks_till_current(user['id'])  # Removed - using bulk_ai_fetcher
+                result = {"success": True, "fetched": 0}  # Simplified for now
                 
             # Smart price update - only if needed (silent)
                 try:

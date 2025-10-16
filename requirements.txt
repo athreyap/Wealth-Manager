@@ -20,7 +20,6 @@ pdfplumber
 # Financial Data
 yfinance
 mftool
-indstocks
 
 # Visualization
 plotly
