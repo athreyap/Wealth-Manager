@@ -230,13 +230,22 @@ def should_update_prices_today(holdings):
         stock_id = holding.get('stock_id')
         if stock_id:
             # Get last updated date from database
-            last_updated = db.get_stock_last_updated(stock_id)
-            if last_updated:
-                last_updated_date = datetime.fromisoformat(last_updated).date()
-                if last_updated_date < today:
+            try:
+                # Check if method exists
+                if hasattr(db, 'get_stock_last_updated'):
+                    last_updated = db.get_stock_last_updated(stock_id)
+                    if last_updated:
+                        last_updated_date = datetime.fromisoformat(last_updated).date()
+                        if last_updated_date < today:
+                            needs_update.append(holding)
+                    else:
+                        # No last_updated record, needs update
+                        needs_update.append(holding)
+                else:
+                    # Method not available, assume needs update
                     needs_update.append(holding)
-            else:
-                # No last_updated record, needs update
+            except Exception as e:
+                # Any error, assume needs update
                 needs_update.append(holding)
     
     return needs_update
