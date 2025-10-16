@@ -30,42 +30,139 @@ def get_cached_holdings(user_id: str):
 
 @st.cache_data(ttl=600)  # Cache for 10 minutes
 def get_cached_portfolio_summary(holdings: List[Dict]) -> str:
-    """Cache portfolio summary calculation"""
+    """Cache comprehensive portfolio summary calculation"""
     if not holdings:
         return "No holdings found"
     
+    # Safe conversion to handle None values
+    def safe_float(value, default=0):
+        try:
+            return float(value) if value is not None else default
+        except (ValueError, TypeError):
+            return default
+    
     total_investment = 0
     total_current = 0
+    
+    # Asset type breakdown
+    asset_types = {}
+    channels = {}
+    sectors = {}
     
     for holding in holdings:
         current_price = holding.get('current_price')
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
-        current_value = float(current_price) * float(holding['total_quantity'])
-        investment = float(holding['total_quantity']) * float(holding['average_price'])
+        
+        # Use safe_float to handle None values
+        current_value = safe_float(current_price, 0) * safe_float(holding.get('total_quantity'), 0)
+        investment = safe_float(holding.get('total_quantity'), 0) * safe_float(holding.get('average_price'), 0)
         total_investment += investment
         total_current += current_value
+        
+        # Track asset types
+        asset_type = holding.get('asset_type', 'Unknown')
+        if asset_type not in asset_types:
+            asset_types[asset_type] = {'investment': 0, 'current': 0, 'count': 0}
+        asset_types[asset_type]['investment'] += investment
+        asset_types[asset_type]['current'] += current_value
+        asset_types[asset_type]['count'] += 1
+        
+        # Track channels
+        channel = holding.get('channel', 'Unknown')
+        if channel not in channels:
+            channels[channel] = {'investment': 0, 'current': 0, 'count': 0}
+        channels[channel]['investment'] += investment
+        channels[channel]['current'] += current_value
+        channels[channel]['count'] += 1
+        
+        # Track sectors
+        sector = holding.get('sector', 'Unknown')
+        if sector not in sectors:
+            sectors[sector] = {'investment': 0, 'current': 0, 'count': 0}
+        sectors[sector]['investment'] += investment
+        sectors[sector]['current'] += current_value
+        sectors[sector]['count'] += 1
     
     total_pnl = total_current - total_investment
     total_pnl_pct = (total_pnl / total_investment * 100) if total_investment > 0 else 0
     
-    portfolio_summary = f"""📊 Portfolio Overview:
-• Holdings: {len(holdings)} assets
+    portfolio_summary = f"""📊 COMPREHENSIVE PORTFOLIO OVERVIEW:
+
+💰 FINANCIAL SUMMARY:
+• Total Holdings: {len(holdings)} assets
 • Total Investment: ₹{total_investment:,.0f}
 • Current Value: ₹{total_current:,.0f}
 • Total P&L: ₹{total_pnl:,.0f} ({total_pnl_pct:+.1f}%)
 
-🏆 Top Holdings Performance:"""
+📈 ASSET TYPE BREAKDOWN:"""
     
-    for holding in holdings[:5]:  # Top 5 holdings
+    for asset_type, data in sorted(asset_types.items(), key=lambda x: x[1]['current'], reverse=True):
+        pnl = data['current'] - data['investment']
+        pnl_pct = (pnl / data['investment'] * 100) if data['investment'] > 0 else 0
+        portfolio_summary += f"\n• {asset_type.title()}: {data['count']} holdings, ₹{data['current']:,.0f} ({pnl_pct:+.1f}%)"
+    
+    portfolio_summary += f"\n\n🏢 CHANNEL BREAKDOWN:"
+    for channel, data in sorted(channels.items(), key=lambda x: x[1]['current'], reverse=True):
+        pnl = data['current'] - data['investment']
+        pnl_pct = (pnl / data['investment'] * 100) if data['investment'] > 0 else 0
+        portfolio_summary += f"\n• {channel}: {data['count']} holdings, ₹{data['current']:,.0f} ({pnl_pct:+.1f}%)"
+    
+    portfolio_summary += f"\n\n🏭 SECTOR BREAKDOWN:"
+    for sector, data in sorted(sectors.items(), key=lambda x: x[1]['current'], reverse=True):
+        pnl = data['current'] - data['investment']
+        pnl_pct = (pnl / data['investment'] * 100) if data['investment'] > 0 else 0
+        portfolio_summary += f"\n• {sector}: {data['count']} holdings, ₹{data['current']:,.0f} ({pnl_pct:+.1f}%)"
+    
+    # Calculate P&L for all holdings for top gainers/losers
+    holdings_with_pnl = []
+    for holding in holdings:
         current_price = holding.get('current_price')
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
-        current_value = float(current_price) * float(holding['total_quantity'])
-        investment = float(holding['total_quantity']) * float(holding['average_price'])
+        
+        current_value = safe_float(current_price, 0) * safe_float(holding.get('total_quantity'), 0)
+        investment = safe_float(holding.get('total_quantity'), 0) * safe_float(holding.get('average_price'), 0)
         pnl_pct = ((current_value - investment) / investment * 100) if investment > 0 else 0
-        emoji = "🚀" if pnl_pct > 10 else "📈" if pnl_pct > 0 else "📉" if pnl_pct < -5 else "➡️"
-        portfolio_summary += f"\n{emoji} {holding['ticker']}: {pnl_pct:+.1f}%"
+        
+        holdings_with_pnl.append({
+            'ticker': holding.get('ticker', 'N/A'),
+            'stock_name': holding.get('stock_name', 'N/A'),
+            'asset_type': holding.get('asset_type', 'Unknown'),
+            'channel': holding.get('channel', 'Unknown'),
+            'sector': holding.get('sector', 'Unknown'),
+            'current_value': current_value,
+            'pnl_pct': pnl_pct
+        })
+    
+    portfolio_summary += f"\n\n🏆 TOP 5 GAINERS (by P&L %):"
+    top_gainers = sorted(holdings_with_pnl, key=lambda h: h['pnl_pct'], reverse=True)[:5]
+    for holding in top_gainers:
+        emoji = "🚀" if holding['pnl_pct'] > 10 else "📈"
+        portfolio_summary += f"\n{emoji} {holding['ticker']} ({holding['asset_type']}) - {holding['stock_name'][:30]}"
+        portfolio_summary += f"\n   Channel: {holding['channel']} | Sector: {holding['sector']} | P&L: {holding['pnl_pct']:+.1f}% | Value: ₹{holding['current_value']:,.0f}"
+    
+    portfolio_summary += f"\n\n📉 TOP 5 LOSERS (by P&L %):"
+    top_losers = sorted(holdings_with_pnl, key=lambda h: h['pnl_pct'])[:5]
+    for holding in top_losers:
+        emoji = "📉" if holding['pnl_pct'] < 0 else "➡️"
+        portfolio_summary += f"\n{emoji} {holding['ticker']} ({holding['asset_type']}) - {holding['stock_name'][:30]}"
+        portfolio_summary += f"\n   Channel: {holding['channel']} | Sector: {holding['sector']} | P&L: {holding['pnl_pct']:+.1f}% | Value: ₹{holding['current_value']:,.0f}"
+    
+    portfolio_summary += f"\n\n🏆 TOP 10 HOLDINGS (by current value):"
+    
+    # Sort holdings by current value and take top 10
+    sorted_holdings = sorted(
+        holdings_with_pnl, 
+        key=lambda h: h['current_value'], 
+        reverse=True
+    )
+    
+    for holding in sorted_holdings[:10]:
+        emoji = "🚀" if holding['pnl_pct'] > 10 else "📈" if holding['pnl_pct'] > 0 else "📉" if holding['pnl_pct'] < -5 else "➡️"
+        
+        portfolio_summary += f"\n{emoji} {holding['ticker']} ({holding['asset_type']}) - {holding['stock_name'][:30]}"
+        portfolio_summary += f"\n   Channel: {holding['channel']} | Sector: {holding['sector']} | P&L: {holding['pnl_pct']:+.1f}% | Value: ₹{holding['current_value']:,.0f}"
     
     return portfolio_summary
 
@@ -121,6 +218,28 @@ def update_all_live_prices():
             st.rerun()
         else:
             st.warning("No holdings found to update.")
+
+def should_update_prices_today(holdings):
+    """Check if prices need to be updated today"""
+    from datetime import datetime, date
+    
+    today = date.today()
+    needs_update = []
+    
+    for holding in holdings:
+        stock_id = holding.get('stock_id')
+        if stock_id:
+            # Get last updated date from database
+            last_updated = db.get_stock_last_updated(stock_id)
+            if last_updated:
+                last_updated_date = datetime.fromisoformat(last_updated).date()
+                if last_updated_date < today:
+                    needs_update.append(holding)
+            else:
+                # No last_updated record, needs update
+                needs_update.append(holding)
+    
+    return needs_update
 if 'bulk_ai_fetcher' not in st.session_state:
     st.session_state.bulk_ai_fetcher = BulkAIFetcher()
 if 'weekly_manager' not in st.session_state:
@@ -460,29 +579,31 @@ def main_dashboard():
                 for i, step in enumerate(steps):
                     progress_bar.progress((i + 1) / len(steps))
                     status_text.text(step)
-                    time.sleep(0.5)  # Small delay for visual effect
+                    time.sleep(0.3)  # Small delay for visual effect
                 
-                # Clear the loading animation
-                loading_container.empty()
-                progress_bar.empty()
-                status_text.empty()
         # Auto-fetch missing weeks and update prices (silent background process)
             holdings = db.get_user_holdings(user['id'])
             if holdings:
             # Auto-fetch missing weeks (silent)
                 result = weekly_manager.fetch_missing_weeks_till_current(user['id'])
                 
-            # Auto-update live prices (silent)
+            # Smart price update - only if needed (silent)
                 try:
-                    st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
+                    holdings_needing_update = should_update_prices_today(holdings)
+                    if holdings_needing_update:
+                        # Only update holdings that haven't been updated today
+                        st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
+                    # If no holdings need update, prices are already current
                 except Exception as e:
                     st.sidebar.warning(f"⚠️ Price update: {str(e)[:50]}")
             else:
                 result = {'success': True, 'fetched': 0}
         
         # Mark as fetched to prevent re-fetching on page navigation
-            st.session_state.missing_weeks_fetched = True
-            st.session_state.last_fetch_time = datetime.now()
+        st.session_state.missing_weeks_fetched = True
+        st.session_state.last_fetch_time = datetime.now()
+        st.rerun()
+            
     else:
         # Already fetched this session
         if 'last_fetch_time' in st.session_state:
@@ -501,458 +622,20 @@ def main_dashboard():
             "🏠 Portfolio Overview",
             "📊 P&L Analysis",
             "📈 Charts & Analytics",
+            "🤖 AI Assistant",
             "📁 Upload More Files"
         ]
     )
     
     st.sidebar.markdown("---")
     
-    # AI Assistant in Sidebar with Enhanced Styling
+    # Simplified sidebar - AI Assistant now has its own page
     with st.sidebar:
-        # Custom CSS for better styling
-        st.markdown("""
-        <style>
-        .ai-assistant-header {
-            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-            padding: 10px;
-            border-radius: 10px;
-            margin-bottom: 15px;
-            text-align: center;
-            color: white;
-            font-weight: bold;
-            font-size: 16px;
-        }
-        .ai-response-box {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 15px;
-            border-radius: 10px;
-            margin: 10px 0;
-            color: white;
-            border-left: 4px solid #4CAF50;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .ai-chat-history {
-            background: #f8f9fa;
-            padding: 10px;
-            border-radius: 8px;
-            margin: 10px 0;
-            border: 1px solid #e9ecef;
-        }
-        .ai-quick-button {
-            background: linear-gradient(45deg, #4CAF50, #45a049);
-            color: white;
-            border: none;
-            border-radius: 20px;
-            padding: 8px 16px;
-            font-weight: bold;
-            transition: all 0.3s ease;
-        }
-        .ai-quick-button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-        }
-        </style>
-        """, unsafe_allow_html=True)
-        
-        # Header
-        st.markdown('<div class="ai-assistant-header">🤖 AI Assistant</div>', unsafe_allow_html=True)
-        
-        # Initialize chat history and PDF context
-        if 'chat_history' not in st.session_state:
-            st.session_state.chat_history = []
-        
-        # Always load PDF context from database to ensure older session PDFs are included
-        st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-        
-        # Show PDF context status and refresh option
-        pdf_count = len(db.get_user_pdfs(user['id']))
-        if pdf_count > 0:
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.caption(f"📚 Loaded {pdf_count} PDFs from database for AI context")
-            with col2:
-                if st.button("🔄", key="refresh_pdf_context", help="Refresh PDF context from database"):
-                    st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                    st.success("PDF context refreshed!")
-                    st.rerun()
-        
-        # Get portfolio context (cached)
-        holdings = get_cached_holdings(user['id'])
-        
-        # Get cached portfolio summary
-        portfolio_summary = get_cached_portfolio_summary(holdings)
-        
-        # Get user PDFs for the session
-        user_pdfs = db.get_user_pdfs(user['id'])
-        
-        # Enhanced chat interface
-        st.markdown("---")
-        st.markdown("**💬 Chat with AI**")
-        
-        user_question = st.text_input(
-            "Ask me anything:", 
-            placeholder="e.g., What's my best performing stock? How can I reduce risk?", 
-            key="sidebar_chat_input",
-            help="Ask questions about your portfolio, investments, or get advice"
-        )
-        
-        if user_question and st.button("🚀 Send", key="sidebar_send", use_container_width=True, type="primary"):
-            with st.spinner("🤔 AI is thinking..."):
-                try:
-                    import openai
-                    openai.api_key = st.secrets["api_keys"]["open_ai"]
-                    
-                    # Include PDF context from database if available
-                    pdf_context_text = ""
-                    if st.session_state.pdf_context:
-                        pdf_context_text = f"\n\n📄 Available Documents Context:\n{st.session_state.pdf_context[:3000]}..."  # Increased limit for better context
-                    
-                    # Also include recent PDF summaries for better context
-                    recent_pdfs = db.get_user_pdfs(user['id'])
-                    if recent_pdfs:
-                        pdf_summaries = "\n".join([f"• {pdf['filename']}: {pdf.get('ai_summary', 'No summary')[:200]}..." for pdf in recent_pdfs[:3]])
-                        pdf_context_text += f"\n\n📚 Recent Document Summaries:\n{pdf_summaries}"
-                    
-                    full_context = f"Portfolio Data:\n{portfolio_summary}{pdf_context_text}\n\nUser Question: {user_question}"
-                    
-                    response = openai.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": "You are a helpful and knowledgeable portfolio assistant. Answer questions clearly and specifically based on the portfolio data and any uploaded documents provided. Use emojis appropriately and be encouraging. Provide complete, detailed answers."},
-                            {"role": "user", "content": full_context}
-                        ],
-                        temperature=0.7,
-                        max_tokens=1000
-                    )
-                        
-                    ai_response = response.choices[0].message.content
-                    
-                    # Store in history
-                    st.session_state.chat_history.append({"q": user_question, "a": ai_response})
-                    
-                    # Display with enhanced styling and scrollable container
-                    st.markdown(f'<div class="ai-response-box" style="max-height: 500px; overflow-y: auto;"><strong>🤖 AI Response:</strong><br><br>{ai_response}</div>', unsafe_allow_html=True)
-                    
-                except Exception as e:
-                    st.error(f"❌ Error: {str(e)[:100]}")
-        
-        # Enhanced chat history display
-        if st.session_state.chat_history:
-            st.markdown("---")
-            st.markdown("**📚 Recent Conversations**")
-            
-            for i, chat in enumerate(st.session_state.chat_history[-3:]):  # Last 3
-                with st.expander(f"💬 Q{i+1}: {chat['q'][:40]}{'...' if len(chat['q']) > 40 else ''}", expanded=False):
-                    st.markdown(f"**❓ Question:** {chat['q']}")
-                    st.markdown(f"**🤖 Answer:** {chat['a']}")
-        
-        # Clear button with better styling
-        if st.session_state.chat_history:
-            if st.button("🗑️ Clear Chat History", key="sidebar_clear", use_container_width=True, help="Clear all chat history"):
-                st.session_state.chat_history = []
-                st.rerun()
-        
-        # MF Scheme Code Helper
-        st.markdown("---")
-        with st.expander("🔧 Mutual Fund Scheme Code Helper", expanded=False):
-            st.markdown("**Find correct AMFI scheme codes for your mutual funds:**")
-            
-            if st.button("🔍 Check Invalid MF Scheme Codes", key="check_mf_codes"):
-                with st.spinner("Checking mutual fund scheme codes..."):
-                    try:
-                        from mftool import Mftool
-                        mf = Mftool()
-                        
-                        # Get user's holdings
-                        holdings = get_cached_holdings(user['id'])
-                        mf_holdings = [h for h in holdings if h.get('asset_type') == 'mutual_fund']
-                        
-                        invalid_codes = []
-                        valid_codes = []
-                        
-                        for holding in mf_holdings:
-                            ticker = holding.get('ticker', '')
-                            quote = mf.get_scheme_quote(ticker)
-                            
-                            if quote and quote.get('nav') and float(quote.get('nav', 0)) > 0:
-                                valid_codes.append({
-                                    'ticker': ticker,
-                                    'name': quote.get('scheme_name', 'N/A'),
-                                    'nav': quote.get('nav', 'N/A')
-                                })
-                            else:
-                                invalid_codes.append(ticker)
-                        
-                        if invalid_codes:
-                            st.warning(f"❌ **Invalid scheme codes found:** {', '.join(invalid_codes)}")
-                            st.info("💡 **Solution:** Update these codes with correct AMFI scheme codes from fund house websites")
-                            
-                            # Show search help
-                            st.markdown("**🔍 How to find correct scheme codes:**")
-                            st.markdown("1. Visit the fund house website (HDFC, ICICI, SBI, etc.)")
-                            st.markdown("2. Look for 'Direct Plan - Growth' option")
-                            st.markdown("3. Copy the 6-digit AMFI scheme code")
-                            st.markdown("4. Update your CSV file with correct codes")
-                        else:
-                            st.success("✅ All mutual fund scheme codes are valid!")
-                        
-                        if valid_codes:
-                            st.markdown("**✅ Valid scheme codes:**")
-                            for code in valid_codes[:5]:  # Show first 5
-                                st.caption(f"• {code['ticker']}: {code['name'][:50]}... (NAV: ₹{code['nav']})")
-                            
-                    except Exception as e:
-                        st.error(f"Error checking scheme codes: {str(e)}")
-        
-        # PDF Library Section - Enhanced
-        st.markdown("---")
-        st.markdown("**📚 Your PDF Library**")
-        
-        if user_pdfs:
-            st.caption(f"📄 {len(user_pdfs)} document(s) stored")
-            
-            # Show PDFs in a more accessible way
-            for pdf in user_pdfs:
-                with st.expander(f"📄 {pdf['filename'][:30]}{'...' if len(pdf['filename']) > 30 else ''}", expanded=False):
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.markdown(f"**File:** {pdf['filename']}")
-                        st.caption(f"📅 Uploaded: {pdf['uploaded_at'][:10]}")
-                        
-                        if pdf.get('ai_summary'):
-                            st.markdown("**🤖 AI Summary:**")
-                            st.info(pdf['ai_summary'])
-                        
-                        # Add button to use this PDF for analysis
-                        if st.button(f"🔍 Analyze {pdf['filename'][:20]}...", key=f"analyze_{pdf['id']}", help="Use this PDF for AI analysis"):
-                            try:
-                                import openai
-                                openai.api_key = st.secrets["api_keys"]["open_ai"]
-                                
-                                # Get portfolio context
-                                portfolio_summary = get_cached_portfolio_summary(holdings)
-                                
-                                # Analyze the stored PDF
-                                analysis_prompt = f"""
-                                Analyze this stored PDF document for portfolio management insights.
-                                
-                                📄 DOCUMENT INFO:
-                                - Filename: {pdf['filename']}
-                                - Uploaded: {pdf['uploaded_at'][:10]}
-                                
-                                💼 USER'S PORTFOLIO:
-                                {portfolio_summary}
-                                
-                                📝 PDF CONTENT:
-                                {pdf.get('pdf_text', '')[:5000]}...
-                                
-                                🤖 PREVIOUS AI SUMMARY:
-                                {pdf.get('ai_summary', 'No previous summary')}
-                                
-                                Please provide a fresh analysis focusing on:
-                                1. Key insights from the document
-                                2. How it relates to the user's current portfolio
-                                3. Actionable recommendations
-                                4. Any new information not covered in the previous summary
-                                
-                                Format your response clearly with headings and bullet points.
-                                """
-                                
-                                response = openai.chat.completions.create(
-                                    model="gpt-4o-mini",
-                                    messages=[{"role": "user", "content": analysis_prompt}],
-                                    temperature=0.7,
-                                    max_tokens=1000
-                                )
-                                
-                                fresh_analysis = response.choices[0].message.content
-                                
-                                # Display the fresh analysis
-                                st.markdown("### 🔍 Fresh PDF Analysis")
-                                st.markdown(f'<div class="ai-response-box">{fresh_analysis}</div>', unsafe_allow_html=True)
-                                
-                                # Store in chat history
-                                st.session_state.chat_history.append({
-                                    "q": f"Analyze stored PDF: {pdf['filename']}", 
-                                    "a": fresh_analysis
-                                })
-                                
-                            except Exception as e:
-                                st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
-                    
-                    with col2:
-                        if st.button("🗑️", key=f"del_{pdf['id']}", help="Delete this PDF"):
-                            if db.delete_pdf(pdf['id']):
-                                st.success("Deleted!")
-                                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                                st.rerun()
-        else:
-            st.caption("No PDFs uploaded yet")
-        
-        # PDF Upload for AI Analysis
-        st.markdown("**📄 Upload New Document**")
-        
-        uploaded_pdf = st.file_uploader(
-            "Upload PDF (research reports, statements, etc.)",
-            type=['pdf'],
-            help="Upload PDF files for AI analysis and insights",
-            key="ai_pdf_upload"
-        )
-        
-        if uploaded_pdf:
-            st.success(f"📄 Uploaded: {uploaded_pdf.name}")
-            
-            if st.button("🔍 Analyze PDF", key="analyze_pdf", use_container_width=True):
-                with st.spinner("🤔 AI is analyzing the PDF..."):
-                    try:
-                        import openai
-                        import pdfplumber
-                        openai.api_key = st.secrets["api_keys"]["open_ai"]
-                        
-                        # Enhanced PDF extraction with tables and structure
-                        pdf_text = ""
-                        tables_found = []
-                        page_count = 0
-                        
-                        st.info("🔍 Extracting content from PDF (text, tables, structure)...")
-                        
-                        with pdfplumber.open(uploaded_pdf) as pdf:
-                            page_count = len(pdf.pages)
-                            for page_num, page in enumerate(pdf.pages, 1):
-                                # Extract text
-                                page_text = page.extract_text()
-                                if page_text:
-                                    pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
-                                
-                                # Extract tables
-                                tables = page.extract_tables()
-                                if tables:
-                                    for table_idx, table in enumerate(tables, 1):
-                                        tables_found.append({
-                                            'page': page_num,
-                                            'table_num': table_idx,
-                                            'rows': len(table),
-                                            'cols': len(table[0]) if table else 0
-                                        })
-                        
-                        if pdf_text:
-                            st.success(f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, found {len(tables_found)} tables")
-                            
-                            # Truncate if too long (OpenAI has token limits)
-                            pdf_text_for_ai = pdf_text[:10000] + "..." if len(pdf_text) > 10000 else pdf_text
-                            
-                            # Prepare tables summary
-                            tables_summary = ""
-                            if tables_found:
-                                tables_summary = f"\n📊 Tables Found: {len(tables_found)}\n"
-                                for t in tables_found[:5]:  # Show first 5 tables
-                                    tables_summary += f"  • Page {t['page']}: {t['rows']} rows × {t['cols']} columns\n"
-                            
-                            # Enhanced analysis prompt with structured output
-                            analysis_prompt = f"""
-                            Analyze this PDF document comprehensively for portfolio management insights.
-                            
-                            📄 DOCUMENT INFO:
-                            - Filename: {uploaded_pdf.name}
-                            - Pages: {page_count}
-                            {tables_summary}
-                            
-                            💼 USER'S PORTFOLIO:
-                            {portfolio_summary}
-                            
-                            📝 PDF CONTENT:
-                            {pdf_text_for_ai}
-                            
-                            Please provide a STRUCTURED analysis using this format:
-                            
-                            📋 **DOCUMENT SUMMARY**
-                            [2-3 sentences describing what this PDF contains]
-                            
-                            📊 **KEY METRICS & DATA**
-                            [Extract specific numbers, percentages, dates, returns mentioned]
-                            • Metric: Value
-                            • Metric: Value
-                            
-                            📈 **INSIGHTS FROM CHARTS/TABLES**
-                            [Describe trends, patterns, or comparisons shown in tables/graphs]
-                            
-                            💡 **MAIN FINDINGS**
-                            [3-5 key takeaways from the document]
-                            
-                            🎯 **PORTFOLIO RELEVANCE**
-                            [How this information relates to the user's current holdings]
-                            
-                            ⚡ **RECOMMENDED ACTIONS**
-                            [Specific, actionable next steps - if applicable]
-                            
-                            Use actual numbers and be specific. Focus on actionable insights.
-                            """
-                            
-                            st.info("🤖 AI analyzing PDF content...")
-                            
-                            response = openai.chat.completions.create(
-                                model="gpt-4o-mini",
-                                messages=[
-                                    {"role": "system", "content": "You are an expert financial analyst specializing in portfolio management. Extract structured insights from documents including text, tables, and charts. Focus on numbers, trends, and actionable recommendations. Use clear formatting with emojis."},
-                                    {"role": "user", "content": analysis_prompt}
-                                ],
-                                temperature=0.7,
-                                max_tokens=1500
-                            )
-                            
-                            ai_analysis = response.choices[0].message.content
-                            
-                            # Clean PDF text before saving (remove null bytes and control characters)
-                            import re
-                            cleaned_pdf_text = pdf_text.replace('\x00', ' ').replace('\u0000', ' ')
-                            cleaned_pdf_text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', ' ', cleaned_pdf_text)
-                            cleaned_pdf_text = ''.join(char if char.isprintable() or char in '\n\t\r ' else ' ' for char in cleaned_pdf_text)
-                            cleaned_pdf_text = re.sub(r'\s+', ' ', cleaned_pdf_text).strip()
-                            
-                            # Save PDF to database
-                            save_result = db.save_pdf(
-                                user_id=user['id'],
-                                filename=uploaded_pdf.name,
-                                pdf_text=cleaned_pdf_text,  # Store cleaned text
-                                ai_summary=ai_analysis
-                            )
-                            
-                            if save_result['success']:
-                                st.success(f"✅ PDF '{uploaded_pdf.name}' saved to database!")
-                                # Refresh the page to update the PDF library count
-                                st.rerun()
-                            else:
-                                st.warning(f"⚠️ PDF analyzed but not saved: {save_result.get('error', 'Unknown error')}")
-                            
-                            # Display enhanced AI analysis with better formatting
-                            st.markdown("### 📄 Comprehensive PDF Analysis")
-                            st.markdown(f'<div class="ai-response-box">{ai_analysis}</div>', unsafe_allow_html=True)
-                            
-                            # Store in chat history
-                            st.session_state.chat_history.append({
-                                "q": f"Analyze PDF: {uploaded_pdf.name}", 
-                                "a": ai_analysis
-                            })
-                            
-                            # Reload PDF context from database
-                            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                            st.info("📄 PDF content is now stored and available for all future sessions!")
-                            
-                        else:
-                            st.error("❌ Could not extract text from PDF. Please ensure the PDF contains readable text.")
-                            
-                    except Exception as e:
-                        st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
-        
-        # Add some helpful suggestions
-        st.markdown("---")
-        st.markdown("**💡 Try asking:**")
-        st.caption("• 'What's my best performing stock?'")
-        st.caption("• 'How can I reduce portfolio risk?'")
-        st.caption("• 'Which sectors am I overexposed to?'")
-        st.caption("• 'Should I rebalance my portfolio?'")
-        st.caption("• 'Upload a research report for analysis'")
-    
+        st.markdown("**💡 Quick Access**")
+        st.caption("🤖 AI Assistant now has its own dedicated page!")
+        st.caption("📊 Access all portfolio insights and chat features")
+        st.caption("📚 Upload and analyze PDF documents")
+        st.caption("💬 Chat with AI about your portfolio")
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"**👤 {user['full_name']}**")
     st.sidebar.markdown(f"📧 {user['email']}")
@@ -969,6 +652,8 @@ def main_dashboard():
         pnl_analysis_page()
     elif page == "📈 Charts & Analytics":
         charts_page()
+    elif page == "🤖 AI Assistant":
+        ai_assistant_page()
     elif page == "📁 Upload More Files":
         upload_files_page()
 
@@ -1028,14 +713,30 @@ def portfolio_overview_page():
     """Portfolio overview with current week prices"""
     st.header("🏠 Portfolio Overview")
     
-    # Add manual update prices button (prices auto-update on login)
+    user = st.session_state.user
+    
+    # Add smart manual update prices button
     col1, col2, col3 = st.columns([1, 1, 4])
     with col1:
-        if st.button("🔄 Refresh Now", help="Manually refresh current prices (auto-updates on login)"):
-            with st.spinner("Updating prices..."):
-                update_all_live_prices()
-    
-    user = st.session_state.user
+        # Check how many holdings need updating
+        holdings = get_cached_holdings(user['id'])
+        holdings_needing_update = should_update_prices_today(holdings) if holdings else []
+        
+        if holdings_needing_update:
+            button_text = f"🔄 Update {len(holdings_needing_update)}"
+            help_text = f"Update prices for {len(holdings_needing_update)} holdings that haven't been updated today"
+        else:
+            button_text = "✅ All Current"
+            help_text = "All prices are up-to-date for today"
+        
+        if st.button(button_text, help=help_text, disabled=(len(holdings_needing_update) == 0)):
+            with st.spinner(f"Updating {len(holdings_needing_update)} holdings..."):
+                if holdings_needing_update:
+                    st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
+                    st.success(f"✅ Updated {len(holdings_needing_update)} holdings!")
+                    st.rerun()
+                else:
+                    st.info("All prices are already up-to-date!")
     
     # Use cached holdings data
     holdings = get_cached_holdings(user['id'])
@@ -1588,6 +1289,28 @@ def charts_page():
     if not holdings:
         st.info("No holdings found. Upload transaction files to see charts.")
         return
+    
+    # Add a small loading indicator for better UX
+    with st.spinner("📊 Loading charts..."):
+        pass  # This creates a brief loading state
+    
+    # Add info about page behavior
+    with st.expander("ℹ️ About Page Refreshing", expanded=False):
+        st.info("""
+        **Why does the page refresh when changing comparisons?**
+        
+        This is normal Streamlit behavior - when you change dropdown selections, the entire page reruns to update the charts with new data. 
+        
+        **Tips for smoother experience:**
+        - ✅ Your selections are preserved between refreshes
+        - ✅ Data is cached for faster loading
+        - ✅ Only the comparison section refreshes, not the entire app
+        
+        **What's optimized:**
+        - Session state maintains your selections
+        - Cached data reduces loading time
+        - Smart defaults for common selections
+        """)
     
     # Create tabs for different chart types
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
@@ -2803,13 +2526,21 @@ def charts_page():
             col1, col2 = st.columns([2, 1])
             
             with col1:
+                # Initialize session state for channels
+                if 'selected_channels_state' not in st.session_state:
+                    st.session_state.selected_channels_state = channels[:min(3, len(channels))]
+                
                 selected_channels = st.multiselect(
                     "🔍 Select channels to compare:",
                     channels,
-                    default=channels[:min(3, len(channels))],
+                    default=st.session_state.selected_channels_state,
                     help="Search and select multiple channels. Use Ctrl+Click for multiple selections.",
-                    placeholder="Type to search channels..."
+                    placeholder="Type to search channels...",
+                    key="channel_comparison_multiselect"
                 )
+                
+                # Update session state
+                st.session_state.selected_channels_state = selected_channels
             
             with col2:
                 st.markdown("**📊 Available Channels:**")
@@ -2823,16 +2554,16 @@ def charts_page():
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     if st.button("Select All", key="select_all_channels"):
-                        st.session_state.selected_channels = channels
+                        st.session_state.selected_channels_state = channels
                         st.rerun()
                 with col2:
                     if st.button("Select Top 3", key="select_top3_channels"):
                         top_channels = df_compare.groupby('channel')['current_value'].sum().nlargest(3).index.tolist()
-                        st.session_state.selected_channels = top_channels
+                        st.session_state.selected_channels_state = top_channels
                         st.rerun()
                 with col3:
                     if st.button("Clear All", key="clear_channels"):
-                        st.session_state.selected_channels = []
+                        st.session_state.selected_channels_state = []
                         st.rerun()
             
             if selected_channels:
@@ -2983,13 +2714,21 @@ def charts_page():
             col1, col2 = st.columns([2, 1])
             
             with col1:
+                # Initialize session state for asset types
+                if 'selected_types_state' not in st.session_state:
+                    st.session_state.selected_types_state = asset_types[:min(3, len(asset_types))]
+                
                 selected_types = st.multiselect(
                     "🔍 Select asset types to compare:",
                     asset_types,
-                    default=asset_types[:min(3, len(asset_types))],
+                    default=st.session_state.selected_types_state,
                     help="Search and select multiple asset types. Use Ctrl+Click for multiple selections.",
-                    placeholder="Type to search asset types..."
+                    placeholder="Type to search asset types...",
+                    key="asset_type_comparison_multiselect"
                 )
+                
+                # Update session state
+                st.session_state.selected_types_state = selected_types
             
             with col2:
                 st.markdown("**📊 Available Asset Types:**")
@@ -3085,13 +2824,21 @@ def charts_page():
                 holdings_list.append(f"{emoji} {row['ticker']} - {row['stock_name']} ({pnl_pct:+.1f}%)")
             
             # Enhanced multi-select for holdings
+            # Initialize session state for holdings
+            if 'selected_holdings_state' not in st.session_state:
+                st.session_state.selected_holdings_state = holdings_list[:min(3, len(holdings_list))]
+            
             selected_holdings = st.multiselect(
                 "🔍 Select holdings to compare (up to 10):",
                 holdings_list,
-                default=holdings_list[:min(3, len(holdings_list))],
+                default=st.session_state.selected_holdings_state,
                 help="Search and select multiple holdings. Use Ctrl+Click for multiple selections.",
-                placeholder="Type to search holdings..."
+                placeholder="Type to search holdings...",
+                key="holdings_comparison_multiselect"
             )
+            
+            # Update session state
+            st.session_state.selected_holdings_state = selected_holdings
             
             if selected_holdings:
                 # Extract tickers from selection (handle emoji and formatting)
@@ -3275,6 +3022,489 @@ def charts_page():
                 st.plotly_chart(fig_multi, use_container_width=True)
             else:
                 st.info("No holdings match the selected filters")
+
+def ai_assistant_page():
+    """Dedicated AI Assistant page"""
+    st.header("🤖 AI Assistant")
+    st.caption("Your intelligent portfolio advisor with access to all your data")
+    
+    user = st.session_state.user
+    
+    # Initialize chat history and PDF context
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+    
+    # Always load PDF context from database to ensure older session PDFs are included
+    st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+    
+    # Show PDF context status and refresh option
+    pdf_count = len(db.get_user_pdfs(user['id']))
+    if pdf_count > 0:
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.caption(f"📚 Loaded {pdf_count} PDFs from database for AI context")
+        with col2:
+            if st.button("🔄", key="refresh_pdf_context_main", help="Refresh PDF context from database"):
+                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+                st.success("PDF context refreshed!")
+                st.rerun()
+    
+    # Get portfolio context (cached)
+    holdings = get_cached_holdings(user['id'])
+    
+    # Get cached portfolio summary
+    portfolio_summary = get_cached_portfolio_summary(holdings)
+    
+    # Get user PDFs for the session
+    user_pdfs = db.get_user_pdfs(user['id'])
+    
+    # Enhanced chat interface
+    st.markdown("---")
+    st.markdown("**💬 Chat with AI**")
+    
+    # Chat input
+    user_question = st.text_input(
+        "Ask me anything about your portfolio:",
+        placeholder="e.g., 'How is my technology sector performing?' or 'Should I rebalance my portfolio?'",
+        key="ai_chat_input"
+    )
+    
+    if user_question:
+        with st.spinner("🤖 AI is thinking..."):
+            try:
+                import openai
+                openai.api_key = st.secrets["api_keys"]["open_ai"]
+                
+                # Safe float conversion helper
+                def safe_float(value, default=0):
+                    try:
+                        return float(value) if value is not None else default
+                    except (ValueError, TypeError):
+                        return default
+                
+                # Create comprehensive raw data context for AI
+                raw_data_context = "\n\n📊 RAW PORTFOLIO DATA (All Holdings with Details):\n"
+                raw_data_context += "=" * 80 + "\n"
+                
+                for idx, holding in enumerate(holdings, 1):
+                    current_price = holding.get('current_price') or holding.get('average_price', 0)
+                    current_value = safe_float(current_price, 0) * safe_float(holding.get('total_quantity'), 0)
+                    investment = safe_float(holding.get('total_quantity'), 0) * safe_float(holding.get('average_price'), 0)
+                    pnl = current_value - investment
+                    pnl_pct = ((current_value - investment) / investment * 100) if investment > 0 else 0
+                    
+                    raw_data_context += f"\n[{idx}] {holding.get('ticker', 'N/A')} - {holding.get('stock_name', 'N/A')}\n"
+                    raw_data_context += f"  • Asset Type: {holding.get('asset_type', 'Unknown')}\n"
+                    raw_data_context += f"  • Channel: {holding.get('channel', 'Unknown')}\n"
+                    raw_data_context += f"  • Sector: {holding.get('sector', 'Unknown')}\n"
+                    raw_data_context += f"  • Quantity: {holding.get('total_quantity', 0):,.2f}\n"
+                    raw_data_context += f"  • Avg Buy Price: ₹{holding.get('average_price', 0):,.2f}\n"
+                    raw_data_context += f"  • Current Price: ₹{current_price:,.2f}\n"
+                    raw_data_context += f"  • Investment: ₹{investment:,.2f}\n"
+                    raw_data_context += f"  • Current Value: ₹{current_value:,.2f}\n"
+                    raw_data_context += f"  • P&L: ₹{pnl:,.2f} ({pnl_pct:+.1f}%)\n"
+                    raw_data_context += "-" * 80 + "\n"
+                
+                # Get transactions data for detailed analysis
+                transactions_context = "\n\n📝 TRANSACTION HISTORY (Recent Activity):\n"
+                transactions_context += "=" * 80 + "\n"
+                try:
+                    # Get all transactions for the user (increased limit for comprehensive analysis)
+                    all_transactions = db.supabase.table('user_transactions').select('*').eq('user_id', user['id']).order('transaction_date', desc=True).limit(100).execute()
+                    
+                    if all_transactions.data:
+                        transactions_context += f"Total Transactions Available: {len(all_transactions.data)}\n\n"
+                        # Show more transactions for better context (50 instead of 20)
+                        for trans in all_transactions.data[:50]:
+                            transactions_context += f"Date: {trans.get('transaction_date', 'N/A')} | "
+                            transactions_context += f"Stock: {trans.get('ticker', 'N/A')} | "
+                            transactions_context += f"Type: {trans.get('transaction_type', 'N/A')} | "
+                            transactions_context += f"Qty: {trans.get('quantity', 0)} | "
+                            transactions_context += f"Price: ₹{trans.get('price', 0):,.2f} | "
+                            transactions_context += f"Channel: {trans.get('channel', 'N/A')}\n"
+                    else:
+                        transactions_context += "No transactions found.\n"
+                except Exception as e:
+                    transactions_context += f"Error loading transactions: {str(e)[:100]}\n"
+                
+                # Include PDF context
+                pdf_context_text = ""
+                
+                # Include ALL PDF summaries (more comprehensive)
+                recent_pdfs = db.get_user_pdfs(user['id'])
+                if recent_pdfs:
+                    pdf_context_text += f"\n\n📚 UPLOADED DOCUMENTS ({len(recent_pdfs)} total):"
+                    for pdf in recent_pdfs:
+                        pdf_context_text += f"\n\n📄 {pdf['filename']}:"
+                        if pdf.get('ai_summary'):
+                            # Include full AI summary (not truncated)
+                            pdf_context_text += f"\n{pdf.get('ai_summary', 'No summary')}"
+                        else:
+                            # If no summary, include first part of PDF text
+                            pdf_text = pdf.get('pdf_text', '')
+                            if pdf_text:
+                                pdf_context_text += f"\n{pdf_text[:1000]}..."
+                
+                # If no PDFs, note that
+                if not recent_pdfs:
+                    pdf_context_text = "\n\n📄 No documents uploaded yet."
+                
+                full_context = f"""🎯 COMPREHENSIVE DATA SOURCES (COMBINE BOTH for complete analysis):
+
+1️⃣ CURRENT PORTFOLIO DATA (Financial metrics - prices, P&L, values):
+{raw_data_context}
+
+2️⃣ PORTFOLIO SUMMARY (Aggregated performance view):
+{portfolio_summary}
+
+3️⃣ TRANSACTION HISTORY (Recent activity and patterns):
+{transactions_context}
+
+4️⃣ RESEARCH DOCUMENTS (Market analysis, insights, and outlook):
+{pdf_context_text}
+
+📋 USER QUESTION: {user_question}
+
+💡 ANALYSIS APPROACH: 
+- Use portfolio data for current financial performance
+- Use PDF research for market insights and future outlook  
+- COMBINE both sources for comprehensive analysis
+- Show how research insights align with current portfolio performance"""
+                
+                # Add debug expander to show what's being sent to AI (only if needed)
+                with st.expander("🔍 Debug: Full context sent to AI (click to expand)", expanded=False):
+                    approx_tokens = len(full_context) // 4
+                    st.caption(f"Total characters: {len(full_context):,} | Estimated tokens: {approx_tokens:,}")
+                    st.text_area("Full context:", full_context, height=400)
+                
+                # Use GPT-4 for larger context window (128K tokens) - better for comprehensive data
+                model_to_use = "gpt-4o"  # 128K context window, better reasoning
+                
+                response = openai.chat.completions.create(
+                    model=model_to_use,
+                    messages=[
+                        {"role": "system", "content": """You are an expert portfolio analyst with COMPLETE ACCESS to:
+
+📊 DATA SOURCES (Use BOTH for comprehensive analysis):
+1. RAW PORTFOLIO DATA - Current prices, P&L, values, holdings details
+2. Portfolio Summary - Aggregated by asset type, channel, sector, top gainers/losers
+3. TRANSACTION HISTORY - Recent buy/sell transactions with dates, prices, quantities
+4. UPLOADED PDF DOCUMENTS - Research reports, analysis, and market insights
+
+🎯 ANALYSIS APPROACH:
+- COMBINE portfolio data with PDF research for comprehensive insights
+- Use portfolio data for current financial metrics (prices, P&L, values)
+- Use PDF data for research insights, market analysis, and future outlook
+- Create a unified analysis that leverages BOTH sources
+
+📈 ANALYSIS REQUIREMENTS:
+- ALWAYS cite specific tickers and stock names from RAW PORTFOLIO DATA
+- Use EXACT numbers from portfolio data (P&L %, prices, quantities, values)
+- INTEGRATE PDF research insights with current portfolio performance
+- Compare holdings within same channel/sector when relevant
+- Reference transaction history to understand buying patterns
+- Provide data-driven recommendations combining both sources
+
+💡 ANSWER STRUCTURE:
+1. Current performance using portfolio data
+2. Research insights from PDFs (market analysis, outlook, recommendations)
+3. Combined analysis showing how research aligns with current performance
+4. Actionable recommendations based on BOTH portfolio data AND research
+
+✅ COMBINE BOTH SOURCES:
+- "Current Price: ₹1,165.80 (portfolio) + Research shows positive momentum..."
+- "P&L: +38.3% (portfolio) + PDF analysis suggests continued growth potential..."
+- "Portfolio shows strong performance + Research confirms bullish outlook..."
+
+🚫 AVOID:
+- Ignoring either portfolio data OR PDF insights
+- Generic advice without specific data
+- Not connecting research insights to current performance
+
+Use emojis appropriately and be encouraging but data-focused."""},
+                        {"role": "user", "content": full_context}
+                    ],
+                    temperature=0.7,
+                    max_tokens=4000,  # Increased significantly for comprehensive responses
+                    timeout=60  # Increased timeout for better model
+                )
+                
+                if not response or not response.choices:
+                    st.error("❌ No response received from AI. Please try again.")
+                    st.stop()
+                
+                ai_response = response.choices[0].message.content
+                
+                if not ai_response:
+                    st.error("❌ Empty response from AI. Please try again.")
+                    st.stop()
+                
+                # Display the response immediately
+                st.markdown("---")
+                st.markdown("### 💬 AI Response:")
+                st.success(ai_response)
+                
+                # Store in chat history
+                st.session_state.chat_history.append({
+                    "q": user_question,
+                    "a": ai_response
+                })
+                
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)[:100]}")
+                st.error(f"Full error: {str(e)}")  # Show full error for debugging
+    
+    # Display chat history
+    if st.session_state.chat_history:
+        st.markdown("---")
+        st.markdown("**💭 Chat History**")
+        
+        for i, chat in enumerate(reversed(st.session_state.chat_history[-5:])):  # Show last 5
+            with st.expander(f"Q: {chat['q'][:50]}..."):
+                st.markdown(f"**Question:** {chat['q']}")
+                st.markdown(f"**Answer:** {chat['a']}")
+    
+    # PDF Library Section
+    st.markdown("---")
+    st.markdown("**📚 Your PDF Library**")
+    
+    if user_pdfs and len(user_pdfs) > 0:
+        for pdf in user_pdfs:
+            with st.expander(f"📄 {pdf['filename']}"):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.caption(f"📅 Uploaded: {pdf['uploaded_at'][:10]}")
+                    
+                    if pdf.get('ai_summary'):
+                        st.markdown("**🤖 AI Summary:**")
+                        st.info(pdf['ai_summary'])
+                    
+                    # Add button to use this PDF for analysis
+                    if st.button(f"🔍 Analyze {pdf['filename'][:20]}...", key=f"analyze_{pdf['id']}", help="Use this PDF for AI analysis"):
+                        try:
+                            import openai
+                            openai.api_key = st.secrets["api_keys"]["open_ai"]
+                            
+                            # Get portfolio context
+                            portfolio_summary = get_cached_portfolio_summary(holdings)
+                            
+                            # Analyze the stored PDF
+                            analysis_prompt = f"""
+                            Analyze this stored PDF document for portfolio management insights.
+                            
+                            📄 DOCUMENT INFO:
+                            - Filename: {pdf['filename']}
+                            - Uploaded: {pdf['uploaded_at'][:10]}
+                            
+                            💼 USER'S PORTFOLIO:
+                            {portfolio_summary}
+                            
+                            📝 PDF CONTENT:
+                            {pdf.get('pdf_text', '')[:5000]}...
+                            
+                            🤖 PREVIOUS AI SUMMARY:
+                            {pdf.get('ai_summary', 'No previous summary')}
+                            
+                            Please provide a fresh analysis focusing on:
+                            1. Key insights from the document
+                            2. How it relates to the user's current portfolio
+                            3. Actionable recommendations
+                            
+                            Be specific and actionable. Use emojis and clear formatting.
+                            """
+                            
+                            response = openai.chat.completions.create(
+                                model="gpt-4o-mini",
+                                messages=[{"role": "user", "content": analysis_prompt}],
+                                temperature=0.7,
+                                max_tokens=800
+                            )
+                            
+                            fresh_analysis = response.choices[0].message.content
+                            
+                            # Display the fresh analysis
+                            st.markdown("### 🔍 Fresh Analysis")
+                            st.markdown(fresh_analysis)
+                            
+                            # Store in chat history
+                            st.session_state.chat_history.append({
+                                "q": f"Analyze PDF: {pdf['filename']}", 
+                                "a": fresh_analysis
+                            })
+                            
+                        except Exception as e:
+                            st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
+                
+                with col2:
+                    if st.button("🗑️", key=f"del_{pdf['id']}", help="Delete this PDF"):
+                        if db.delete_pdf(pdf['id']):
+                            st.success("Deleted!")
+                            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+                            st.rerun()
+    else:
+        st.caption("No PDFs uploaded yet")
+    
+    # PDF Upload for AI Analysis
+    st.markdown("---")
+    st.markdown("**📤 Upload PDF for AI Analysis**")
+    
+    uploaded_pdf = st.file_uploader(
+        "Choose a PDF file to analyze",
+        type=['pdf'],
+        help="Upload research reports, financial statements, or any document for AI analysis"
+    )
+    
+    if uploaded_pdf:
+        if st.button("🔍 Analyze PDF", type="primary"):
+            with st.spinner("🔍 Analyzing PDF..."):
+                try:
+                    import PyPDF2
+                    import pdfplumber
+                    import openai
+                    openai.api_key = st.secrets["api_keys"]["open_ai"]
+                    
+                    # Enhanced PDF extraction with tables and structure
+                    pdf_text = ""
+                    tables_found = []
+                    page_count = 0
+                    
+                    st.info("🔍 Extracting content from PDF (text, tables, structure)...")
+                    
+                    # Try pdfplumber first (better for tables)
+                    with pdfplumber.open(uploaded_pdf) as pdf:
+                        for page_num, page in enumerate(pdf.pages, 1):
+                            page_count += 1
+                            page_text = page.extract_text()
+                            if page_text:
+                                pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+                            
+                            # Extract tables
+                            tables = page.extract_tables()
+                            if tables:
+                                for table_idx, table in enumerate(tables, 1):
+                                    tables_found.append({
+                                        'page': page_num,
+                                        'table': table_idx,
+                                        'data': table
+                                    })
+                    
+                    if pdf_text:
+                        st.success(f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, found {len(tables_found)} tables")
+                        
+                        # Truncate if too long (OpenAI has token limits)
+                        pdf_text_for_ai = pdf_text[:10000] + "..." if len(pdf_text) > 10000 else pdf_text
+                        
+                        # Prepare tables summary
+                        tables_summary = ""
+                        if tables_found:
+                            tables_summary = f"\n📊 Tables Found: {len(tables_found)}\n"
+                            for table in tables_found[:3]:  # Show first 3 tables
+                                tables_summary += f"• Page {table['page']}, Table {table['table']}: {len(table['data'])} rows\n"
+                        
+                        # Get portfolio context
+                        portfolio_summary = get_cached_portfolio_summary(holdings)
+                        
+                        # Enhanced analysis prompt with structured output
+                        analysis_prompt = f"""
+                        Analyze this PDF document comprehensively for portfolio management insights.
+                        
+                        📄 DOCUMENT INFO:
+                        - Filename: {uploaded_pdf.name}
+                        - Pages: {page_count}
+                        {tables_summary}
+                        
+                        💼 USER'S PORTFOLIO:
+                        {portfolio_summary}
+                        
+                        📝 PDF CONTENT:
+                        {pdf_text_for_ai}
+                        
+                        Please provide a STRUCTURED analysis using this format:
+                        
+                        📋 **DOCUMENT SUMMARY**
+                        [2-3 sentences describing what this PDF contains]
+                        
+                        📊 **KEY METRICS & DATA**
+                        [Extract specific numbers, percentages, dates, returns mentioned]
+                        • Metric: Value
+                        • Metric: Value
+                        
+                        📈 **INSIGHTS FROM CHARTS/TABLES**
+                        [Describe trends, patterns, or comparisons shown in tables/graphs]
+                        
+                        💡 **MAIN FINDINGS**
+                        [3-5 key takeaways from the document]
+                        
+                        🎯 **PORTFOLIO RELEVANCE**
+                        [How this information relates to the user's current holdings]
+                        
+                        ⚡ **RECOMMENDED ACTIONS**
+                        [Specific, actionable next steps - if applicable]
+                        
+                        Use actual numbers and be specific. Focus on actionable insights.
+                        """
+                        
+                        response = openai.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[{"role": "user", "content": analysis_prompt}],
+                            temperature=0.7,
+                            max_tokens=1000
+                        )
+                        
+                        ai_analysis = response.choices[0].message.content
+                        
+                        # Display the analysis
+                        st.markdown("### 🤖 AI Analysis")
+                        st.markdown(ai_analysis)
+                        
+                        # Store in chat history
+                        st.session_state.chat_history.append({
+                            "q": f"Analyze PDF: {uploaded_pdf.name}", 
+                            "a": ai_analysis
+                        })
+                        
+                        # Clean PDF text before saving (remove null bytes and control characters)
+                        import re
+                        cleaned_pdf_text = pdf_text.replace('\x00', ' ').replace('\u0000', ' ')
+                        cleaned_pdf_text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', ' ', cleaned_pdf_text)
+                        cleaned_pdf_text = ''.join(char if char.isprintable() or char in '\n\t\r ' else ' ' for char in cleaned_pdf_text)
+                        cleaned_pdf_text = re.sub(r'\s+', ' ', cleaned_pdf_text).strip()
+                        
+                        # Save PDF to database
+                        save_result = db.save_pdf(
+                            user_id=user['id'],
+                            filename=uploaded_pdf.name,
+                            pdf_text=cleaned_pdf_text,  # Store cleaned text
+                            ai_summary=ai_analysis
+                        )
+                        
+                        if save_result['success']:
+                            st.success(f"✅ PDF '{uploaded_pdf.name}' saved to database!")
+                            # Refresh the page to update the PDF library count
+                            st.rerun()
+                            
+                            # Reload PDF context from database
+                            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+                            st.info("📄 PDF content is now stored and available for all future sessions!")
+                            
+                        else:
+                            st.error(f"❌ Could not save PDF: {save_result.get('error', 'Unknown error')}")
+                    else:
+                        st.error("❌ Could not extract text from PDF. Please ensure the PDF contains readable text.")
+                        
+                except Exception as e:
+                    st.error(f"❌ Error processing PDF: {str(e)[:100]}")
+    
+    # Quick Tips Section
+    st.markdown("---")
+    st.markdown("**💡 Quick Tips**")
+    st.caption("Try asking me:")
+    st.caption("• 'How is my portfolio performing overall?'")
+    st.caption("• 'Which sectors are my best performers?'")
+    st.caption("• 'How can I reduce portfolio risk?'")
+    st.caption("• 'Which channels are giving me the best returns?'")
+    st.caption("• 'Should I rebalance my portfolio?'")
+    st.caption("• 'Upload a research report for analysis'")
 
 def upload_files_page():
     """Enhanced upload more files page"""

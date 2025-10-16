@@ -269,6 +269,16 @@ class SharedDatabaseManager:
             # Update stock price error
             pass
     
+    def get_stock_last_updated(self, stock_id: str) -> Optional[str]:
+        """Get last updated timestamp for a stock"""
+        try:
+            response = self.supabase.table('stock_master').select('last_updated').eq('id', stock_id).execute()
+            if response.data:
+                return response.data[0].get('last_updated')
+            return None
+        except Exception as e:
+            return None
+    
     def get_transactions_by_stock(self, user_id: str, stock_id: str) -> List[Dict[str, Any]]:
         """Get all transactions for a specific stock"""
         try:
