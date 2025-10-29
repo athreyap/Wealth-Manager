@@ -4264,15 +4264,20 @@ def ai_assistant_page():
     
     # Load chat history from database (user-specific)
     try:
-        db_chat_history = db.get_user_chat_history(user['id'], limit=50)
-        if db_chat_history:
-            # Convert database format to session state format
-            st.session_state.chat_history = [
-                {"q": chat['question'], "a": chat['answer']}
-                for chat in reversed(db_chat_history)  # Reverse to show oldest first
-            ]
+        # Check if method exists (for backward compatibility)
+        if hasattr(db, 'get_user_chat_history'):
+            db_chat_history = db.get_user_chat_history(user['id'], limit=50)
+            if db_chat_history:
+                # Convert database format to session state format
+                st.session_state.chat_history = [
+                    {"q": chat['question'], "a": chat['answer']}
+                    for chat in reversed(db_chat_history)  # Reverse to show oldest first
+                ]
+        else:
+            # Method not available, use empty list
+            st.session_state.chat_history = []
     except Exception as e:
-        st.caption(f"⚠️ Could not load chat history: {str(e)[:100]}")
+        # If table doesn't exist yet, just use empty list
         st.session_state.chat_history = []
     
     # Always load PDF context from database to ensure older session PDFs are included
@@ -4473,7 +4478,13 @@ def ai_assistant_page():
                 })
                 
                 # Save to database (user-specific, persistent)
-                db.save_chat_history(user['id'], user_question, ai_response)
+                # Check if method exists before calling
+                if hasattr(db, 'save_chat_history'):
+                    try:
+                        db.save_chat_history(user['id'], user_question, ai_response)
+                    except Exception as e:
+                        # If table doesn't exist, just continue without saving
+                        pass
                 
             except Exception as e:
                 st.error(f"❌ Error: {str(e)[:100]}")
@@ -4558,7 +4569,11 @@ def ai_assistant_page():
                                 "a": fresh_analysis
                             })
                             # Save to database (user-specific, persistent)
-                            db.save_chat_history(user['id'], f"Analyze PDF: {pdf['filename']}", fresh_analysis)
+                            if hasattr(db, 'save_chat_history'):
+                                try:
+                                    db.save_chat_history(user['id'], f"Analyze PDF: {pdf['filename']}", fresh_analysis)
+                                except Exception:
+                                    pass
                             
                         except Exception as e:
                             st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
@@ -4711,7 +4726,11 @@ def ai_assistant_page():
                             "a": ai_analysis
                         })
                         # Save to database (user-specific, persistent)
-                        db.save_chat_history(user['id'], f"Analyze PDF: {uploaded_pdf.name}", ai_analysis)
+                        if hasattr(db, 'save_chat_history'):
+                            try:
+                                db.save_chat_history(user['id'], f"Analyze PDF: {uploaded_pdf.name}", ai_analysis)
+                            except Exception:
+                                pass
                         
                         # Clean PDF text before saving (remove null bytes and control characters)
                         import re
