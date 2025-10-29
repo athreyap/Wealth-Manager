@@ -208,6 +208,49 @@ class SharedDatabaseManager:
         except Exception as e:
             return ""
     
+    # ========================================================================
+    # CHAT HISTORY MANAGEMENT (User-Specific)
+    # ========================================================================
+    
+    def save_chat_history(self, user_id: str, question: str, answer: str) -> bool:
+        """Save a chat question/answer to database (user-specific)"""
+        try:
+            self.supabase.table('user_chat_history').insert({
+                'user_id': user_id,
+                'question': question,
+                'answer': answer
+            }).execute()
+            return True
+        except Exception as e:
+            st.error(f"Error saving chat history: {str(e)}")
+            return False
+    
+    def get_user_chat_history(self, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get chat history for a specific user (user-specific, NOT shared)"""
+        try:
+            response = self.supabase.table('user_chat_history').select('*').eq(
+                'user_id', user_id
+            ).order('created_at', desc=True).limit(limit).execute()
+            
+            return response.data
+        except Exception as e:
+            st.error(f"Error fetching chat history: {str(e)}")
+            return []
+    
+    def delete_chat_history(self, user_id: str, chat_id: str = None) -> bool:
+        """Delete chat history for a user (all or specific entry)"""
+        try:
+            if chat_id:
+                # Delete specific chat entry
+                self.supabase.table('user_chat_history').delete().eq('id', chat_id).eq('user_id', user_id).execute()
+            else:
+                # Delete all chat history for user
+                self.supabase.table('user_chat_history').delete().eq('user_id', user_id).execute()
+            return True
+        except Exception as e:
+            st.error(f"Error deleting chat history: {str(e)}")
+            return False
+    
     def create_portfolio(self, user_id: str, portfolio_name: str) -> Dict[str, Any]:
         """Create portfolio"""
         try:

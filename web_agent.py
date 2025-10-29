@@ -4326,8 +4326,8 @@ def ai_assistant_page():
                 # Create streamlined portfolio data context (limit to reduce tokens)
                 raw_data_context = "\n\n📊 PORTFOLIO DATA (Top Holdings):\n"
                 
-                # Limit to top 30 holdings to reduce token usage
-                top_holdings = holdings[:30]
+                # Limit to top 20 holdings to reduce token usage (was 30)
+                top_holdings = holdings[:20]
                 for idx, holding in enumerate(top_holdings, 1):
                     current_price = holding.get('current_price') or holding.get('average_price', 0)
                     current_value = safe_float(current_price, 0) * safe_float(holding.get('total_quantity'), 0)
@@ -4336,20 +4336,20 @@ def ai_assistant_page():
                     pnl_pct = ((current_value - investment) / investment * 100) if investment > 0 else 0
                     
                     # Compact format to reduce tokens
-                    raw_data_context += f"{idx}. {holding.get('ticker', 'N/A')} ({holding.get('stock_name', 'N/A')[:30]}) | "
+                    raw_data_context += f"{idx}. {holding.get('ticker', 'N/A')} ({holding.get('stock_name', 'N/A')[:25]}) | "
                     raw_data_context += f"Qty: {holding.get('total_quantity', 0):,.0f} | "
                     raw_data_context += f"Avg: ₹{holding.get('average_price', 0):,.0f} | "
                     raw_data_context += f"Curr: ₹{current_price:,.0f} | "
                     raw_data_context += f"P&L: {pnl_pct:+.1f}%\n"
                 
-                if len(holdings) > 30:
-                    raw_data_context += f"\n... and {len(holdings) - 30} more holdings\n"
+                if len(holdings) > 20:
+                    raw_data_context += f"\n... and {len(holdings) - 20} more holdings\n"
                 
                 # Get transactions data (limited to reduce tokens)
                 transactions_context = "\n\n📝 RECENT TRANSACTIONS:\n"
                 try:
-                    # Limit to 20 most recent transactions
-                    all_transactions = db.supabase.table('user_transactions').select('*').eq('user_id', user['id']).order('transaction_date', desc=True).limit(20).execute()
+                    # Limit to 15 most recent transactions (was 20)
+                    all_transactions = db.supabase.table('user_transactions').select('*').eq('user_id', user['id']).order('transaction_date', desc=True).limit(15).execute()
                     
                     if all_transactions.data:
                         for trans in all_transactions.data:
@@ -4370,31 +4370,53 @@ def ai_assistant_page():
                 # Include PDF summaries (limited to reduce tokens)
                 recent_pdfs = db.get_user_pdfs(user['id'])
                 if recent_pdfs:
-                    # Limit to last 5 PDFs and truncate summaries
+                    # Limit to last 3 PDFs and truncate summaries (was 5 PDFs, 500 chars)
                     pdf_context_text += f"\n\n📚 PDF DOCUMENTS ({len(recent_pdfs)} total):"
-                    for pdf in recent_pdfs[:5]:  # Only last 5 PDFs
-                        pdf_context_text += f"\n\n📄 {pdf['filename']}:"
+                    for pdf in recent_pdfs[:3]:  # Only last 3 PDFs
+                        pdf_context_text += f"\n\n📄 {pdf['filename'][:40]}:"
                         if pdf.get('ai_summary'):
-                            # Truncate summary to 500 chars to save tokens
+                            # Truncate summary to 300 chars to save tokens (was 500)
                             summary = pdf.get('ai_summary', 'No summary')
-                            pdf_context_text += f"\n{summary[:500]}{'...' if len(summary) > 500 else ''}"
+                            pdf_context_text += f"\n{summary[:300]}{'...' if len(summary) > 300 else ''}"
                         else:
-                            # Truncate PDF text to 500 chars
+                            # Truncate PDF text to 300 chars
                             pdf_text = pdf.get('pdf_text', '')
                             if pdf_text:
-                                pdf_context_text += f"\n{pdf_text[:500]}..."
+                                pdf_context_text += f"\n{pdf_text[:300]}..."
                     
-                    if len(recent_pdfs) > 5:
-                        pdf_context_text += f"\n\n... and {len(recent_pdfs) - 5} more PDFs"
+                    if len(recent_pdfs) > 3:
+                        pdf_context_text += f"\n\n... and {len(recent_pdfs) - 3} more PDFs"
                 
                 # If no PDFs, note that
                 if not recent_pdfs:
                     pdf_context_text = "\n\n📄 No documents uploaded yet."
                 
-                # Truncate portfolio summary if too long
-                summary_text = portfolio_summary[:2000] + "..." if len(portfolio_summary) > 2000 else portfolio_summary
+                # Truncate portfolio summary if too long (reduced from 2000 to 1500)
+                summary_text = portfolio_summary[:1500] + "..." if len(portfolio_summary) > 1500 else portfolio_summary
                 
                 full_context = f"""📊 PORTFOLIO DATA:
+{raw_data_context}
+
+📈 SUMMARY:
+{summary_text}
+
+📝 RECENT TRANSACTIONS:
+{transactions_context}
+
+📚 RESEARCH DOCUMENTS:
+{pdf_context_text}
+
+❓ QUESTION: {user_question}
+
+💡 Analyze using portfolio data, transactions, and PDF insights."""
+                
+                # Estimate tokens and warn if too large
+                approx_tokens = len(full_context) // 4
+                if approx_tokens > 25000:  # Warn if approaching limit
+                    st.warning(f"⚠️ Large context: ~{approx_tokens:,} tokens. Reducing further...")
+                    # Further reduce by truncating summary
+                    summary_text = portfolio_summary[:1000] + "..."
+                    full_context = f"""📊 PORTFOLIO DATA:
 {raw_data_context}
 
 📈 SUMMARY:
@@ -4416,56 +4438,17 @@ def ai_assistant_page():
                     st.caption(f"Total characters: {len(full_context):,} | Estimated tokens: {approx_tokens:,}")
                     st.text_area("Full context:", full_context, height=400)
                 
-                # Use GPT-4 for larger context window (128K tokens) - better for comprehensive data
-                model_to_use = "gpt-4o"  # 128K context window, better reasoning
+                # Use GPT-4o with shorter system prompt to reduce tokens
+                model_to_use = "gpt-4o"
                 
                 response = openai.chat.completions.create(
                     model=model_to_use,
                     messages=[
-                        {"role": "system", "content": """You are an expert portfolio analyst with COMPLETE ACCESS to:
-
-📊 DATA SOURCES (Use BOTH for comprehensive analysis):
-1. RAW PORTFOLIO DATA - Current prices, P&L, values, holdings details
-2. Portfolio Summary - Aggregated by asset type, channel, sector, top gainers/losers
-3. TRANSACTION HISTORY - Recent buy/sell transactions with dates, prices, quantities
-4. UPLOADED PDF DOCUMENTS - Research reports, analysis, and market insights
-
-🎯 ANALYSIS APPROACH:
-- COMBINE portfolio data with PDF research for comprehensive insights
-- Use portfolio data for current financial metrics (prices, P&L, values)
-- Use PDF data for research insights, market analysis, and future outlook
-- Create a unified analysis that leverages BOTH sources
-
-📈 ANALYSIS REQUIREMENTS:
-- ALWAYS cite specific tickers and stock names from RAW PORTFOLIO DATA
-- Use EXACT numbers from portfolio data (P&L %, prices, quantities, values)
-- INTEGRATE PDF research insights with current portfolio performance
-- Compare holdings within same channel/sector when relevant
-- Reference transaction history to understand buying patterns
-- Provide data-driven recommendations combining both sources
-
-💡 ANSWER STRUCTURE:
-1. Current performance using portfolio data
-2. Research insights from PDFs (market analysis, outlook, recommendations)
-3. Combined analysis showing how research aligns with current performance
-4. Actionable recommendations based on BOTH portfolio data AND research
-
-✅ COMBINE BOTH SOURCES:
-- "Current Price: ₹1,165.80 (portfolio) + Research shows positive momentum..."
-- "P&L: +38.3% (portfolio) + PDF analysis suggests continued growth potential..."
-- "Portfolio shows strong performance + Research confirms bullish outlook..."
-
-🚫 AVOID:
-- Ignoring either portfolio data OR PDF insights
-- Generic advice without specific data
-- Not connecting research insights to current performance
-
-Use emojis appropriately and be encouraging but data-focused."""},
+                        {"role": "system", "content": """You are an expert portfolio analyst. Use the provided portfolio data, transactions, and PDF research to answer questions. Cite specific tickers and numbers. Provide data-driven recommendations."""},
                         {"role": "user", "content": full_context}
                     ],
                     temperature=0.7,
-                    max_tokens=4000,  # Increased significantly for comprehensive responses
-                    timeout=60  # Increased timeout for better model
+                    max_tokens=2000  # Limit output tokens as well
                 )
                 
                 if not response or not response.choices:
