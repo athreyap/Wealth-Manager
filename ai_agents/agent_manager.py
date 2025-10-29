@@ -50,7 +50,7 @@ class AgentManager:
         self.last_analysis = None
         self.analysis_cache = {}
     
-    def analyze_portfolio(self, holdings: List[Dict[str, Any]], user_profile: Dict[str, Any] = None, pdf_context: str = None) -> Dict[str, Any]:
+    def analyze_portfolio(self, holdings: List[Dict[str, Any]], user_profile: Dict[str, Any] = None, pdf_context: str = None, transactions: List[Dict[str, Any]] = None, historical_prices: Dict[str, List[Dict[str, Any]]] = None, stock_master: List[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Run comprehensive portfolio analysis using all agents
         
@@ -58,6 +58,9 @@ class AgentManager:
             holdings: List of portfolio holdings
             user_profile: User preferences and goals
             pdf_context: Text from uploaded PDFs for additional context
+            transactions: List of user transactions (buy/sell history)
+            historical_prices: Dict mapping ticker to list of historical price data
+            stock_master: List of all stock master records with current prices
         """
         try:
             analysis_data = {
@@ -69,7 +72,10 @@ class AgentManager:
                 },
                 "user_id": user_profile.get("user_id") if user_profile else None,
                 "user_profile": user_profile or {},
-                "pdf_context": pdf_context or ""  # Add PDF context
+                "pdf_context": pdf_context or "",  # PDF research documents
+                "transactions": transactions or [],  # All user transactions
+                "historical_prices": historical_prices or {},  # Historical price data by ticker
+                "stock_master": stock_master or []  # Complete stock master data with current prices
             }
             
             # Run analysis with each agent using performance optimization
@@ -90,32 +96,21 @@ class AgentManager:
             strategy_insights = performance_optimizer.optimize_agent_analysis(
                 "strategy_agent", 
                 self.strategy_agent.analyze, 
-                {
-                    "portfolio_data": analysis_data,
-                    "user_profile": user_profile or {}
-                }, 
+                analysis_data, 
                 "recommendations"
             )
             
             scenario_insights = performance_optimizer.optimize_agent_analysis(
                 "scenario_agent", 
                 self.scenario_agent.analyze, 
-                {
-                    "portfolio_data": analysis_data.get("portfolio_data"),
-                    "user_profile": user_profile or {},
-                    "pdf_context": pdf_context or ""
-                }, 
+                analysis_data, 
                 "scenario_analysis"
             )
             
             recommendation_insights = performance_optimizer.optimize_agent_analysis(
                 "recommendation_agent",
                 self.recommendation_agent.analyze,
-                {
-                    "portfolio_data": analysis_data.get("portfolio_data"),
-                    "user_profile": user_profile or {},
-                    "pdf_context": pdf_context or ""
-                },
+                analysis_data,
                 "investment_recommendations"
             )
             
@@ -273,8 +268,18 @@ def get_agent_manager():
         st.session_state.agent_manager = AgentManager()
     return st.session_state.agent_manager
 
-def run_ai_analysis(holdings: List[Dict[str, Any]], user_profile: Dict[str, Any] = None, pdf_context: str = None) -> Dict[str, Any]:
-    """Run AI analysis on portfolio data with comprehensive context including PDFs"""
+def run_ai_analysis(holdings: List[Dict[str, Any]], user_profile: Dict[str, Any] = None, pdf_context: str = None, transactions: List[Dict[str, Any]] = None, historical_prices: Dict[str, List[Dict[str, Any]]] = None, stock_master: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Run AI analysis on portfolio data with comprehensive context including PDFs, transactions, historical prices, and stock master
+    
+    Args:
+        holdings: List of portfolio holdings
+        user_profile: User preferences and goals
+        pdf_context: Text from uploaded PDFs
+        transactions: List of all user transactions
+        historical_prices: Dict mapping ticker to historical price data
+        stock_master: List of stock master records
+    """
     agent_manager = get_agent_manager()
     
     # Enhance analysis data with comprehensive context like AI Assistant gets
@@ -295,7 +300,7 @@ def run_ai_analysis(holdings: List[Dict[str, Any]], user_profile: Dict[str, Any]
         holding['pnl_percentage'] = pnl_pct
         holding['performance_rating'] = "Excellent" if pnl_pct > 50 else "Good" if pnl_pct > 20 else "Average" if pnl_pct > 0 else "Poor"
     
-    return agent_manager.analyze_portfolio(enhanced_holdings, user_profile, pdf_context)
+    return agent_manager.analyze_portfolio(enhanced_holdings, user_profile, pdf_context, transactions, historical_prices, stock_master)
 
 def get_ai_recommendations(limit: int = 5) -> List[Dict[str, Any]]:
     """Get top AI recommendations"""

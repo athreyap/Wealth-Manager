@@ -4350,24 +4350,333 @@ def ai_assistant_page():
                 if len(holdings) > 20:
                     raw_data_context += f"\n... and {len(holdings) - 20} more holdings\n"
                 
-                # Get transactions data (limited to reduce tokens)
-                transactions_context = "\n\n📝 RECENT TRANSACTIONS:\n"
+                # Get transactions data (smart filtering based on question)
+                transactions_context = "\n\n📝 TRANSACTION HISTORY:\n"
                 try:
-                    # Limit to 15 most recent transactions (was 20)
-                    all_transactions = db.supabase.table('user_transactions').select('*').eq('user_id', user['id']).order('transaction_date', desc=True).limit(15).execute()
+                    from datetime import datetime, timedelta
+                    
+                    # Detect if question asks about specific time period
+                    question_lower = user_question.lower()
+                    date_filter = None
+                    transaction_type_filter = None
+                    
+                    # Check for time period filters (more comprehensive detection)
+                    one_year_ago = datetime.now() - timedelta(days=365)
+                    six_months_ago = datetime.now() - timedelta(days=180)
+                    three_months_ago = datetime.now() - timedelta(days=90)
+                    
+                    if any(word in question_lower for word in ['1 year', 'one year', 'last year', 'past year', 'year ago', '365 days']):
+                        date_filter = one_year_ago.date().isoformat()
+                        transactions_context += f"📅 Filtered: Transactions from last 1 year (since {date_filter})\n"
+                    elif any(word in question_lower for word in ['6 months', 'six months', 'half year', '180 days']):
+                        date_filter = six_months_ago.date().isoformat()
+                        transactions_context += f"📅 Filtered: Transactions from last 6 months (since {date_filter})\n"
+                    elif any(word in question_lower for word in ['3 months', 'three months', 'quarter', '90 days']):
+                        date_filter = three_months_ago.date().isoformat()
+                        transactions_context += f"📅 Filtered: Transactions from last 3 months (since {date_filter})\n"
+                    
+                    # Check for transaction type filters
+                    if 'buy' in question_lower or 'purchase' in question_lower:
+                        transaction_type_filter = 'buy'
+                        transactions_context += f"📊 Filtered: BUY transactions only\n"
+                    elif 'sell' in question_lower:
+                        transaction_type_filter = 'sell'
+                        transactions_context += f"📊 Filtered: SELL transactions only\n"
+                    
+                    # Build query with filters - always filter by user_id
+                    # Use user_transactions_detailed view which includes ticker directly
+                    query = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user['id'])
+                    
+                    if date_filter:
+                        query = query.gte('transaction_date', date_filter)
+                    
+                    if transaction_type_filter:
+                        query = query.eq('transaction_type', transaction_type_filter)
+                    
+                    # Get filtered transactions, ordered by date
+                    # Increase limit when filters are applied to get more relevant data
+                    limit = 200 if (date_filter or transaction_type_filter) else 15
+                    all_transactions = query.order('transaction_date', desc=True).limit(limit).execute()
                     
                     if all_transactions.data:
+                        # Calculate summary statistics for filtered transactions
+                        total_investment = 0
+                        ticker_price_map = {}  # Track current prices for tickers
+                        
+                        # Get unique tickers from transactions
+                        unique_tickers = set()
                         for trans in all_transactions.data:
-                            # Compact format
+                            ticker = trans.get('ticker')
+                            if ticker:
+                                unique_tickers.add(ticker)
+                        
+                        # Fetch current prices for these tickers
+                        # Priority: stock_master.live_price (updated during login) > holdings > average_price
+                        
+                        # Method 1: Fetch all prices from stock_master in one query (most efficient)
+                        try:
+                            if unique_tickers:
+                                tickers_list = list(unique_tickers)[:100]  # Limit to 100 tickers
+                                stock_response = db.supabase.table('stock_master').select('ticker, live_price, asset_type').in_('ticker', tickers_list).execute()
+                                if stock_response.data:
+                                    for stock in stock_response.data:
+                                        ticker = stock.get('ticker')
+                                        live_price = stock.get('live_price')
+                                        if ticker and live_price:
+                                            price_val = safe_float(live_price, 0)
+                                            if price_val > 0:
+                                                ticker_price_map[ticker] = price_val
+                        except:
+                            pass
+                        
+                        # Method 2: For any missing prices, check cached holdings
+                        for ticker in unique_tickers:
+                            if ticker not in ticker_price_map:
+                                # Try to get from cached holdings first
+                                for holding in holdings:
+                                    if holding.get('ticker') == ticker:
+                                        current_price = holding.get('current_price') or holding.get('live_price') or holding.get('average_price', 0)
+                                        if current_price and safe_float(current_price, 0) > 0:
+                                            ticker_price_map[ticker] = safe_float(current_price, 0)
+                                            break
+                        
+                        # Method 3: For any still missing, fetch from holdings_detailed
+                        missing_tickers = [t for t in unique_tickers if t not in ticker_price_map]
+                        if missing_tickers:
+                            try:
+                                holding_data = db.get_user_holdings_detailed(user['id'])
+                                for holding in holding_data:
+                                    ticker = holding.get('ticker')
+                                    if ticker in missing_tickers:
+                                        current_price = holding.get('current_price') or holding.get('live_price') or holding.get('average_price', 0)
+                                        if current_price and safe_float(current_price, 0) > 0:
+                                            ticker_price_map[ticker] = safe_float(current_price, 0)
+                            except:
+                                pass
+                        
+                        # Method 4: Last resort - use price_fetcher for any remaining missing prices
+                        still_missing = [t for t in unique_tickers if t not in ticker_price_map]
+                        if still_missing and hasattr(st.session_state, 'price_fetcher') and st.session_state.price_fetcher:
+                            # Get asset types from stock_master query above
+                            asset_type_map = {}
+                            if stock_response and stock_response.data:
+                                for stock in stock_response.data:
+                                    asset_type_map[stock.get('ticker')] = stock.get('asset_type', 'stock')
+                            
+                            for ticker in still_missing[:10]:  # Limit to 10 to avoid too many API calls
+                                try:
+                                    asset_type = asset_type_map.get(ticker, 'stock')
+                                    price, source = st.session_state.price_fetcher.get_current_price(ticker, asset_type)
+                                    if price and price > 0:
+                                        ticker_price_map[ticker] = safe_float(price, 0)
+                                except:
+                                    pass
+                        
+                        # Calculate totals (if filtering by transaction_type, only count that type)
+                        for trans in all_transactions.data:
+                            qty = safe_float(trans.get('quantity', 0), 0)
+                            price = safe_float(trans.get('price', 0), 0)
+                            trans_type = trans.get('transaction_type', '').lower()
+                            if transaction_type_filter:
+                                # If filtering by type, only count that type
+                                if trans_type == transaction_type_filter:
+                                    if trans_type == 'buy':
+                                        total_investment += qty * price
+                                    elif trans_type == 'sell':
+                                        total_investment += qty * price  # For sell analysis, track sell proceeds
+                            else:
+                                # If no filter, include both buy and sell
+                                if trans_type == 'buy':
+                                    total_investment += qty * price
+                                elif trans_type == 'sell':
+                                    total_investment -= qty * price  # Subtract sell proceeds
+                        
+                        transactions_context += f"Total filtered transactions: {len(all_transactions.data)}\n"
+                        transactions_context += f"📊 CALCULATED SUMMARY FOR FILTERED TRANSACTIONS:\n"
+                        transactions_context += f"   Total Investment: ₹{total_investment:,.2f}\n"
+                        
+                        # Calculate current value and P&L if we have prices
+                        if ticker_price_map and len(ticker_price_map) > 0:
+                            total_current_value = 0
+                            ticker_quantities = {}  # Track net quantity per ticker from filtered transactions
+                            
+                            # First, identify which tickers were bought in the filtered period
+                            tickers_bought_in_period = set()
+                            for trans in all_transactions.data:
+                                trans_type = trans.get('transaction_type', '').lower()
+                                ticker = trans.get('ticker')
+                                if trans_type == 'buy' and ticker:
+                                    tickers_bought_in_period.add(ticker)
+                            
+                            # Get ALL transactions for these tickers (to account for sells that happened after the filter period)
+                            # This ensures we calculate net quantity correctly: buys from last year minus ALL sells
+                            if tickers_bought_in_period and date_filter:
+                                try:
+                                    # Get all transactions with ticker info via stock_master join
+                                    # Use the user_transactions_detailed view which already has ticker
+                                    all_trans_response = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user['id']).in_('ticker', list(tickers_bought_in_period)).order('transaction_date', desc=False).limit(1000).execute()
+                                    if all_trans_response.data:
+                                        all_transactions_for_calc = all_trans_response.data
+                                    else:
+                                        all_transactions_for_calc = all_transactions.data
+                                except Exception as e:
+                                    # Fallback to using filtered transactions only
+                                    all_transactions_for_calc = all_transactions.data
+                            else:
+                                all_transactions_for_calc = all_transactions.data
+                            
+                            # Calculate net quantities - only count buys from filtered period, but subtract ALL sells
+                            for trans in all_transactions_for_calc:
+                                trans_type = trans.get('transaction_type', '').lower()
+                                # Handle both direct ticker and nested ticker from stock_master join
+                                ticker = trans.get('ticker')
+                                qty = safe_float(trans.get('quantity', 0), 0)
+                                trans_date = trans.get('transaction_date')
+                                
+                                if ticker and ticker in ticker_price_map:
+                                    if ticker not in ticker_quantities:
+                                        ticker_quantities[ticker] = 0
+                                    
+                                    # If we have date filter AND transaction type filter (e.g., "1 year buy transactions")
+                                    if date_filter and transaction_type_filter == 'buy':
+                                        # Only count buys from the filtered date period
+                                        if trans_type == 'buy' and trans_date and str(trans_date) >= date_filter:
+                                            ticker_quantities[ticker] += qty
+                                        # Subtract ALL sells (even if outside the date range)
+                                        elif trans_type == 'sell':
+                                            ticker_quantities[ticker] -= qty
+                                    # If only date filter (no transaction type filter)
+                                    elif date_filter and not transaction_type_filter:
+                                        # Count buys from filtered period, subtract sells from filtered period
+                                        if trans_type == 'buy' and trans_date and str(trans_date) >= date_filter:
+                                            ticker_quantities[ticker] += qty
+                                        elif trans_type == 'sell' and trans_date and str(trans_date) >= date_filter:
+                                            ticker_quantities[ticker] -= qty
+                                    # If only transaction type filter (no date filter)
+                                    elif transaction_type_filter and not date_filter:
+                                        if trans_type == transaction_type_filter:
+                                            ticker_quantities[ticker] += qty
+                                    # No filters - count all buys and subtract all sells
+                                    else:
+                                        if trans_type == 'buy':
+                                            ticker_quantities[ticker] += qty
+                                        elif trans_type == 'sell':
+                                            ticker_quantities[ticker] -= qty
+                            
+                            for ticker, qty in ticker_quantities.items():
+                                if ticker in ticker_price_map and qty > 0:
+                                    total_current_value += qty * ticker_price_map[ticker]
+                            
+                            total_pnl = total_current_value - total_investment
+                            total_pnl_pct = (total_pnl / total_investment * 100) if total_investment > 0 else 0
+                            
+                            transactions_context += f"   Total Current Value: ₹{total_current_value:,.2f}\n"
+                            transactions_context += f"   Total P&L: ₹{total_pnl:+,.2f} ({total_pnl_pct:+.2f}%)\n"
+                            transactions_context += f"   ✅ Current prices available for {len(ticker_price_map)} ticker(s)\n"
+                        else:
+                            transactions_context += f"   ⚠️ Current prices not available - cannot calculate current value or P&L\n"
+                            transactions_context += f"   💡 Suggestion: Update prices using the 'Update Stale Prices' button\n"
+                        
+                        # Fetch historical price data for analysis (only if date filter is applied)
+                        historical_data_context = ""
+                        if unique_tickers and date_filter:
+                            try:
+                                historical_data_context += f"\n📊 HISTORICAL PRICE DATA FOR FILTERED TICKERS:\n"
+                                
+                                # Get historical prices for each ticker
+                                for ticker in list(unique_tickers)[:20]:  # Limit to top 20 tickers to avoid too much data
+                                    try:
+                                        # Get stock_id for this ticker
+                                        stock_response = db.supabase.table('stock_master').select('id').eq('ticker', ticker).execute()
+                                        if stock_response.data:
+                                            stock_id = stock_response.data[0]['id']
+                                            
+                                            # Get historical prices (52 weeks)
+                                            hist_response = db.supabase.table('historical_prices').select('price_date, price').eq('stock_id', stock_id).order('price_date', desc=True).limit(52).execute()
+                                            
+                                            if hist_response.data:
+                                                prices = hist_response.data
+                                                # Find prices at key dates
+                                                trans_dates_for_ticker = [
+                                                    t.get('transaction_date') for t in all_transactions.data 
+                                                    if t.get('ticker') == ticker
+                                                ]
+                                                
+                                                # Get min/max prices
+                                                price_values = [safe_float(p.get('price', 0), 0) for p in prices if p.get('price')]
+                                                if price_values:
+                                                    min_price = min(price_values)
+                                                    max_price = max(price_values)
+                                                    latest_price = price_values[0] if price_values else 0
+                                                    oldest_price = price_values[-1] if price_values else 0
+                                                    
+                                                    historical_data_context += f"\n{ticker}:\n"
+                                                    historical_data_context += f"  📈 52-week High: ₹{max_price:,.2f}\n"
+                                                    historical_data_context += f"  📉 52-week Low: ₹{min_price:,.2f}\n"
+                                                    historical_data_context += f"  📅 Oldest Price ({prices[-1].get('price_date', 'N/A')}): ₹{oldest_price:,.2f}\n"
+                                                    historical_data_context += f"  📅 Latest Price ({prices[0].get('price_date', 'N/A')}): ₹{latest_price:,.2f}\n"
+                                                    
+                                                    # Show price at transaction dates if available
+                                                    for trans_date in trans_dates_for_ticker[:5]:  # Limit to 5 transactions per ticker
+                                                        # Find closest price to transaction date
+                                                        closest_price = None
+                                                        closest_date = None
+                                                        min_diff = float('inf')
+                                                        
+                                                        for hist_price in prices:
+                                                            hist_date = hist_price.get('price_date')
+                                                            if hist_date:
+                                                                try:
+                                                                    from datetime import datetime
+                                                                    trans_dt = datetime.strptime(str(trans_date), '%Y-%m-%d').date() if isinstance(trans_date, str) else trans_date
+                                                                    hist_dt = datetime.strptime(str(hist_date), '%Y-%m-%d').date() if isinstance(hist_date, str) else hist_date
+                                                                    diff = abs((trans_dt - hist_dt).days)
+                                                                    if diff < min_diff:
+                                                                        min_diff = diff
+                                                                        closest_price = safe_float(hist_price.get('price', 0), 0)
+                                                                        closest_date = hist_date
+                                                                except Exception:
+                                                                    pass
+                                                        
+                                                        if closest_price and closest_date:
+                                                            historical_data_context += f"  💰 Price on {trans_date}: ₹{closest_price:,.2f} (closest: {closest_date})\n"
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                        
+                        if historical_data_context:
+                            transactions_context += historical_data_context
+                        
+                        transactions_context += f"\n📝 DETAILED TRANSACTIONS:\n"
+                        # Show all transactions if filtered (up to 50), otherwise limit to 15
+                        display_limit = min(50, len(all_transactions.data)) if (date_filter or transaction_type_filter) else 15
+                        for trans in all_transactions.data[:display_limit]:
+                            qty = safe_float(trans.get('quantity', 0), 0)
+                            price = safe_float(trans.get('price', 0), 0)
+                            amount = qty * price
+                            ticker = trans.get('ticker', 'N/A')
+                            current_price = ticker_price_map.get(ticker, 0)
+                            
+                            # Compact format with investment amount
                             transactions_context += f"{trans.get('transaction_date', 'N/A')} | "
-                            transactions_context += f"{trans.get('ticker', 'N/A')} | "
+                            transactions_context += f"{ticker} | "
                             transactions_context += f"{trans.get('transaction_type', 'N/A')} | "
-                            transactions_context += f"Qty: {trans.get('quantity', 0)} | "
-                            transactions_context += f"₹{trans.get('price', 0):,.0f}\n"
+                            transactions_context += f"Qty: {qty:,.2f} | "
+                            transactions_context += f"Price: ₹{price:,.2f} | "
+                            transactions_context += f"Investment: ₹{amount:,.2f}"
+                            if current_price > 0:
+                                current_val = qty * current_price
+                                trans_pnl = current_val - amount
+                                transactions_context += f" | Current: ₹{current_val:,.2f} | P&L: ₹{trans_pnl:+,.2f}"
+                            transactions_context += "\n"
+                        
+                        if len(all_transactions.data) > display_limit:
+                            transactions_context += f"\n... and {len(all_transactions.data) - display_limit} more transactions\n"
                     else:
-                        transactions_context += "No transactions found.\n"
+                        transactions_context += "No transactions found matching filters.\n"
                 except Exception as e:
-                    transactions_context += f"Error loading transactions.\n"
+                    transactions_context += f"Error loading transactions: {str(e)[:100]}\n"
                 
                 # Include PDF context
                 pdf_context_text = ""
@@ -4399,21 +4708,52 @@ def ai_assistant_page():
                 # Truncate portfolio summary if too long (reduced from 2000 to 1500)
                 summary_text = portfolio_summary[:1500] + "..." if len(portfolio_summary) > 1500 else portfolio_summary
                 
-                full_context = f"""📊 PORTFOLIO DATA:
+                full_context = f"""📊 PORTFOLIO DATA (User ID: {user['id']}):
 {raw_data_context}
 
-📈 SUMMARY:
+📈 PORTFOLIO SUMMARY:
 {summary_text}
 
-📝 RECENT TRANSACTIONS:
+📝 TRANSACTION HISTORY (Filtered based on your question):
 {transactions_context}
 
 📚 RESEARCH DOCUMENTS:
 {pdf_context_text}
 
-❓ QUESTION: {user_question}
+❓ YOUR QUESTION: {user_question}
 
-💡 Analyze using portfolio data, transactions, and PDF insights."""
+💡 ANALYSIS INSTRUCTIONS:
+- You have access to ALL transactions for this user (user_id: {user['id']})
+- The transaction data above is FILTERED based on keywords in your question
+- ⚠️ **CRITICAL**: Look for the "📊 CALCULATED SUMMARY FOR FILTERED TRANSACTIONS" section above
+- If you see "Total Current Value" and "Total P&L" in that section, USE THOSE EXACT NUMBERS - they are already calculated
+- If you see "⚠️ Current prices not available", explain that prices need to be updated first
+- REQUIRED: When Current Value and P&L are provided, you MUST use them - do NOT say "we cannot calculate"
+- 📊 HISTORICAL PRICE DATA is provided for filtered tickers - use it to analyze:
+  * When buys/sells would have been most profitable (compare transaction prices vs 52-week high/low)
+  * Price trends and timing analysis
+  * Opportunity cost analysis (e.g., "If you had sold at the 52-week high...")
+- 📚 RESEARCH DOCUMENTS (PDFs) are provided above - use them to:
+  * Suggest BUY recommendations for stocks/ETFs/MFs mentioned in research documents
+  * Suggest SELL recommendations based on research findings or overvaluation concerns
+  * Analyze alignment between current holdings and research recommendations
+  * Provide actionable insights like: "Based on the research document X, consider buying TICKER because..."
+- 🎯 YOU CAN PROACTIVELY SUGGEST BUYS/SELLS based on:
+  * PDF research content and AI summaries
+  * Current portfolio performance and diversification gaps
+  * Historical price trends and opportunities
+  * Risk assessment and portfolio balance
+- 🔮 YOU CAN MAKE PREDICTIONS AND FORECASTS:
+  * Stock price movements and targets ("I predict TICKER could reach ₹X in Y months")
+  * Market trends and sector outlook ("The technology sector is likely to...")
+  * Economic indicators impact ("Given current inflation trends...")
+  * Short/medium-term forecasts with reasoning
+  * Risk and volatility predictions
+  * Market timing recommendations ("Consider waiting for pullback before buying")
+- Always cite the exact numbers from the CALCULATED SUMMARY section
+- Format: "Total Investment: ₹X, Total Current Value: ₹Y, Total P&L: ₹Z (W%)"
+- Compare filtered performance with overall portfolio performance when relevant
+- Provide specific, actionable recommendations with tickers and reasoning"""
                 
                 # Estimate tokens and warn if too large
                 approx_tokens = len(full_context) // 4
@@ -4421,21 +4761,52 @@ def ai_assistant_page():
                     st.warning(f"⚠️ Large context: ~{approx_tokens:,} tokens. Reducing further...")
                     # Further reduce by truncating summary
                     summary_text = portfolio_summary[:1000] + "..."
-                    full_context = f"""📊 PORTFOLIO DATA:
+                    full_context = f"""📊 PORTFOLIO DATA (User ID: {user['id']}):
 {raw_data_context}
 
-📈 SUMMARY:
+📈 PORTFOLIO SUMMARY:
 {summary_text}
 
-📝 RECENT TRANSACTIONS:
+📝 TRANSACTION HISTORY (Filtered based on your question):
 {transactions_context}
 
 📚 RESEARCH DOCUMENTS:
 {pdf_context_text}
 
-❓ QUESTION: {user_question}
+❓ YOUR QUESTION: {user_question}
 
-💡 Analyze using portfolio data, transactions, and PDF insights."""
+💡 ANALYSIS INSTRUCTIONS:
+- You have access to ALL transactions for this user (user_id: {user['id']})
+- The transaction data above is FILTERED based on keywords in your question
+- ⚠️ **CRITICAL**: Look for the "📊 CALCULATED SUMMARY FOR FILTERED TRANSACTIONS" section above
+- If you see "Total Current Value" and "Total P&L" in that section, USE THOSE EXACT NUMBERS - they are already calculated
+- If you see "⚠️ Current prices not available", explain that prices need to be updated first
+- REQUIRED: When Current Value and P&L are provided, you MUST use them - do NOT say "we cannot calculate"
+- 📊 HISTORICAL PRICE DATA is provided for filtered tickers - use it to analyze:
+  * When buys/sells would have been most profitable (compare transaction prices vs 52-week high/low)
+  * Price trends and timing analysis
+  * Opportunity cost analysis (e.g., "If you had sold at the 52-week high...")
+- 📚 RESEARCH DOCUMENTS (PDFs) are provided above - use them to:
+  * Suggest BUY recommendations for stocks/ETFs/MFs mentioned in research documents
+  * Suggest SELL recommendations based on research findings or overvaluation concerns
+  * Analyze alignment between current holdings and research recommendations
+  * Provide actionable insights like: "Based on the research document X, consider buying TICKER because..."
+- 🎯 YOU CAN PROACTIVELY SUGGEST BUYS/SELLS based on:
+  * PDF research content and AI summaries
+  * Current portfolio performance and diversification gaps
+  * Historical price trends and opportunities
+  * Risk assessment and portfolio balance
+- 🔮 YOU CAN MAKE PREDICTIONS AND FORECASTS:
+  * Stock price movements and targets ("I predict TICKER could reach ₹X in Y months")
+  * Market trends and sector outlook ("The technology sector is likely to...")
+  * Economic indicators impact ("Given current inflation trends...")
+  * Short/medium-term forecasts with reasoning
+  * Risk and volatility predictions
+  * Market timing recommendations ("Consider waiting for pullback before buying")
+- Always cite the exact numbers from the CALCULATED SUMMARY section
+- Format: "Total Investment: ₹X, Total Current Value: ₹Y, Total P&L: ₹Z (W%)"
+- Compare filtered performance with overall portfolio performance when relevant
+- Provide specific, actionable recommendations with tickers and reasoning"""
                 
                 # Add debug expander to show what's being sent to AI (only if needed)
                 with st.expander("🔍 Debug: Full context sent to AI (click to expand)", expanded=False):
@@ -4449,7 +4820,35 @@ def ai_assistant_page():
                 response = openai.chat.completions.create(
                     model=model_to_use,
                     messages=[
-                        {"role": "system", "content": """You are an expert portfolio analyst. Use the provided portfolio data, transactions, and PDF research to answer questions. Cite specific tickers and numbers. Provide data-driven recommendations."""},
+                        {"role": "system", "content": f"""You are an expert portfolio analyst and financial advisor with access to the complete database for user_id: {user['id']}. 
+
+You have access to:
+- ALL user transactions (filtered by user_id)
+- ALL user holdings (current portfolio)
+- ALL historical price data
+- ALL uploaded PDF research documents
+
+The transaction data provided is intelligently filtered based on keywords in the user's question (e.g., "1 year", "buy transactions"). Use ONLY the filtered transaction data when calculating performance metrics.
+
+You have the authority and capability to:
+- ✅ Suggest BUY recommendations based on PDF research, market analysis, and portfolio gaps
+- ✅ Suggest SELL recommendations based on overvaluation, poor performance, or risk concerns
+- ✅ Analyze when transactions would have been more profitable using historical price data
+- ✅ Provide actionable investment recommendations with specific tickers and reasoning
+- ✅ Make PREDICTIONS and FORECASTS about:
+  * Stock price movements and potential upside/downside
+  * Market trends and sector performance outlook
+  * Economic indicators and their impact on holdings
+  * Short-term and medium-term price targets
+  * Risk assessments and volatility predictions
+  * Market sentiment analysis and timing recommendations
+
+Always:
+- Cite specific tickers, dates, and amounts
+- Calculate P&L, returns, and other metrics from the provided transaction data
+- Reference PDF research documents when making recommendations
+- Compare filtered results with overall portfolio when relevant
+- Provide data-driven recommendations based on actual numbers and research"""},
                         {"role": "user", "content": full_context}
                     ],
                     temperature=0.7,
@@ -4807,15 +5206,85 @@ def ai_insights_page():
         st.info("No holdings found. Upload transaction files to see AI insights.")
         return
     
-    # Get PDF context for enhanced AI analysis
+    # Get comprehensive context for AI analysis (same as AI Assistant has)
     pdf_context = db.get_all_pdfs_text(user['id'])
     pdf_count = len(db.get_user_pdfs(user['id']))
     
-    # Show PDF context status
+    # Get all transactions for the user
+    try:
+        all_transactions_response = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user['id']).order('transaction_date', desc=False).limit(1000).execute()
+        all_transactions = all_transactions_response.data if all_transactions_response.data else []
+    except:
+        all_transactions = []
+    
+    # Get historical prices for all tickers in holdings (increase limit)
+    historical_prices = {}
+    historical_prices_fetched = 0
+    historical_prices_missing = 0
+    try:
+        # Get unique tickers from all holdings
+        unique_tickers = set()
+        for holding in holdings:
+            ticker = holding.get('ticker')
+            if ticker:
+                unique_tickers.add(ticker)
+        
+        # Fetch historical prices for all unique tickers (not just top 30)
+        for ticker in unique_tickers:
+            try:
+                # Get stock_id
+                stock_response = db.supabase.table('stock_master').select('id').eq('ticker', ticker).execute()
+                if stock_response.data:
+                    stock_id = stock_response.data[0]['id']
+                    # Get 52 weeks of historical prices
+                    hist_response = db.supabase.table('historical_prices').select('price_date, price').eq('stock_id', stock_id).order('price_date', desc=True).limit(52).execute()
+                    if hist_response.data and len(hist_response.data) > 0:
+                        historical_prices[ticker] = hist_response.data
+                        historical_prices_fetched += 1
+                    else:
+                        historical_prices_missing += 1
+            except:
+                historical_prices_missing += 1
+    except Exception as e:
+        pass
+    
+    # Get stock master data for all holdings
+    try:
+        # Get all stock master records for holdings (get all unique tickers)
+        tickers = list(set([h.get('ticker') for h in holdings if h.get('ticker')]))
+        if tickers:
+            # Fetch in batches if needed (Supabase .in_() has limits)
+            stock_master = []
+            for i in range(0, len(tickers), 100):  # Process 100 at a time
+                batch = tickers[i:i+100]
+                try:
+                    stock_master_response = db.supabase.table('stock_master').select('*').in_('ticker', batch).execute()
+                    if stock_master_response.data:
+                        stock_master.extend(stock_master_response.data)
+                except:
+                    pass
+        else:
+            stock_master = []
+    except:
+        stock_master = []
+    
+    # Show context status with detailed information
+    context_info = []
     if pdf_count > 0:
-        st.info(f"📚 **PDF Context Active:** {pdf_count} PDF(s) from shared library will be included in AI analysis")
+        context_info.append(f"📚 {pdf_count} PDF(s)")
+    if all_transactions:
+        context_info.append(f"📝 {len(all_transactions)} transactions")
+    if historical_prices:
+        context_info.append(f"📊 Historical prices: {len(historical_prices)} tickers (52 weeks each)")
+    if stock_master:
+        context_info.append(f"🏢 {len(stock_master)} stock master records")
+    
+    if context_info:
+        st.info(f"**AI Context Active:** {' | '.join(context_info)}")
+        if historical_prices_missing > 0:
+            st.caption(f"ℹ️ Note: {historical_prices_missing} ticker(s) don't have historical price data yet. Use 'Fetch Historical Prices' button to add them.")
     else:
-        st.caption("💡 Upload PDFs in the AI Assistant page to enhance insights with research documents")
+        st.caption("💡 Upload PDFs and transactions to enhance insights")
     
     # Create tabs for different AI insights
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
@@ -4845,8 +5314,8 @@ def ai_insights_page():
                     "international_exposure": user_profile_data.get('international_exposure', 20)
                 }
                 
-                # Run comprehensive AI analysis with PDF insights
-                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context)
+                # Run comprehensive AI analysis with all context data
+                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
                 
                 if "error" in analysis_result:
                     st.error(f"Analysis error: {analysis_result['error']}")
@@ -4893,8 +5362,8 @@ def ai_insights_page():
                     "international_exposure": user_profile_data.get('international_exposure', 20)
                 }
                 
-                # Get portfolio-specific insights from the analysis with PDF context
-                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context)
+                # Get portfolio-specific insights from the analysis with all context data
+                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
                 
                 if analysis_result and "portfolio_insights" in analysis_result:
                     # Get portfolio insights directly
@@ -4945,8 +5414,8 @@ def ai_insights_page():
                     "international_exposure": user_profile_data.get('international_exposure', 20)
                 }
                 
-                # Get market-specific insights from the analysis with PDF context
-                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context)
+                # Get market-specific insights from the analysis with all context data
+                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
                 
                 if analysis_result and "market_insights" in analysis_result:
                     # Get market insights directly
@@ -4997,8 +5466,8 @@ def ai_insights_page():
                     "international_exposure": user_profile_data.get('international_exposure', 20)
                 }
                 
-                # Get scenario-specific insights from the analysis with PDF context
-                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context)
+                # Get scenario-specific insights from the analysis with all context data
+                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
                 
                 if analysis_result and "scenario_insights" in analysis_result:
                     # Get scenario insights directly
@@ -5059,8 +5528,8 @@ def ai_insights_page():
                     "international_exposure": user_profile_data.get('international_exposure', 20)
                 }
                 
-                # Get investment recommendations from analysis with PDF insights  
-                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context)
+                # Get investment recommendations from analysis with all context data
+                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
                 
                 if analysis_result and "investment_recommendations" in analysis_result:
                     # Get investment recommendations directly
