@@ -57,9 +57,16 @@ class SharedDatabaseManager:
             # Store username in lowercase for case-insensitive login
             username_lower = username.lower()
             
+            # If email is not provided or empty, use None (NULL in database)
+            # Multiple users can have NULL email without violating unique constraint
+            if not email or str(email).strip() == '':
+                email_value = None
+            else:
+                email_value = email.strip()
+            
             response = self.supabase.table('users').insert({
                 'username': username_lower,
-                'email': email,
+                'email': email_value,  # None if empty, allows multiple users without email
                 'password_hash': password_hash,
                 'full_name': full_name,
                 'risk_tolerance': risk_tolerance,
@@ -149,12 +156,11 @@ class SharedDatabaseManager:
         
         return text
     
-    def get_user_pdfs(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get all PDFs for a user"""
+    def get_user_pdfs(self, user_id: str = None) -> List[Dict[str, Any]]:
+        """Get all PDFs (shared across all users)"""
         try:
-            response = self.supabase.table('user_pdfs').select('*').eq(
-                'user_id', user_id
-            ).order('uploaded_at', desc=True).execute()
+            # Fetch ALL PDFs regardless of user_id (shared library)
+            response = self.supabase.table('user_pdfs').select('*').order('uploaded_at', desc=True).execute()
             
             return response.data
         except Exception as e:
@@ -184,16 +190,18 @@ class SharedDatabaseManager:
             st.error(f"Error deleting PDF: {str(e)}")
             return False
     
-    def get_all_pdfs_text(self, user_id: str) -> str:
-        """Get combined text from all user PDFs for AI context"""
+    def get_all_pdfs_text(self, user_id: str = None) -> str:
+        """Get combined text from all PDFs (shared library) for AI context"""
         try:
+            # Get ALL PDFs (shared across all users)
             pdfs = self.get_user_pdfs(user_id)
             if not pdfs:
                 return ""
             
-            combined_text = "\n\n--- PDF DOCUMENTS ---\n\n"
+            combined_text = "\n\n--- SHARED PDF DOCUMENTS (ALL USERS) ---\n\n"
             for pdf in pdfs:
-                combined_text += f"\n📄 {pdf['filename']}:\n"
+                uploader = f" (Uploaded by user)"  # Can add uploader name if needed
+                combined_text += f"\n📄 {pdf['filename']}{uploader}:\n"
                 combined_text += pdf['pdf_text'][:2000] + "...\n"  # Limit per PDF
             
             return combined_text
@@ -239,23 +247,50 @@ class SharedDatabaseManager:
         Returns stock_id (UUID)
         """
         try:
-            # Try to find existing
+            # Try to find existing by ticker only (more flexible)
             response = self.supabase.table('stock_master').select('*').eq(
                 'ticker', ticker
-            ).eq('stock_name', stock_name).execute()
+            ).execute()
             
             if response.data and len(response.data) > 0:
-                return response.data[0]['id']
+                existing_stock = response.data[0]
+                
+                # Update stock info if we have better data
+                update_data = {}
+                if stock_name and stock_name != 'Unknown' and (not existing_stock.get('stock_name') or existing_stock.get('stock_name') == 'Unknown'):
+                    update_data['stock_name'] = stock_name
+                
+                # For bonds, always set sector to "bond"
+                if asset_type == 'bond':
+                    if existing_stock.get('sector') != 'bond':
+                        update_data['sector'] = 'bond'
+                elif sector and sector != 'Unknown' and (not existing_stock.get('sector') or existing_stock.get('sector') == 'Unknown'):
+                    update_data['sector'] = sector
+                
+                if update_data:
+                    self.supabase.table('stock_master').update(update_data).eq('id', existing_stock['id']).execute()
+                
+                return existing_stock['id']
+            
+            # If no existing stock, try to fetch better info from external sources
+            enhanced_info = self._fetch_stock_info(ticker, asset_type)
+            
+            # Use fetched info if available, otherwise use provided data
+            final_stock_name = enhanced_info.get('stock_name') or stock_name or 'Unknown'
+            
+            # For bonds, always set sector to "bond"
+            if asset_type == 'bond':
+                final_sector = 'bond'
+            else:
+                final_sector = enhanced_info.get('sector') or sector or 'Unknown'
             
             # Create new
             insert_data = {
                 'ticker': ticker,
-                'stock_name': stock_name,
-                'asset_type': asset_type
+                'stock_name': final_stock_name,
+                'asset_type': asset_type,
+                'sector': final_sector
             }
-            
-            if sector:
-                insert_data['sector'] = sector
             
             response = self.supabase.table('stock_master').insert(insert_data).execute()
             
@@ -267,6 +302,65 @@ class SharedDatabaseManager:
         except Exception as e:
             st.error(f"Error creating stock: {str(e)}")
             return None
+    
+    def _fetch_stock_info(self, ticker: str, asset_type: str) -> Dict[str, Any]:
+        """
+        Fetch stock name and sector from external sources
+        """
+        try:
+            if asset_type == 'stock':
+                return self._fetch_stock_info_yfinance(ticker)
+            elif asset_type == 'mutual_fund':
+                return self._fetch_mf_info_mftool(ticker)
+            else:
+                return {}
+        except Exception as e:
+            # Silently fail - we'll use provided data
+            return {}
+    
+    def _fetch_stock_info_yfinance(self, ticker: str) -> Dict[str, Any]:
+        """Fetch stock info from yfinance"""
+        try:
+            import yfinance as yf
+            
+            # Try different ticker formats
+            ticker_formats = [ticker, f"{ticker}.NS", f"{ticker}.BO"]
+            
+            for ticker_format in ticker_formats:
+                try:
+                    stock = yf.Ticker(ticker_format)
+                    info = stock.info
+                    
+                    if info and info.get('longName'):
+                        return {
+                            'stock_name': info.get('longName', ''),
+                            'sector': info.get('sector', 'Unknown')
+                        }
+                except:
+                    continue
+            
+            return {}
+        except:
+            return {}
+    
+    def _fetch_mf_info_mftool(self, ticker: str) -> Dict[str, Any]:
+        """Fetch mutual fund info from mftool"""
+        try:
+            from mftool import Mftool
+            mf = Mftool()
+            
+            # Get scheme info
+            scheme_info = mf.get_scheme_info(ticker)
+            
+            if scheme_info:
+                return {
+                    'stock_name': scheme_info.get('schemeName', ''),
+                    'sector': scheme_info.get('category', 'Unknown')
+                }
+            
+            return {}
+        except:
+            return {}
     
     def update_stock_live_price(self, stock_id: str, live_price: float):
         """Update live price in stock_master"""
@@ -595,6 +689,71 @@ class SharedDatabaseManager:
             pass
 #st.caption(f"⚠️ Update holdings error: {str(e)}")
     
+    def recalculate_holdings(self, user_id: str, portfolio_id: Optional[str] = None) -> int:
+        """
+        Recalculate holdings from user_transactions
+        Groups transactions by stock_id and calculates total quantity and average price
+        """
+        try:
+            # Get all transactions for this user
+            query = self.supabase.table('user_transactions').select('*').eq('user_id', user_id)
+            if portfolio_id:
+                query = query.eq('portfolio_id', portfolio_id)
+            
+            transactions = query.execute().data
+            
+            if not transactions:
+                return 0
+            
+            # Group by stock_id and calculate holdings
+            from collections import defaultdict
+            holdings_calc = defaultdict(lambda: {'buy_qty': 0, 'sell_qty': 0, 'total_cost': 0, 'portfolio_id': None})
+            
+            for txn in transactions:
+                stock_id = txn['stock_id']
+                quantity = float(txn['quantity'])
+                price = float(txn['price'])
+                txn_type = txn['transaction_type'].lower()
+                
+                if txn_type == 'buy':
+                    holdings_calc[stock_id]['buy_qty'] += quantity
+                    holdings_calc[stock_id]['total_cost'] += quantity * price
+                elif txn_type == 'sell':
+                    holdings_calc[stock_id]['sell_qty'] += quantity
+                
+                holdings_calc[stock_id]['portfolio_id'] = txn['portfolio_id']
+            
+            # Upsert holdings
+            updated_count = 0
+            for stock_id, calc in holdings_calc.items():
+                total_quantity = calc['buy_qty'] - calc['sell_qty']
+                
+                if total_quantity > 0:  # Only store holdings with positive quantity
+                    average_price = calc['total_cost'] / calc['buy_qty'] if calc['buy_qty'] > 0 else 0
+                    
+                    # Upsert (update if exists, insert if not)
+                    self.supabase.table('holdings').upsert({
+                        'user_id': user_id,
+                        'portfolio_id': calc['portfolio_id'],
+                        'stock_id': stock_id,
+                        'total_quantity': total_quantity,
+                        'average_price': average_price
+                    }, on_conflict='user_id,portfolio_id,stock_id').execute()
+                    
+                    updated_count += 1
+                else:
+                    # Quantity is 0 or negative, delete holding
+                    self.supabase.table('holdings').delete().eq(
+                        'user_id', user_id
+                    ).eq('stock_id', stock_id).execute()
+            
+            print(f"[HOLDINGS] Recalculated {updated_count} holdings for user {user_id}")
+            return updated_count
+            
+        except Exception as e:
+            print(f"[HOLDINGS] Error recalculating: {e}")
+            return 0
+    
     def get_user_holdings(self, user_id: str, portfolio_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get user holdings with stock details (uses view)"""
         try:
@@ -813,4 +972,406 @@ class SharedDatabaseManager:
             import traceback
             st.code(traceback.format_exc())
             return []
+    
+    def bulk_process_new_stocks_with_comprehensive_data(
+        self,
+        tickers: List[str],
+        asset_types: Dict[str, str] = None,
+        transactions: List[Dict[str, Any]] = None
+    ) -> Dict[str, str]:
+        """
+        Bulk process new stocks with comprehensive data fetching (info + prices + weekly data)
+        Uses AI to fetch all data including prices for specific transaction dates
+        
+        Args:
+            tickers: List of ticker symbols to process
+            asset_types: Dict mapping ticker to asset_type (optional)
+            transactions: List of original transactions with dates (optional)
+        
+        Returns:
+            Dict mapping ticker to stock_id
+        """
+        print(f"\n[BULK_PROCESS] Starting for {len(tickers)} tickers: {tickers}")
+        
+        try:
+            # Use bulk AI fetcher to get stock info and basic data
+            from bulk_ai_fetcher import BulkAIFetcher
+            bulk_fetcher = BulkAIFetcher()
+            
+            print(f"[BULK_PROCESS] BulkAIFetcher available: {bulk_fetcher.available}")
+            
+            if not bulk_fetcher.available:
+                print(f"[BULK_PROCESS] Falling back to individual processing")
+                return self._fallback_individual_stock_processing(tickers, asset_types)
+            
+            # Fetch stock info from AI (names, sectors)
+            comprehensive_data = bulk_fetcher.fetch_bulk_comprehensive_data(tickers)
+            
+            stock_ids = {}
+            
+            for ticker in tickers:
+                try:
+                    # Get data for this ticker
+                    ticker_data = comprehensive_data.get(ticker, {})
+                    
+                    # Determine asset type
+                    asset_type = asset_types.get(ticker, 'stock') if asset_types else 'stock'
+                    
+                    # Extract stock info (AI provides name and sector)
+                    stock_name = ticker_data.get('stock_name', 'Unknown')
+                    sector = ticker_data.get('sector', 'Unknown')
+                    ai_current_price = ticker_data.get('current_price', 0.0)
+                    weekly_prices = ticker_data.get('weekly_prices', {})
+                    transaction_prices = ticker_data.get('transaction_prices', {})
+                    
+                    # For current price, try multi-source fetching (yfinance → mftool → enhanced_fetcher)
+                    current_price = self._get_live_price_multi_source(ticker, asset_type, stock_name) or ai_current_price
+                    
+                    # Get or create stock in database
+                    stock_id = self.get_or_create_stock(
+                        ticker=ticker,
+                        stock_name=stock_name,
+                        asset_type=asset_type,
+                        sector=sector
+                    )
+                    
+                    if stock_id:
+                        stock_ids[ticker] = stock_id
+                        print(f"[BULK] Processing {ticker}: stock_id={stock_id}, current_price={current_price}")
+                        
+                        # Store current price if available (prioritizes API over AI)
+                        if current_price > 0:
+                            print(f"[BULK] Calling _store_current_price for {ticker}")
+                            self._store_current_price(ticker, current_price, asset_type)
+                        else:
+                            print(f"[BULK] Skipping current price for {ticker}: price={current_price}")
+                        
+                        # Store weekly prices if available (fetches real prices from APIs)
+                        print(f"[BULK] Calling _store_weekly_prices_bulk for {ticker}")
+                        self._store_weekly_prices_bulk(ticker, weekly_prices, asset_type, stock_name)
+                    else:
+                        print(f"[BULK] No stock_id for {ticker}, skipping")
+                    
+                except Exception as e:
+                    print(f"[BULK] ERROR processing {ticker}: {e}")
+                    # Continue with other tickers if one fails
+                    continue
+            
+            return stock_ids
+            
+        except Exception as e:
+            # Fallback to individual processing
+            return self._fallback_individual_stock_processing(tickers, asset_types)
+    
+    def _fallback_individual_stock_processing(
+        self,
+        tickers: List[str],
+        asset_types: Dict[str, str] = None
+    ) -> Dict[str, str]:
+        """Fallback method for individual stock processing - also fetches prices!"""
+        print(f"[FALLBACK] Processing {len(tickers)} tickers individually...")
+        stock_ids = {}
+        
+        for ticker in tickers:
+            try:
+                asset_type = asset_types.get(ticker, 'stock') if asset_types else 'stock'
+                print(f"[FALLBACK] Processing {ticker} ({asset_type})")
+                
+                # Get or create stock
+                stock_id = self.get_or_create_stock(
+                    ticker=ticker,
+                    stock_name='Unknown',
+                    asset_type=asset_type,
+                    sector='Unknown'
+                )
+                
+                if stock_id:
+                    stock_ids[ticker] = stock_id
+                    print(f"[FALLBACK] Stock created/found: {stock_id}")
+                    
+                    # Fetch and store current price
+                    print(f"[FALLBACK] Fetching current price for {ticker}...")
+                    current_price = self._get_live_price_multi_source(ticker, asset_type, None)
+                    if current_price and current_price > 0:
+                        self._store_current_price(ticker, current_price, asset_type)
+                    else:
+                        print(f"[FALLBACK] No current price found for {ticker}")
+                    
+                    # Fetch and store 52-week historical data
+                    print(f"[FALLBACK] Fetching historical data for {ticker}...")
+                    self._store_weekly_prices_bulk(ticker, {}, asset_type, None)
+                    
+            except Exception as e:
+                print(f"[FALLBACK] ERROR with {ticker}: {e}")
+                continue
+        
+        print(f"[FALLBACK] Completed: {len(stock_ids)} stocks processed")
+        return stock_ids
+    
+    def _get_live_price_multi_source(self, ticker: str, asset_type: str = 'stock', stock_name: str = None) -> float:
+        """
+        Get live current price from multiple sources
+        Priority: yfinance → smart ticker mapping → mftool → enhanced_price_fetcher
+        """
+        try:
+            import yfinance as yf
+            
+            # Smart ticker mapping for known issues
+            ticker_corrections = {
+                'OBEROI.NS': 'OBEROIRLTY.NS',
+                'NIPPONAMC.NS': 'SILVERBEES.NS',
+                'NIPPONAMC - NETFSILVER': 'SILVERBEES.NS',
+            }
+            
+            # Apply correction if available
+            corrected_ticker = ticker_corrections.get(ticker, ticker)
+            
+            # Try yfinance first (for stocks and ETFs)
+            if asset_type in ['stock', 'etf']:
+                ticker_formats = [corrected_ticker, ticker, f"{ticker}.NS", f"{ticker}.BO"]
+                
+                for tf in ticker_formats:
+                    try:
+                        stock = yf.Ticker(tf)
+                        info = stock.info
+                        
+                        price = (info.get('currentPrice') or 
+                                info.get('regularMarketPrice') or 
+                                info.get('navPrice') or
+                                info.get('previousClose'))
+                        
+                        if price and price > 0:
+                            return float(price)
+                    except:
+                        continue
+            
+            # Try MFTool for mutual funds
+            if asset_type in ['mutual_fund', 'etf']:
+                try:
+                    from mftool import Mftool
+                    mf = Mftool()
+                    
+                    # Try ticker as scheme code
+                    quote = mf.get_scheme_quote(ticker)
+                    if quote and quote.get('nav'):
+                        return float(quote.get('nav'))
+                    
+                    # Try searching by name if ticker fails
+                    if stock_name:
+                        search = mf.search_by_scheme_name(stock_name)
+                        if search:
+                            # Get first result
+                            scheme_code = list(search.keys())[0]
+                            quote = mf.get_scheme_quote(scheme_code)
+                            if quote and quote.get('nav'):
+                                return float(quote.get('nav'))
+                except:
+                    pass
+            
+            # Try enhanced_price_fetcher as fallback
+            try:
+                from enhanced_price_fetcher import EnhancedPriceFetcher
+                fetcher = EnhancedPriceFetcher()
+                price = fetcher.fetch_live_price(ticker, stock_name, asset_type)
+                if price and price > 0:
+                    return float(price)
+            except:
+                pass
+        
+        except Exception:
+            pass
+        
+        return 0.0
+    
+    def _store_current_price(self, ticker: str, price: float, asset_type: str = 'stock'):
+        """
+        Store current price for a ticker by updating stock_master
+        Uses AI-fetched prices which are already accurate and date-specific
+        """
+        try:
+            from datetime import datetime
+            
+            print(f"[PRICE] Storing current price for {ticker}: Rs {price}")
+            
+            # AI has already fetched accurate current price
+            # No need for additional API calls
+            if price > 0:
+                # Update live_price and last_updated in stock_master
+                result = self.supabase.table('stock_master').update({
+                    'live_price': price,
+                    'last_updated': datetime.now().isoformat()
+                }).eq('ticker', ticker).execute()
+                
+                if result.data:
+                    print(f"[PRICE] SUCCESS: Updated live_price for {ticker}")
+                else:
+                    print(f"[PRICE] ERROR: No stock found with ticker {ticker}")
+            else:
+                print(f"[PRICE] ERROR: Invalid price: {price}")
+                
+        except Exception as e:
+            print(f"[PRICE] ERROR: {e}")
+            pass
+    
+    def _store_weekly_prices_bulk(self, ticker: str, weekly_prices: Dict[str, Any], asset_type: str = 'stock', stock_name: str = None):
+        """
+        Store weekly historical prices for a ticker
+        Multi-source: yfinance → mftool → enhanced_price_fetcher
+        """
+        try:
+            from datetime import datetime, timedelta
+            import yfinance as yf
+            
+            print(f"\n[HIST] Fetching 52-week data for {ticker} ({stock_name})")
+            
+            # Get stock_id and stock info
+            stock_response = self.supabase.table('stock_master').select('id, stock_name').eq('ticker', ticker).execute()
+            if not stock_response.data:
+                print(f"[HIST] ERROR Stock not found in stock_master: {ticker}")
+                return
+            
+            stock_id = stock_response.data[0]['id']
+            db_stock_name = stock_response.data[0].get('stock_name') or stock_name
+            print(f"[HIST] Stock ID: {stock_id}")
+            
+            # Check if we already have historical data (shared across users)
+            existing_hist = self.supabase.table('historical_prices').select('id').eq('stock_id', stock_id).execute()
+            existing_count = len(existing_hist.data) if existing_hist.data else 0
+            print(f"[HIST] Existing historical records: {existing_count}")
+            
+            if existing_hist.data and len(existing_hist.data) >= 40:
+                # Already has substantial data, skip to avoid duplicates
+                print(f"[HIST] SKIP: Already has {existing_count} records (>=40)")
+                return
+            
+            prices_to_insert = []
+            
+            # Smart ticker mapping for known issues
+            ticker_corrections = {
+                'OBEROI.NS': 'OBEROIRLTY.NS',
+                'NIPPONAMC.NS': 'SILVERBEES.NS',
+                'NIPPONAMC - NETFSILVER': 'SILVERBEES.NS',
+            }
+            
+            corrected_ticker = ticker_corrections.get(ticker, ticker)
+            print(f"[HIST] Using ticker: {corrected_ticker} (original: {ticker})")
+            
+            # SOURCE 1: Try yfinance first
+            print(f"[HIST] SOURCE 1: Trying yfinance...")
+            try:
+                ticker_formats = [corrected_ticker, ticker, f"{ticker}.NS", f"{ticker}.BO"]
+                hist_data = None
+                
+                for tf in ticker_formats:
+                    try:
+                        print(f"[HIST]   Trying format: {tf}")
+                        stock = yf.Ticker(tf)
+                        hist_data = stock.history(period="1y", interval="1wk")
+                        if not hist_data.empty:
+                            print(f"[HIST]   SUCCESS with {tf}: {len(hist_data)} weeks")
+                            break
+                    except Exception as e:
+                        print(f"[HIST]   FAILED {tf}: {str(e)[:50]}")
+                        continue
+                
+                if hist_data is not None and not hist_data.empty:
+                    # Got real data from yfinance
+                    print(f"[HIST] Processing {len(hist_data)} weeks of data...")
+                    for date_index, row in hist_data.iterrows():
+                        try:
+                            price_date = date_index.strftime('%Y-%m-%d')
+                            price = float(row['Close'])
+                            
+                            date_obj = date_index.to_pydatetime()
+                            iso_calendar = date_obj.isocalendar()
+                            
+                            prices_to_insert.append({
+                                'stock_id': stock_id,
+                                'price_date': price_date,
+                                'price': price,
+                                'source': 'yfinance_weekly',
+                                'iso_year': iso_calendar[0],
+                                'iso_week': iso_calendar[1]
+                            })
+                        except:
+                            continue
+                    
+                    if prices_to_insert:
+                        print(f"[HIST] Storing {len(prices_to_insert)} records to database...")
+                        self.save_historical_prices_bulk(prices_to_insert)
+                        print(f"[HIST] SUCCESS: Stored {len(prices_to_insert)} historical prices for {ticker}")
+                        return
+                    else:
+                        print(f"[HIST] ERROR: No valid prices to insert")
+                else:
+                    print(f"[HIST] ERROR: No data from yfinance")
+            except Exception as e:
+                print(f"[HIST] ERROR yfinance: {e}")
+                pass
+            
+            # SOURCE 2: Try MFTool for mutual funds/ETFs
+            if asset_type in ['mutual_fund', 'etf'] and db_stock_name:
+                try:
+                    from mftool import Mftool
+                    mf = Mftool()
+                    
+                    # Search by stock name
+                    search_results = mf.search_by_scheme_name(db_stock_name)
+                    if search_results:
+                        scheme_code = list(search_results.keys())[0]
+                        # MFTool doesn't provide historical, skip
+                except:
+                    pass
+            
+            # SOURCE 3: Try enhanced_price_fetcher
+            try:
+                from enhanced_price_fetcher import EnhancedPriceFetcher
+                from datetime import timedelta
+                
+                fetcher = EnhancedPriceFetcher()
+                
+                # Calculate date range (52 weeks back from today)
+                end_date = datetime.now()
+                start_date = end_date - timedelta(weeks=52)
+                
+                # Fetch historical prices
+                historical_data = fetcher.get_historical_prices(
+                    ticker=ticker,
+                    asset_type=asset_type,
+                    start_date=start_date.strftime('%Y-%m-%d'),
+                    end_date=end_date.strftime('%Y-%m-%d'),
+                    fund_name=db_stock_name
+                )
+                
+                if historical_data and len(historical_data) > 0:
+                    # Process returned data
+                    for item in historical_data:
+                        try:
+                            date_str = item.get('date')
+                            price = item.get('price')
+                            
+                            if date_str and price:
+                                price_date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+                                iso_calendar = price_date_obj.isocalendar()
+                                
+                                prices_to_insert.append({
+                                    'stock_id': stock_id,
+                                    'price_date': date_str,
+                                    'price': float(price),
+                                    'source': 'enhanced_fetcher',
+                                    'iso_year': iso_calendar[0],
+                                    'iso_week': iso_calendar[1]
+                                })
+                        except:
+                            continue
+                    
+                    if prices_to_insert:
+                        self.save_historical_prices_bulk(prices_to_insert)
+                        return
+            except:
+                pass
+                
+        except Exception as e:
+            # Silent failure - non-critical
+            pass
 

@@ -21,26 +21,27 @@ CREATE INDEX IF NOT EXISTS idx_user_pdfs_uploaded_at ON user_pdfs(uploaded_at DE
 -- Enable Row Level Security (RLS)
 ALTER TABLE user_pdfs ENABLE ROW LEVEL SECURITY;
 
--- RLS Policies
-DROP POLICY IF EXISTS "Users can view their own PDFs" ON user_pdfs;
-CREATE POLICY "Users can view their own PDFs" 
+-- RLS Policies - PDFs are SHARED across all users
+DROP POLICY IF EXISTS "All authenticated users can view PDFs" ON user_pdfs;
+CREATE POLICY "All authenticated users can view PDFs" 
     ON user_pdfs FOR SELECT 
-    USING (true);
+    USING (true);  -- All authenticated users can see all PDFs
 
-DROP POLICY IF EXISTS "Users can insert their own PDFs" ON user_pdfs;
-CREATE POLICY "Users can insert their own PDFs" 
+DROP POLICY IF EXISTS "All authenticated users can insert PDFs" ON user_pdfs;
+CREATE POLICY "All authenticated users can insert PDFs" 
     ON user_pdfs FOR INSERT 
+    WITH CHECK (true);  -- All authenticated users can upload PDFs
+
+DROP POLICY IF EXISTS "All authenticated users can update PDFs" ON user_pdfs;
+CREATE POLICY "All authenticated users can update PDFs" 
+    ON user_pdfs FOR UPDATE 
+    USING (true)  -- All can update
     WITH CHECK (true);
 
-DROP POLICY IF EXISTS "Users can update their own PDFs" ON user_pdfs;
-CREATE POLICY "Users can update their own PDFs" 
-    ON user_pdfs FOR UPDATE 
-    USING (true);
-
-DROP POLICY IF EXISTS "Users can delete their own PDFs" ON user_pdfs;
-CREATE POLICY "Users can delete their own PDFs" 
+DROP POLICY IF EXISTS "All authenticated users can delete PDFs" ON user_pdfs;
+CREATE POLICY "All authenticated users can delete PDFs" 
     ON user_pdfs FOR DELETE 
-    USING (true);
+    USING (true);  -- All can delete (optional: restrict to uploader only)
 
 -- Update timestamp trigger
 CREATE OR REPLACE FUNCTION update_user_pdfs_updated_at()

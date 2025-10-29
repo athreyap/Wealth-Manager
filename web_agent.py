@@ -32,8 +32,11 @@ cwd = os.getcwd()
 if cwd not in sys.path:
     sys.path.insert(0, cwd)
 
-# Import AI agents
+# Import AI agents for insights and recommendations
 AI_AGENTS_AVAILABLE = False
+AI_FILE_EXTRACTION_ENABLED = False  # DISABLED to avoid API quota issues - use direct CSV/Excel processing
+AI_TICKER_RESOLUTION_ENABLED = True  # ENABLED - uses Gemini fallback (free/cheap)
+
 try:
     from ai_agents.agent_manager import get_agent_manager, run_ai_analysis, get_ai_recommendations, get_ai_alerts
     from ai_agents.ai_file_processor import AIFileProcessor
@@ -204,8 +207,12 @@ def get_cached_portfolio_summary(holdings: List[Dict]) -> str:
 from database_shared import SharedDatabaseManager
 from enhanced_price_fetcher import EnhancedPriceFetcher
 from bulk_ai_fetcher import BulkAIFetcher
+
+# AI Ticker Resolver not needed - using ai_resolve_tickers_from_names() function instead
+TICKER_RESOLVER_AVAILABLE = False
+AITickerResolver = None
+
 # from weekly_manager_streamlined import StreamlinedWeeklyManager  # Removed - file deleted
-from smart_ticker_detector import detect_ticker_type, normalize_ticker
 
 # Page configuration
 st.set_page_config(
@@ -240,6 +247,157 @@ if 'db' not in st.session_state:
     st.session_state.db = SharedDatabaseManager()
 if 'price_fetcher' not in st.session_state:
     st.session_state.price_fetcher = EnhancedPriceFetcher()
+
+# Function to detect corporate actions (splits/bonus)
+def detect_corporate_actions(user_id, db):
+    """
+    Detect stock splits and bonus shares by comparing CSV prices with current prices
+    Returns list of stocks with likely corporate actions
+    """
+    try:
+        from enhanced_price_fetcher import EnhancedPriceFetcher
+        price_fetcher = EnhancedPriceFetcher()
+        
+        holdings = db.get_user_holdings(user_id)
+        corporate_actions = []
+        
+        for holding in holdings:
+            asset_type = holding.get('asset_type')
+            
+            # Only check stocks (not MF, bonds, etc.)
+            if asset_type != 'stock':
+                continue
+            
+            ticker = holding.get('ticker')
+            avg_price = holding.get('average_price', 0)
+            current_price = holding.get('current_price')
+            quantity = holding.get('total_quantity', 0)
+            
+            # Skip if current_price is None or 0 (can't calculate ratio)
+            if avg_price == 0 or current_price is None or current_price == 0:
+                continue
+            
+            # Convert to float to handle any type issues
+            avg_price = float(avg_price)
+            current_price = float(current_price)
+            
+            # Calculate ratio
+            ratio = avg_price / current_price
+            
+            # If ratio >= 1.5, likely a corporate action
+            # (stock split, bonus shares, or reverse split)
+            if ratio >= 1.5:
+                split_ratio = round(ratio)
+                
+                corporate_actions.append({
+                    'ticker': ticker,
+                    'stock_name': holding.get('stock_name'),
+                    'stock_id': holding.get('stock_id'),
+                    'avg_price': avg_price,
+                    'current_price': current_price,
+                    'quantity': quantity,
+                    'ratio': ratio,
+                    'split_ratio': split_ratio,
+                    'action_type': 'split' if ratio > 1 else 'reverse_split'
+                })
+        
+        if corporate_actions:
+            print(f"[CORPORATE_ACTIONS] Detected {len(corporate_actions)} stocks with splits/bonus")
+            for action in corporate_actions:
+                print(f"  - {action['ticker']}: 1:{action['split_ratio']} {action['action_type']}")
+        
+        return corporate_actions
+        
+    except Exception as e:
+        print(f"[CORPORATE_ACTIONS] Error detecting: {e}")
+        return []
+
+def adjust_for_corporate_action(user_id, stock_id, split_ratio, db):
+    """
+    Adjust transaction quantities and prices for a stock split/bonus
+    
+    Args:
+        user_id: User ID
+        stock_id: Stock master ID
+        split_ratio: Split ratio (e.g., 20 for 1:20 split)
+        db: Database manager
+    """
+    try:
+        # Get all transactions for this stock and user
+        transactions = db.supabase.table('user_transactions').select('*').eq(
+            'user_id', user_id
+        ).eq('stock_id', stock_id).execute()
+        
+        if not transactions.data:
+            return 0
+        
+        updated_count = 0
+        for txn in transactions.data:
+            old_quantity = float(txn['quantity'])
+            old_price = float(txn['price'])
+            
+            # Adjust for split
+            new_quantity = old_quantity * split_ratio
+            new_price = old_price / split_ratio
+            
+            # Update transaction
+            db.supabase.table('user_transactions').update({
+                'quantity': new_quantity,
+                'price': new_price,
+                'notes': f"Auto-adjusted for 1:{split_ratio} stock split"
+            }).eq('id', txn['id']).execute()
+            
+            updated_count += 1
+        
+        print(f"[CORPORATE_ACTIONS] Adjusted {updated_count} transactions for 1:{split_ratio} split")
+        return updated_count
+        
+    except Exception as e:
+        print(f"[CORPORATE_ACTIONS] Error adjusting: {e}")
+        return 0
+
+# Function to update bond prices using AI
+def update_bond_prices_with_ai(user_id, db):
+    """Update bond prices using AI (called automatically on login)"""
+    try:
+        # Get all bond holdings for this user
+        all_holdings = db.get_user_holdings(user_id)
+        bonds = [h for h in all_holdings if h.get('asset_type') == 'bond']
+        
+        if not bonds:
+            return  # No bonds to update
+        
+        print(f"[BOND_UPDATE] Found {len(bonds)} bonds, fetching current prices...")
+        
+        from enhanced_price_fetcher import EnhancedPriceFetcher
+        price_fetcher = EnhancedPriceFetcher()
+        
+        updated_count = 0
+        for bond in bonds:
+            ticker = bond.get('ticker')
+            stock_name = bond.get('stock_name')
+            
+            if ticker and stock_name:
+                print(f"[BOND_UPDATE] Fetching price for {stock_name} ({ticker})...")
+                
+                # Try to get bond price from AI
+                price, source = price_fetcher._get_bond_price(ticker, stock_name)
+                
+                if price and price > 0:
+                    # Update the price in database
+                    db._store_current_price(ticker, price, 'bond')
+                    print(f"[BOND_UPDATE] ✅ Updated {ticker}: ₹{price:.2f} (from {source})")
+                    updated_count += 1
+                else:
+                    print(f"[BOND_UPDATE] ❌ Failed to get price for {ticker}")
+        
+        if updated_count > 0:
+            print(f"[BOND_UPDATE] Successfully updated {updated_count}/{len(bonds)} bond prices")
+        else:
+            print(f"[BOND_UPDATE] No bond prices updated (all failed)")
+    except Exception as e:
+        print(f"[BOND_UPDATE] Error updating bond prices: {e}")
+        pass  # Silent failure - don't break login
 
 # Function to update all live prices
 def update_all_live_prices():
@@ -313,6 +471,29 @@ def login_page():
             user = db.login_user(username.lower(), password)
             if user:
                 st.session_state.user = user
+                
+                # Update bond prices automatically on login (AI-powered)
+                try:
+                    update_bond_prices_with_ai(user['id'], db)
+                except:
+                    pass  # Silent failure - don't break login
+                
+                # Recalculate holdings on login (ensures MFs show up)
+                try:
+                    db.recalculate_holdings(user['id'])
+                except:
+                    pass  # Silent failure
+                
+                # Detect corporate actions (splits/bonus) on login
+                try:
+                    corporate_actions = detect_corporate_actions(user['id'], db)
+                    if corporate_actions:
+                        st.session_state.corporate_actions_detected = corporate_actions
+                    else:
+                        st.session_state.corporate_actions_detected = None
+                except:
+                    st.session_state.corporate_actions_detected = None
+                
                 st.success("Login successful!")
                 st.rerun()
             else:
@@ -326,13 +507,21 @@ def login_page():
         password = st.text_input("Password", type="password", key="register_password")
         confirm_password = st.text_input("Confirm Password", type="password", key="register_confirm")
         
-        # File upload during registration (as per your image)
-        st.subheader("Upload Transaction Files")
-        uploaded_files = st.file_uploader(
-            "Upload CSV files with transactions",
-            type=['csv'],
-            accept_multiple_files=True,
-            help="Upload your transaction files during registration"
+        # File upload during registration
+        st.subheader("Upload Transaction Files (Optional)")
+        if AI_FILE_EXTRACTION_ENABLED:
+            uploaded_files = st.file_uploader(
+                "Upload transaction files (CSV, PDF, Excel, Images)",
+                type=['csv', 'pdf', 'xlsx', 'xls', 'txt', 'jpg', 'jpeg', 'png'],
+                accept_multiple_files=True,
+                help="Upload your transaction files in any format - AI will extract the data automatically"
+            )
+        else:
+            uploaded_files = st.file_uploader(
+                "Upload CSV or Excel files",
+                type=['csv', 'xlsx', 'xls'],
+                accept_multiple_files=True,
+                help="Upload CSV or Excel files with transaction data. Format: date,ticker,quantity,transaction_type,price,stock_name,sector,channel"
         )
         
         if st.button("Register"):
@@ -355,8 +544,40 @@ def login_page():
                         # Process uploaded files (as per your image)
                         if uploaded_files:
                             st.info("📁 Processing uploaded files...")
-                            process_uploaded_files(uploaded_files, user['id'], portfolio_id)
-                            st.success("✅ Registration and file processing complete!")
+                            imported_count = process_uploaded_files(uploaded_files, user['id'], portfolio_id)
+                            
+                            if imported_count > 0:
+                                # Auto-fetch comprehensive data (info + prices + weekly) in bulk
+                                st.info("🔍 Auto-fetching comprehensive data (info + prices + historical)...")
+                                
+                                try:
+                                    holdings = db.get_user_holdings(user['id'])
+                                    if holdings:
+                                        # Get unique tickers and asset types
+                                        unique_tickers = list(set([h['ticker'] for h in holdings if h.get('ticker')]))
+                                        asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings if h.get('ticker')}
+                                        
+                                        if unique_tickers and st.session_state.bulk_ai_fetcher.available:
+                                            st.caption("📊 Bulk fetching all data in one AI call...")
+                                            # Fetch everything (stock info + current price + 52-week data) in ONE AI call
+                                            stock_ids = db.bulk_process_new_stocks_with_comprehensive_data(
+                                                tickers=unique_tickers,
+                                                asset_types=asset_types
+                                            )
+                                            st.caption(f"✅ Fetched comprehensive data for {len(stock_ids)} tickers")
+                                        else:
+                                            # Fallback to individual updates
+                                            st.caption("📊 Fetching prices individually...")
+                                            st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
+                                            st.caption(f"✅ Updated {len(holdings)} holdings")
+                                    
+                                    st.success("✅ Registration, file processing, and comprehensive data fetching complete!")
+                                    
+                                except Exception as e:
+                                    st.warning(f"⚠️ Registration successful, but data fetching had issues: {str(e)[:100]}")
+                                    st.success("✅ Registration and file processing complete!")
+                            else:
+                                st.success("✅ Registration and file processing complete!")
                         else:
                             st.success("✅ Registration successful!")
                         
@@ -366,213 +587,969 @@ def login_page():
                 else:
                     st.error(f"Registration failed: {result['error']}")
 
+def search_mftool_for_amfi_code(scheme_name):
+    """
+    Search mftool database for AMFI code by scheme name
+    More reliable than AI! Uses intelligent keyword matching.
+    """
+    try:
+        from mftool import Mftool
+        mf = Mftool()
+        
+        # Get all schemes
+        schemes = mf.get_scheme_codes()
+        
+        # Extract important keywords (filter out common words)
+        name_lower = scheme_name.lower()
+        skip_words = {'fund', 'plan', 'option', 'scheme', 'the', 'and', 'of', '-'}
+        keywords = [word for word in name_lower.split() if len(word) > 2 and word not in skip_words]
+        
+        # Search for best match
+        best_matches = []
+        for code, name in schemes.items():
+            scheme_lower = name.lower()
+            
+            # Count matching keywords
+            match_count = sum(1 for kw in keywords if kw in scheme_lower)
+            
+            # Calculate match percentage
+            match_pct = match_count / len(keywords) if keywords else 0
+            
+            # Bonus points for exact company/fund house match
+            company_match = 0
+            if 'sbi' in name_lower and 'sbi' in scheme_lower:
+                company_match = 1
+            elif 'hdfc' in name_lower and 'hdfc' in scheme_lower:
+                company_match = 1
+            elif 'tata' in name_lower and 'tata' in scheme_lower:
+                company_match = 1
+            elif 'quant' in name_lower and 'quant' in scheme_lower:
+                company_match = 1
+            elif 'iifl' in name_lower and 'iifl' in scheme_lower:
+                company_match = 1
+            elif '360' in name_lower and '360' in scheme_lower:
+                company_match = 1
+            
+            # Only consider if at least 70% keywords match OR company matches with 50%+ keywords
+            if match_pct >= 0.7 or (company_match and match_pct >= 0.5):
+                best_matches.append((code, name, match_count, match_pct, company_match))
+        
+        # Sort by: company match, then keyword count, then percentage
+        best_matches.sort(key=lambda x: (x[4], x[2], x[3]), reverse=True)
+        
+        if best_matches:
+            # Return best match
+            code, name, count, pct, company = best_matches[0]
+            return {
+                'ticker': code,
+                'name': name,
+                'sector': 'Mutual Fund',
+                'source': 'mftool',
+                'match_confidence': pct
+            }
+        
+        return None
+        
+    except Exception as e:
+        return None
+
+def ai_resolve_tickers_from_names(ticker_name_pairs):
+    """
+    Use AI to resolve tickers from stock/fund names
+    Returns verified tickers that work with yfinance/mftool
+    """
+    try:
+        import openai
+        
+        # Try OpenAI first
+        api_key = st.secrets["api_keys"].get("openai") or st.secrets["api_keys"].get("open_ai")
+        use_gemini = False
+        
+        if api_key:
+            client = openai.OpenAI(api_key=api_key)
+        else:
+            use_gemini = True
+        
+        # Build prompt
+        ticker_list = []
+        for ticker, info in ticker_name_pairs.items():
+            asset_type = info.get('asset_type', 'stock')
+            name = info.get('name', ticker)
+            ticker_list.append(f"- Ticker: {ticker}, Name: {name}, Type: {asset_type}")
+        
+        prompt = f"""For each holding below, provide the VERIFIED ticker/code that works with yfinance (for stocks) or mftool (for mutual funds).
+
+HOLDINGS:
+{chr(10).join(ticker_list)}
+
+YOUR TASK:
+1. For STOCKS: 
+   - Use the STOCK NAME (not ticker) as primary identifier
+   - Search for the correct NSE/BSE ticker based on the company NAME
+   - Try NSE first (.NS suffix): Verify it works with yfinance
+   - If NSE fails, try BSE (.BO suffix): Verify it works with yfinance
+   - Return whichever exchange ticker actually works
+   - Example: "ITC LTD" → Search online → Find "ITC.NS" → Verify with yfinance → Return ITC.NS
+   - IMPORTANT: Some stocks are ONLY on BSE, not NSE!
+   - CRITICAL: Use the NAME to find correct ticker, don't just add .NS to existing ticker
+   
+2. For MUTUAL_FUND:
+   - **EACH FUND MUST HAVE A UNIQUE AMFI CODE** - DO NOT reuse codes!
+   - Search AMFI website or Value Research for the EXACT scheme code
+   - Find the exact AMFI scheme code (6-digit number like 120760, 101305, etc.)
+   - Different funds ALWAYS have different codes
+   - Verify it works with mftool in Python
+   - CRITICAL: Return numeric AMFI code, not scheme name
+   - DOUBLE CHECK: Make sure you're not returning the same code for different funds!
+
+3. For PMS (Portfolio Management Service):
+   - Use the PMS registration code (format: INP000001234)
+   - If not found, create a unique identifier based on PMS name
+   - Return as-is (no API to verify)
+
+4. For AIF (Alternative Investment Fund):
+   - Use the AIF registration code (format: AIF-CAT1-12345)
+   - If not found, create identifier from AIF name
+   - Return as-is (no API to verify)
+
+5. For BONDS:
+   - For Sovereign Gold Bonds (SGB): Use NSE ticker (e.g., SGBFEB32IV)
+   - For other bonds: Use ISIN code or exchange ticker
+   - Try yfinance verification if possible
+   
+6. Provide sector information based on the stock/fund/bond name
+
+7. Indicate source: yfinance_nse, yfinance_bse, mftool, manual, or isin
+
+Return ONLY this JSON format:
+{{
+  "ORIGINAL_TICKER_OR_NAME": {{
+    "ticker": "VERIFIED_TICKER_OR_AMFI_CODE",
+    "name": "Full Name",
+    "sector": "Sector Name",
+    "source": "yfinance_nse|yfinance_bse|mftool",
+    "verified": true
+  }}
+}}
+
+EXAMPLES:
+{{
+  "RELIANCE": {{
+    "ticker": "RELIANCE.NS",
+    "name": "Reliance Industries Limited",
+    "sector": "Oil & Gas",
+    "source": "yfinance_nse",
+    "verified": true
+  }},
+  "IDEA": {{
+    "ticker": "IDEA.NS",
+    "name": "Vodafone Idea Limited",
+    "sector": "Telecom",
+    "source": "yfinance_nse",
+    "verified": true
+  }},
+  "BEDMUTHA": {{
+    "ticker": "BEDMUTHA.BO",
+    "name": "Bedmutha Industries Limited",
+    "sector": "Chemicals",
+    "source": "yfinance_bse",
+    "verified": true
+  }},
+  "SBI Gold Direct Plan Growth": {{
+    "ticker": "101305",
+    "name": "SBI Gold Direct Plan Growth",
+    "sector": "Gold",
+    "source": "mftool",
+    "verified": true
+  }},
+  "HDFC ELSS Tax Saver Direct Plan Growth": {{
+    "ticker": "100104",
+    "name": "HDFC ELSS Tax Saver Direct Plan Growth", 
+    "sector": "ELSS",
+    "source": "mftool",
+    "verified": true
+  }},
+  "Quant Tax Plan Direct Growth": {{
+    "ticker": "120760",
+    "name": "Quant Tax Plan Direct Growth", 
+    "sector": "ELSS",
+    "source": "mftool",
+    "verified": true
+  }},
+  "IDFC Nifty 50 Index Direct Plan Growth": {{
+    "ticker": "134997",
+    "name": "IDFC Nifty 50 Index Direct Plan Growth", 
+    "sector": "Index Fund",
+    "source": "mftool",
+    "verified": true
+  }},
+  "Tata Small Cap Fund Direct Growth": {{
+    "ticker": "125497",
+    "name": "Tata Small Cap Fund Direct Growth", 
+    "sector": "Small Cap",
+    "source": "mftool",
+    "verified": true
+  }},
+  "2.50% Gold Bonds 2032 SR-IV": {{
+    "ticker": "SGBFEB32IV",
+    "name": "Sovereign Gold Bond 2032 Series IV",
+    "sector": "Government Securities",
+    "source": "yfinance_nse",
+    "verified": true
+  }},
+  "Buoyant Opportunities Fund": {{
+    "ticker": "INP000012345",
+    "name": "Buoyant Opportunities Fund",
+    "sector": "PMS",
+    "source": "manual",
+    "verified": true
+  }},
+  "Private Equity Fund XYZ": {{
+    "ticker": "AIF-CAT1-12345",
+    "name": "Private Equity Fund XYZ",
+    "sector": "AIF",
+    "source": "manual",
+    "verified": true
+  }}
+}}
+
+CRITICAL RULES:
+- **USE THE STOCK NAME** as primary identifier, not the ticker! Search for the correct ticker based on company name.
+- For stocks: Search company name → Find NSE/BSE ticker → Verify with yfinance → Return working ticker
+- For mutual funds: 
+  * **EVERY MUTUAL FUND HAS A UNIQUE AMFI CODE** - NEVER use the same code for different funds!
+  * Search AMFI website, Value Research, or MoneyControl for the EXACT scheme code
+  * Each fund name gets its OWN unique 6-digit code (like 101305, 100104, 120760, 134997, 125497)
+  * Return numeric AMFI code, NOT scheme name
+  * DOUBLE-CHECK: If you're returning the same code twice, YOU ARE WRONG!
+- For PMS/AIF: Search name → Find registration code (INP/AIF format) → Return code
+- For Bonds: Search name → Find ISIN or NSE ticker → Verify with yfinance
+- Always verify ticker actually works with yfinance/mftool before returning
+- If ticker already has .NS or .BO, verify it still works (don't assume it's correct)
+- If you're unsure, prefer NSE for major stocks, BSE for smaller/regional stocks
+
+IMPORTANT: Don't just add .NS to existing ticker! Use the NAME to search and find the correct working ticker!
+
+**MUTUAL FUND WARNING**: Each mutual fund scheme has its own unique AMFI code. NEVER return duplicate codes. If you don't know the exact code, search for it online before responding!
+
+**JSON FORMAT REQUIREMENTS:**
+- Return ONLY valid JSON - no comments, no trailing commas, no extra text
+- Each object must have ALL fields: ticker, name, sector, source, verified
+- Ensure proper comma separation between objects
+- Do not include any explanatory text before or after the JSON
+- Test your JSON is valid before returning
+
+Return ONLY the JSON object, nothing else."""
+
+        # Try OpenAI first, fallback to Gemini
+        ai_response = None
+        
+        if not use_gemini:
+            try:
+                st.caption(f"   🔄 Using OpenAI (gpt-4o) for ticker resolution...")
+                response = client.chat.completions.create(
+                    model="gpt-4o",  # Better model for accurate verification
+                    messages=[
+                        {"role": "system", "content": "You are a financial ticker verification expert with access to real-time data. For each ticker, search online databases and verify it works with yfinance or mftool APIs. Return ONLY valid JSON with unique tickers for each holding."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=2000,
+                    temperature=0.0  # Zero temperature for deterministic results
+                )
+                ai_response = response.choices[0].message.content
+                st.caption(f"   ✅ OpenAI response received")
+            except Exception as e:
+                error_msg = str(e)
+                st.caption(f"   ❌ OpenAI error: {error_msg[:100]}")
+                if "429" in error_msg or "quota" in error_msg.lower():
+                    st.caption(f"   ⚠️ OpenAI quota exceeded, trying Gemini...")
+                    use_gemini = True
+                else:
+                    st.caption(f"   ⚠️ OpenAI failed, trying Gemini...")
+                    use_gemini = True
+        
+        # Fallback to Gemini
+        if use_gemini and ai_response is None:
+            try:
+                import google.generativeai as genai
+                gemini_key = st.secrets["api_keys"].get("gemini_api_key")
+                if gemini_key:
+                    genai.configure(api_key=gemini_key)
+                    model = genai.GenerativeModel('gemini-2.5-flash')
+                    
+                    full_prompt = f"""You are a financial ticker verification expert. Verify tickers for yfinance and mftool APIs. Return ONLY valid JSON.
+
+{prompt}"""
+                    
+                    response = model.generate_content(full_prompt)
+                    ai_response = response.text
+                    st.caption(f"   ✅ Using Gemini for ticker resolution")
+            except Exception as e:
+                st.caption(f"   ❌ Gemini also failed: {str(e)[:50]}")
+                return {}
+        
+        if not ai_response:
+            return {}
+        
+        # Extract JSON with better error handling
+        import json
+        import re
+        
+        response_text = ai_response.strip()
+        
+        # Remove markdown code blocks
+        if response_text.startswith('```'):
+            # Remove ```json or ``` at start
+            response_text = re.sub(r'^```(?:json)?\s*\n', '', response_text)
+            # Remove ``` at end
+            response_text = re.sub(r'\n```\s*$', '', response_text)
+            response_text = response_text.strip()
+        
+        # Find JSON object
+        start_idx = response_text.find('{')
+        end_idx = response_text.rfind('}') + 1
+        
+        if start_idx >= 0 and end_idx > start_idx:
+            json_str = response_text[start_idx:end_idx]
+            
+            try:
+                parsed = json.loads(json_str)
+                return parsed
+            except json.JSONDecodeError as je:
+                # Try to fix common JSON errors
+                st.caption(f"   ⚠️ JSON parse error, attempting auto-fix...")
+                
+                # Fix 1: Remove trailing commas before } or ]
+                fixed_json = re.sub(r',(\s*[}\]])', r'\1', json_str)
+                
+                # Fix 2: Remove comments (// or /* */)
+                fixed_json = re.sub(r'//.*$', '', fixed_json, flags=re.MULTILINE)
+                fixed_json = re.sub(r'/\*.*?\*/', '', fixed_json, flags=re.DOTALL)
+                
+                # Fix 3: Fix unquoted keys
+                fixed_json = re.sub(r'(\w+):', r'"\1":', fixed_json)
+                
+                try:
+                    parsed = json.loads(fixed_json)
+                    st.caption(f"   ✅ Auto-fixed JSON successfully")
+                    return parsed
+                except:
+                    # Show details about original error
+                    st.caption(f"   ⚠️ JSON parse error at line {je.lineno}, column {je.colno}")
+                    st.caption(f"   Error: {je.msg}")
+                    # Show snippet of problematic JSON
+                    lines = json_str.split('\n')
+                    if je.lineno <= len(lines):
+                        problem_line = lines[je.lineno - 1] if je.lineno > 0 else ""
+                        st.caption(f"   Problem: {problem_line[:100]}")
+                    return {}
+        
+        st.caption(f"   ⚠️ Could not find valid JSON in AI response")
+        return {}
+        
+    except Exception as e:
+        st.caption(f"   ⚠️ AI ticker resolution error: {str(e)[:100]}")
+        import traceback
+        st.caption(f"   Traceback: {traceback.format_exc()[:200]}")
+        return {}
+
 def process_uploaded_files(uploaded_files, user_id, portfolio_id):
     """
-    Process uploaded files and store to DB
-    Matches your image: "store the files to db and calculate historical from date in file and store based on week of year"
+    Process uploaded files and store to DB using AI
+    Supports CSV, PDF, Excel, Images, and any file format
     """
     total_imported = 0
     processing_log = []
     
-    st.info(f"🚀 Starting to process {len(uploaded_files)} file(s)...")
+    # Always show CSV processing message (AI is used only for ticker resolution)
+    st.info(f"📊 Processing {len(uploaded_files)} file(s)...")
     
     for file_idx, uploaded_file in enumerate(uploaded_files, 1):
         st.caption(f"📁 [{file_idx}/{len(uploaded_files)}] Processing {uploaded_file.name}...")
         
         try:
-            # Read CSV
-            df = pd.read_csv(uploaded_file)
-            st.caption(f"   📊 Found {len(df)} rows in {uploaded_file.name}")
+            # Direct CSV/Excel processing (AI file extraction is disabled)
+            file_ext = uploaded_file.name.split('.')[-1].lower()
             
-            imported = 0
-            skipped = 0
-            errors = 0
-            
-            # Progress bar for large files
-            if len(df) > 10:
-                progress_bar = st.progress(0)
-                progress_text = st.empty()
-            
-            for idx, row in df.iterrows():
-                try:
-                    # Detect ticker type
-                    ticker = str(row.get('ticker', '')).strip()
-                    if not ticker:
-                        skipped += 1
-                        continue
-                    
-                    # Log ticker detection
-                    asset_type = detect_ticker_type(ticker)
-                    normalized_ticker = normalize_ticker(ticker, asset_type)
-                    #st.caption(f"   🔍 Row {idx+1}: {ticker} → {normalized_ticker} ({asset_type})")
-                    
-                    # Parse date
+            if file_ext in ['csv', 'xlsx', 'xls']:
+                st.caption(f"   📊 Processing {file_ext.upper()} file directly (no AI needed)...")
+                
+                # Read file with pandas
+                if file_ext == 'csv':
+                    df = pd.read_csv(uploaded_file)
+                else:  # xlsx or xls
+                    df = pd.read_excel(uploaded_file)
+                
+                st.caption(f"   ✅ Read {len(df)} rows from {file_ext.upper()}")
+                
+                # Helper functions to handle NaN/None values
+                def safe_value(val, default=''):
+                    """Convert pandas NaN to safe value"""
+                    if pd.isna(val) or val is None:
+                        return default
+                    return val
+                
+                def safe_float(val, default=0.0):
+                    """Convert to float, handling NaN/None"""
                     try:
-                        trans_date = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
-                        #st.caption(f"   📅 Date: {trans_date}")
-                    except Exception as date_error:
-                        trans_date = datetime.now().strftime('%Y-%m-%d')
-                        #st.caption(f"   ⚠️ Date parsing failed, using today: {trans_date}")
-                    
-                    # Get price - if not provided, fetch historical price for that date
-                    price = row.get('price', 0)
-                    if pd.isna(price) or price == '' or price == 0:
-                        ##st.caption(f"   💰 Price: Not provided, fetching historical price for {trans_date}...")
+                        if pd.isna(val) or val is None or val == '':
+                            return default
+                        return float(val)
+                    except (ValueError, TypeError):
+                        return default
+                
+                def normalize_date(date_str):
+                    """Convert ANY date format to YYYY-MM-DD"""
+                    try:
+                        if pd.isna(date_str) or not date_str:
+                            return ''
                         
-                        # Fetch historical price for the transaction date
-                        try:
-                            # Get fund name for enhanced AI fallback
-                            fund_name = row.get('stock_name', ticker) if asset_type == 'mutual_fund' else None
-                            historical_price = price_fetcher.get_historical_price(
-                                normalized_ticker, 
-                                asset_type, 
-                                trans_date,
-                                fund_name
-                            )
-                            if historical_price and historical_price > 0:
-                                price = historical_price
-                                #st.caption(f"   ✅ Historical price: ₹{price:,.2f}")
+                        date_str = str(date_str).strip()
+                        
+                        # Remove time part ONLY if AM/PM is present (e.g., "18-03-2021 09:34 AM" -> "18-03-2021")
+                        # Preserve formats like "10 Oct 2025" (don't split these!)
+                        if ' AM' in date_str.upper() or ' PM' in date_str.upper():
+                            date_str = date_str.split()[0]
+                        
+                        # Use pandas to_datetime - handles most formats automatically!
+                        dt = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
+                        
+                        if pd.notna(dt):
+                            return dt.strftime('%Y-%m-%d')
+                        
+                        # If pandas failed, return empty
+                        return ''
+                    except:
+                        return ''
+                
+                imported = 0
+                skipped = 0
+                errors = 0
+                
+                # Show progress
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                total_rows = len(df)
+                
+                for idx, (_, row) in enumerate(df.iterrows()):
+                    try:
+                        # Update progress every 50 rows
+                        if idx % 50 == 0:
+                            progress_bar.progress((idx + 1) / total_rows)
+                            status_text.text(f"📝 Processing row {idx + 1}/{total_rows}... ({imported} imported, {skipped} skipped)")
+                        
+                        # Extract channel from filename if not provided
+                        channel = safe_value(row.get('channel'), None)
+                        if not channel:
+                            # Use filename without extension
+                            import os
+                            channel = os.path.splitext(uploaded_file.name)[0]
+                        
+                        # Smart mapping - ticker can be NaN (AI will resolve later)
+                        ticker = safe_value(row.get('ticker'), '')
+                        stock_name = safe_value(row.get('stock_name'), '')
+                        
+                        # Clean ticker - remove $ and other special characters
+                        ticker = str(ticker).replace('$', '').strip()
+                        
+                        # If ticker is NaN/empty, use stock_name as placeholder
+                        # AI will resolve this to proper ticker later
+                        if not ticker:
+                            ticker = stock_name  # Temporary - AI will fix
+                        
+                        # Determine asset type
+                        asset_type = safe_value(row.get('asset_type'), None)
+                        if not asset_type:
+                            # Auto-detect from stock name
+                            name_lower = stock_name.lower()
+                            if 'pms' in name_lower or 'portfolio management' in name_lower or ticker.startswith('INP'):
+                                asset_type = 'pms'
+                            elif 'aif' in name_lower or 'alternative investment' in name_lower or ticker.startswith('AIF'):
+                                asset_type = 'aif'
+                            elif 'bond' in name_lower or 'debenture' in name_lower or 'sgb' in name_lower:
+                                asset_type = 'bond'
+                            elif 'fund' in name_lower or 'scheme' in name_lower or 'growth' in name_lower:
+                                asset_type = 'mutual_fund'
                             else:
-                                price = 0
-                                #st.caption(f"   ⚠️ Could not fetch historical price (using 0)")
-                        except Exception as e:
-                            price = 0
-                            #st.caption(f"   ❌ Error fetching price: {str(e)[:50]}")
-                    else:
-                        price = float(price)
-                        ##st.caption(f"   💰 Price: ₹{price:,.2f}")
-                    
-                    # Determine channel: check CSV column first, then use filename
-                    channel = None
-                    if 'channel' in row and pd.notna(row['channel']) and str(row['channel']).strip():
-                        channel = str(row['channel']).strip()
-                    else:
-                        channel = uploaded_file.name.replace('.csv', '')
-                    
-                    # Create transaction (week tracking auto-calculated in database_shared.py)
-                    transaction_data = {
-                        'user_id': user_id,
-                        'portfolio_id': portfolio_id,
-                        'ticker': normalized_ticker,
-                        'stock_name': row.get('stock_name', ticker),
-                        'asset_type': asset_type,
-                        'sector': row.get('sector', 'Unknown'),
-                        'transaction_type': 'buy' if 'buy' in str(row['transaction_type']).lower() else 'sell',
-                        'quantity': float(row['quantity']),
-                        'price': price,
-                        'transaction_date': trans_date,
-                        'channel': channel,  # Channel from CSV column or filename
-                        'notes': f"Imported from {uploaded_file.name}"
-                    }
-                    
-                    st.caption(f"   💾 Saving transaction to database...")
-                    result = db.add_transaction(transaction_data)
-                    
-                    if result['success']:
-                        imported += 1
-                        st.caption(f"   ✅ Transaction saved successfully")
+                                asset_type = 'stock'
                         
-                        # Log week calculation
-                        if 'week_label' in result.get('transaction', {}):
-                            week_label = result['transaction']['week_label']
-                            st.caption(f"   📅 Week calculated: {week_label}")
-                        else:
-                            pass
-#st.caption(f"   ⚠️ Week calculation may have failed")
-                    else:
+                        # For PMS, AIF, Bonds - ignore CSV ticker, use stock_name as placeholder
+                        # AI will fetch proper ticker/code later
+                        if asset_type in ['pms', 'aif', 'bond']:
+                            ticker = stock_name  # Force AI to resolve
+                        
+                        # SMART PRICE DETECTION (Priority Order):
+                        # 1. If CSV has 'price' column → use it directly
+                        # 2. If CSV has 'amount' column → calculate price = amount ÷ quantity
+                        # 3. If CSV has only 'date' → fetch historical price for that date
+                        # 4. If nothing works → price = 0 (will show as missing)
+                        
+                        csv_price = safe_float(row.get('price', 0), 0)
+                        
+                        # Try calculating from amount if price is missing (check both 'amount' and 'Amount')
+                        if csv_price == 0:
+                            # Check both lowercase and capital A (Groww uses different cases)
+                            csv_amount = safe_float(row.get('amount', 0), 0)
+                            if csv_amount == 0:
+                                csv_amount = safe_float(row.get('Amount', 0), 0)
+                            
+                            csv_quantity = safe_float(row.get('quantity', 0), 0)
+                            
+                            if csv_amount > 0 and csv_quantity > 0:
+                                csv_price = csv_amount / csv_quantity
+                        
+                        transaction_date = normalize_date(row['date'])
+                        
+                        # Last resort: Fetch historical price for transaction date if price still missing
+                        if csv_price == 0 and transaction_date:
+                            try:
+                                from enhanced_price_fetcher import EnhancedPriceFetcher
+                                price_fetcher = EnhancedPriceFetcher()
+                                
+                                # Fetch historical price for transaction date
+                                hist_price = price_fetcher.get_historical_price(
+                                    ticker=ticker,
+                                    asset_type=asset_type,
+                                    date=transaction_date,
+                                    fund_name=stock_name
+                                )
+                                
+                                if hist_price and hist_price > 0:
+                                    csv_price = hist_price
+                                    st.caption(f"      📅 Fetched price for {ticker} on {transaction_date}: ₹{hist_price:.2f}")
+                            except Exception as e:
+                                pass  # Keep price as 0, will show in logs
+                        
+                        # Import with placeholder ticker (AI will resolve later)
+                        transaction_data = {
+                            'user_id': user_id,
+                            'portfolio_id': portfolio_id,
+                            'ticker': str(ticker),  # May be stock_name if ticker was NaN
+                            'stock_name': str(stock_name),
+                            'scheme_name': str(stock_name) if asset_type == 'mutual_fund' else None,
+                            'quantity': safe_float(row['quantity'], 0),
+                            'price': csv_price,  # Use fetched historical price if CSV price was missing
+                            'transaction_date': transaction_date,
+                            'transaction_type': str(safe_value(row['transaction_type'], 'buy')).lower(),
+                            'asset_type': str(asset_type),
+                            'channel': str(safe_value(channel, 'Direct')),
+                            # For bonds, always set sector to "bond"
+                            'sector': 'bond' if asset_type == 'bond' else str(safe_value(row.get('sector', 'Unknown'), 'Unknown')),
+                            'filename': uploaded_file.name
+                        }
+                    
+                        result = db.add_transaction(transaction_data)
+                        if result.get('success'):
+                            imported += 1
+                            
+                            # Add small delay every 50 transactions to avoid overwhelming database
+                            if imported % 50 == 0:
+                                import time
+                                time.sleep(0.5)  # 500ms pause
+
+                        elif not result.get('success'):
+                            # Show why it failed
+                            error_msg = result.get('error', 'Unknown error')
+                            if 'duplicate' in error_msg.lower():
+                                skipped += 1  # Count duplicates as skipped
+                                pass  # Silent for duplicates
+                            elif '502' in error_msg or 'bad gateway' in error_msg.lower():
+                                # 502 error - Supabase server issue
+                                st.warning(f"   ⚠️ Database server error (502). Retrying in 2 seconds...")
+                                import time
+                                time.sleep(2)
+                                # Retry once
+                                retry_result = db.add_transaction(transaction_data)
+                                if retry_result.get('success'):
+                                    imported += 1
+                                else:
+                                    st.caption(f"   ⚠️ Retry failed: {retry_result.get('error', 'Unknown')[:100]}")
+                                    errors += 1
+                            else:
+                                st.caption(f"   ⚠️ Failed: {error_msg[:100]}")
+                                errors += 1
+                
+                    except Exception as e:
                         errors += 1
-                        #st.caption(f"   ❌ Database error: {result.get('error', 'Unknown error')}")
+                        st.caption(f"   ❌ Error processing row {idx + 1}: {str(e)[:100]}")
+                        continue
                 
-                except Exception as e:
-                    errors += 1
-                    #st.caption(f"   ❌ Error in row {idx+1}: {str(e)}")
-                
-                # Update progress bar
-                if len(df) > 10:
-                    progress = (idx + 1) / len(df)
-                    progress_bar.progress(progress)
-                    progress_text.text(f"Processing row {idx+1}/{len(df)}")
-            
-            # Clear progress bar
-            if len(df) > 10:
+                # Clear progress bar
                 progress_bar.empty()
-                progress_text.empty()
-            
-            total_imported += imported
-            
-            # File summary
-            file_summary = {
+                status_text.empty()
+                
+                # Show detailed import summary
+                if file_ext in ['csv', 'xlsx', 'xls']:
+                    if imported > 0:
+                        st.success(f"   ✅ Imported {imported} transactions from {uploaded_file.name}")
+                    if skipped > 0:
+                        st.info(f"   ⏭️  Skipped {skipped} duplicate transactions")
+                    if errors > 0:
+                        st.warning(f"   ⚠️  {errors} errors encountered")
+                    if imported == 0 and skipped == 0 and errors == 0:
+                        st.error(f"   ❌ No transactions imported from {uploaded_file.name} - check CSV format!")
+                
+                # Log summary
+                print(f"[CSV_IMPORT] File: {uploaded_file.name} | Rows read: {total_rows} | Imported: {imported} | Skipped: {skipped} | Errors: {errors}")
+                
+                # Use AI to resolve tickers based on stock names
+                # Run even if imported=0 to fix existing data!
+                if AI_TICKER_RESOLUTION_ENABLED:
+                    st.caption(f"   🤖 Using AI to resolve tickers from stock names...")
+                    
+                    try:
+                        # Get ALL transactions to fix tickers
+                        all_transactions = db.get_user_transactions(user_id)
+                        
+                        # Filter: Get transactions that need ticker resolution
+                        # Resolve ALL tickers to ensure they have correct .NS/.BO suffix and AMFI codes
+                        file_transactions = []
+                        for t in all_transactions:
+                            ticker = t.get('ticker', '')
+                            asset_type = t.get('asset_type', 'stock')
+                            
+                            needs_resolution = False
+                            
+                            # STOCKS: Resolve ALL to get proper .NS/.BO suffix
+                            if asset_type == 'stock':
+                                # Skip if already has .NS or .BO suffix
+                                if not (ticker.endswith('.NS') or ticker.endswith('.BO')):
+                                    needs_resolution = True
+                            
+                            # If ticker contains spaces, $, or is very long (scheme names)
+                            if ' ' in ticker or '$' in ticker or len(ticker) > 50:
+                                needs_resolution = True
+                            
+                            # PMS, AIF, Bonds ALWAYS need AI resolution to find proper codes
+                            if asset_type in ['pms', 'aif', 'bond']:
+                                needs_resolution = True
+                            
+                            # Mutual funds: SKIP AI resolution (AI doesn't have accurate AMFI codes)
+                            # Will fetch prices using scheme_name with mftool later
+                            if asset_type == 'mutual_fund':
+                                needs_resolution = False  # Don't resolve MF with AI
+                            
+                            if needs_resolution:
+                                file_transactions.append(t)
+                        
+                        st.caption(f"   Found {len(file_transactions)} transactions needing ticker resolution...")
+                        
+                        if file_transactions:
+                            # Separate by asset type for different processing strategies
+                            stocks_to_resolve = {}
+                            others_to_resolve = {}
+                            
+                            for trans in file_transactions:
+                                ticker = trans.get('ticker')
+                                stock_name = trans.get('stock_name')
+                                asset_type = trans.get('asset_type', 'stock')
+                                
+                                if ticker and stock_name:
+                                    if asset_type == 'stock':
+                                        # Stocks - will batch process
+                                        stocks_to_resolve[ticker] = {
+                                            'name': stock_name,
+                                            'asset_type': asset_type
+                                        }
+                                    else:
+                                        # PMS/AIF/Bonds - process one by one
+                                        others_to_resolve[ticker] = {
+                                            'name': stock_name,
+                                            'asset_type': asset_type
+                                        }
+                            
+                            all_resolved = {}
+                            
+                            # Process STOCKS in larger batches (10 at a time - AI is very accurate for stocks)
+                            if stocks_to_resolve:
+                                st.caption(f"   🔍 Resolving {len(stocks_to_resolve)} stock tickers (batch size: 10)...")
+                                
+                                batch_size = 10  # Larger batch for stocks
+                                stock_items = list(stocks_to_resolve.items())
+                                
+                                for batch_start in range(0, len(stock_items), batch_size):
+                                    batch_end = min(batch_start + batch_size, len(stock_items))
+                                    batch = dict(stock_items[batch_start:batch_end])
+                                    
+                                    st.caption(f"      Stock batch {batch_start//batch_size + 1} ({len(batch)} tickers)...")
+                                    
+                                    # Use AI to get verified tickers and sectors
+                                    batch_resolved = ai_resolve_tickers_from_names(batch)
+                                    if batch_resolved:
+                                        all_resolved.update(batch_resolved)
+                            
+                            # Process PMS/AIF/BONDS one by one (need more careful verification)
+                            if others_to_resolve:
+                                st.caption(f"   🔍 Resolving {len(others_to_resolve)} PMS/AIF/Bond tickers (one-by-one)...")
+                                
+                                for ticker, info in others_to_resolve.items():
+                                    single_pair = {ticker: info}
+                                    
+                                    # Use AI to get verified ticker
+                                    single_resolved = ai_resolve_tickers_from_names(single_pair)
+                                    if single_resolved:
+                                        all_resolved.update(single_resolved)
+                            
+                            resolved_tickers = all_resolved
+                            
+                            if resolved_tickers:
+                                st.caption(f"   ✅ AI resolved {len(resolved_tickers)} tickers with verified sources")
+                                
+                                # CRITICAL: Check for duplicate tickers (AI bug detection)
+                                verified_ticker_list = [data.get('ticker') for data in resolved_tickers.values() if data.get('ticker')]
+                                unique_verified = set(verified_ticker_list)
+                                
+                                if len(verified_ticker_list) != len(unique_verified):
+                                    # DUPLICATES DETECTED - This is EXPECTED for same stocks with different CSV ticker variations
+                                    st.info(f"   ℹ️ Found {len(verified_ticker_list) - len(unique_verified)} ticker merges (same stocks, different CSV tickers)")
+                                    
+                                    # Find which tickers are duplicated
+                                    from collections import Counter
+                                    ticker_counts = Counter(verified_ticker_list)
+                                    duplicates = {ticker: count for ticker, count in ticker_counts.items() if count > 1}
+                                    
+                                    for dup_ticker, count in duplicates.items():
+                                        # Show which CSV tickers will be merged
+                                        affected = [orig for orig, data in resolved_tickers.items() if data.get('ticker') == dup_ticker]
+                                        st.caption(f"      ✓ Merging: {', '.join(affected[:5])} → {dup_ticker}")
+                                    
+                                    st.caption("   ℹ️ These are legitimate merges (e.g., rights issues, bonus shares, name variations)")
+                                else:
+                                    # All tickers are unique
+                                    st.caption(f"   ✅ All {len(unique_verified)} tickers are unique")
+                                
+                                # Proceed with updates (duplicates are valid merges!)
+                                updated_count = 0
+                                for original_ticker, resolved_data in resolved_tickers.items():
+                                    verified_ticker = resolved_data.get('ticker')
+                                    sector = resolved_data.get('sector', 'Unknown')
+                                    source = resolved_data.get('source', 'ai')
+                                    
+                                    if verified_ticker:
+                                        # Update stock_master record with verified ticker
+                                        # Handle merges (when multiple CSV tickers resolve to same verified ticker)
+                                        
+                                        if verified_ticker != original_ticker:
+                                            # Find old stock_master record with original ticker
+                                            old_stock = db.supabase.table('stock_master').select('id, ticker, stock_name').eq(
+                                                'ticker', original_ticker
+                                            ).execute()
+                                            
+                                            if old_stock.data:
+                                                old_stock_id = old_stock.data[0]['id']
+                                                stock_name = resolved_data.get('name', old_stock.data[0].get('stock_name'))
+                                                
+                                                # Check if target ticker already exists
+                                                existing_stock = db.supabase.table('stock_master').select('id').eq(
+                                                    'ticker', verified_ticker
+                                                ).eq('stock_name', stock_name).execute()
+                                                
+                                                if existing_stock.data:
+                                                    # Target ticker already exists - MERGE!
+                                                    # Point transactions to existing stock and delete old record
+                                                    target_stock_id = existing_stock.data[0]['id']
+                                                    
+                                                    # Update all transactions to point to existing stock
+                                                    db.supabase.table('user_transactions').update({
+                                                        'stock_id': target_stock_id
+                                                    }).eq('stock_id', old_stock_id).execute()
+                                                    
+                                                    # Delete old stock_master record
+                                                    db.supabase.table('stock_master').delete().eq('id', old_stock_id).execute()
+                                                    
+                                                    st.caption(f"      ✓ Merged: {original_ticker} → {verified_ticker}")
+                                                    updated_count += 1
+                                                else:
+                                                    # Target doesn't exist - safe to update
+                                                    db.supabase.table('stock_master').update({
+                                                        'ticker': verified_ticker,
+                                                        'sector': sector
+                                                    }).eq('id', old_stock_id).execute()
+                                                    
+                                                    st.caption(f"      ✓ Updated: {original_ticker} → {verified_ticker}")
+                                                    updated_count += 1
+                                            else:
+                                                # Create new stock_master record with verified ticker
+                                                # Get asset_type from original groups
+                                                asset_type = stocks_to_resolve.get(original_ticker, {}).get('asset_type') or \
+                                                            others_to_resolve.get(original_ticker, {}).get('asset_type', 'stock')
+                                                
+                                                # For bonds, always set sector to "bond"
+                                                if asset_type == 'bond':
+                                                    sector = 'bond'
+                                                
+                                                new_stock_id = db.get_or_create_stock(
+                                                    ticker=verified_ticker,
+                                                    stock_name=resolved_data.get('name', original_ticker),
+                                                    asset_type=asset_type,
+                                                    sector=sector
+                                                )
+                                                
+                                                st.caption(f"      ✓ Created: {verified_ticker}")
+                                                updated_count += 1
+                                        else:
+                                            # Just update sector if ticker is same
+                                            db.supabase.table('stock_master').update({
+                                                'sector': sector
+                                            }).eq('ticker', verified_ticker).execute()
+                                            updated_count += 1
+                                
+                                if updated_count > 0:
+                                    st.caption(f"   ✅ Updated {updated_count} transactions with verified tickers")
+                    
+                    except Exception as e:
+                        st.caption(f"   ⚠️ AI ticker resolution skipped: {str(e)[:100]}")
+                
+                # Resolve MUTUAL FUNDS using mftool search (more reliable than AI)
+                st.caption(f"   🔍 Resolving mutual fund AMFI codes using mftool search...")
+                try:
+                    # Get all mutual fund transactions
+                    mf_transactions = [t for t in db.get_user_transactions(user_id) if t.get('asset_type') == 'mutual_fund']
+                    
+                    if mf_transactions:
+                        mf_updated = 0
+                        for trans in mf_transactions:
+                            scheme_name = trans.get('stock_name', '')
+                            current_ticker = trans.get('ticker', '')
+                            
+                            # Skip if already has numeric AMFI code
+                            if current_ticker.isdigit() and len(current_ticker) == 6:
+                                continue
+                            
+                            # Search mftool for AMFI code
+                            result = search_mftool_for_amfi_code(scheme_name)
+                            
+                            if result:
+                                amfi_code = result['ticker']
+                                matched_name = result['name']
+                                confidence = result.get('match_confidence', 0)
+                                
+                                # Check if target ticker already exists in stock_master
+                                existing_stock = db.supabase.table('stock_master').select('id').eq(
+                                    'ticker', amfi_code
+                                ).execute()
+                                
+                                # Get the old stock_master record
+                                old_stock = db.supabase.table('stock_master').select('id').eq(
+                                    'ticker', current_ticker
+                                ).execute()
+                                
+                                if existing_stock.data:
+                                    # Target AMFI code already exists, point transactions to it
+                                    target_stock_id = existing_stock.data[0]['id']
+                                    
+                                    if old_stock.data:
+                                        old_stock_id = old_stock.data[0]['id']
+                                        
+                                        # Update all transactions to point to existing stock
+                                        db.supabase.table('user_transactions').update({
+                                            'stock_id': target_stock_id
+                                        }).eq('stock_id', old_stock_id).execute()
+                                        
+                                        # Delete old stock_master record
+                                        db.supabase.table('stock_master').delete().eq('id', old_stock_id).execute()
+                                        
+                                        st.caption(f"      ✓ MF: {scheme_name[:40]} → {amfi_code} (merged)")
+                                        mf_updated += 1
+                                else:
+                                    # Target doesn't exist, safe to update
+                                    if old_stock.data:
+                                        db.supabase.table('stock_master').update({
+                                            'ticker': amfi_code,
+                                            'stock_name': matched_name,
+                                            'sector': 'Mutual Fund'
+                                        }).eq('id', old_stock.data[0]['id']).execute()
+                                        
+                                        st.caption(f"      ✓ MF: {scheme_name[:40]} → {amfi_code} ({confidence:.0%} match)")
+                                        mf_updated += 1
+                        
+                        if mf_updated > 0:
+                            st.caption(f"   ✅ Updated {mf_updated} mutual fund AMFI codes")
+                    
+                except Exception as e:
+                    st.caption(f"   ⚠️ Mutual fund resolution skipped: {str(e)[:100]}")
+                
+                # Recalculate holdings from transactions (CRITICAL for MFs to show up!)
+                if imported > 0:
+                    st.caption(f"   📊 Recalculating holdings from transactions...")
+                    try:
+                        holdings_count = db.recalculate_holdings(user_id, portfolio_id)
+                        st.caption(f"   ✅ Calculated {holdings_count} holdings")
+                    except Exception as e:
+                        st.caption(f"   ⚠️ Holdings recalculation skipped: {str(e)[:100]}")
+                
+                # Auto-fetch prices AND 52-week historical data
+                if imported > 0:
+                    st.caption(f"   📊 Fetching current prices and 52-week historical data...")
+                    
+                    try:
+                        holdings = db.get_user_holdings(user_id)
+                        
+                        if holdings:
+                            # Get unique tickers and asset types
+                            unique_tickers = list(set([h['ticker'] for h in holdings if h.get('ticker')]))
+                            asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings if h.get('ticker')}
+                            
+                            st.caption(f"      📈 Fetching comprehensive data for {len(unique_tickers)} holdings...")
+                            
+                            # Fetch current prices + 52-week historical data
+                            db.bulk_process_new_stocks_with_comprehensive_data(
+                                tickers=unique_tickers,
+                                asset_types=asset_types
+                            )
+                            
+                            st.caption(f"   ✅ Updated current prices and 52-week data for {len(unique_tickers)} holdings")
+                            
+                    except Exception as e:
+                        st.caption(f"   ⚠️ Price/historical fetching skipped: {str(e)[:50]}")
+                
+                    processing_log.append({
                 'file': uploaded_file.name,
-                'total_rows': len(df),
                 'imported': imported,
-                'skipped': skipped,
-                'errors': errors
-            }
-            processing_log.append(file_summary)
-            
-            st.caption(f"✅ {uploaded_file.name}: {imported}/{len(df)} transactions imported ({skipped} skipped, {errors} errors)")
+                    'skipped': 0,
+                    'errors': len(df) - imported
+                    })
+                    
+                    total_imported += imported
+                    
+                else:
+                # Non-CSV/Excel files require AI
+                    st.caption(f"   ⚠️ Only CSV/Excel files supported in direct mode. {uploaded_file.name} requires AI extraction.")
+                processing_log.append({
+                    'file': uploaded_file.name,
+                    'imported': 0,
+                    'skipped': 0,
+                    'errors': 1
+                })
         
         except Exception as e:
-            st.error(f"❌ Error processing {uploaded_file.name}: {str(e)}")
+            st.caption(f"   ❌ Error processing {uploaded_file.name}: {e}")
             processing_log.append({
                 'file': uploaded_file.name,
-                'error': str(e)
+                'imported': 0,
+                'skipped': 0,
+                'errors': 1
             })
     
-    # Final summary
-    st.success(f"🎉 Processing Complete!")
-    st.info(f"📊 **Final Summary:**")
-    st.info(f"   • Total files processed: {len(uploaded_files)}")
-    st.info(f"   • Total transactions imported: {total_imported}")
-    
-    # Detailed log
-    with st.expander("📋 Detailed Processing Log"):
-        for log in processing_log:
-            if 'error' in log:
-                st.error(f"❌ {log['file']}: {log['error']}")
-            else:
-                st.success(f"✅ {log['file']}: {log['imported']}/{log['total_rows']} imported ({log['skipped']} skipped, {log['errors']} errors)")
-    
+    # Final holdings recalculation AFTER all files processed (ensures MFs + stocks are combined)
     if total_imported > 0:
-        st.info("🔄 Next: Fetching missing weekly prices for your holdings...")
+        st.caption(f"📊 Final holdings recalculation (combining all assets)...")
+        try:
+            final_holdings_count = db.recalculate_holdings(user_id, portfolio_id)
+            st.caption(f"✅ Total portfolio: {final_holdings_count} unique holdings")
+        except Exception as e:
+            st.caption(f"⚠️ Final recalculation skipped: {str(e)[:100]}")
+    
+    # Show summary
+    if processing_log:
+        st.success(f"✅ Processing complete! Imported {total_imported} transactions from {len(uploaded_files)} files.")
         
-        # Automatically fetch missing weeks after import
-        st.subheader("📅 Fetching Historical Prices")
-        
-        with st.spinner("Fetching missing weekly prices..."):
-            try:
-                # Import weekly manager if not already available
-                # from weekly_manager_streamlined import StreamlinedWeeklyManager  # Removed - file deleted
-                
-                # Initialize if needed
-                if 'weekly_manager' not in st.session_state:
-                    st.session_state.weekly_manager = StreamlinedWeeklyManager(
-                        st.session_state.db,
-                        st.session_state.price_fetcher
-                    )
-                
-                weekly_manager = st.session_state.weekly_manager
-                
-                # Fetch missing weeks (silent) - using bulk_ai_fetcher instead
-                # result = weekly_manager.fetch_missing_weeks_till_current(user_id)  # Removed - using bulk_ai_fetcher
-                result = {"success": True, "fetched": 0}  # Simplified for now
-                
-                if result['success']:
-                    fetched_count = result.get('fetched', 0)
-                    if fetched_count > 0:
-                        st.success(f"✅ Fetched {fetched_count} missing week prices!")
-                    else:
-                        st.info("✅ All weeks already up-to-date")
-                else:
-                    st.warning(f"⚠️ Some prices could not be fetched: {result.get('error', 'Unknown error')}")
-                
-            except Exception as e:
-                st.error(f"❌ Error fetching prices: {str(e)}")
-                st.caption("You can manually refresh prices from the sidebar after login.")
-
-# ============================================================================
-# MAIN DASHBOARD
-# ============================================================================
+        # Show detailed log
+        with st.expander("📋 Processing Details", expanded=False):
+            for log in processing_log:
+                st.caption(f"📄 {log['file']}: {log['imported']} imported, {log['skipped']} skipped, {log['errors']} errors")
+    
+    return total_imported
 
 def main_dashboard():
     """Main dashboard after login"""
@@ -609,9 +1586,16 @@ def main_dashboard():
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
+                # Update bond prices silently (AI-powered)
+                try:
+                    update_bond_prices_with_ai(user['id'], db)
+                except:
+                    pass  # Silent failure
+                
                 # Simulate progress steps
                 steps = [
                     "🔍 Analyzing user holdings and transaction weeks...",
+                    "💰 Updating bond prices via AI...",
                     "📊 Processing portfolio data...",
                     "💰 Fetching latest market prices...",
                     "📈 Calculating performance metrics...",
@@ -624,22 +1608,40 @@ def main_dashboard():
                     status_text.text(step)
                     time.sleep(0.3)  # Small delay for visual effect
                 
-        # Auto-fetch missing weeks and update prices (silent background process)
+        # Auto-fetch comprehensive data for all holdings (only if needed - not on every login)
             holdings = db.get_user_holdings(user['id'])
             if holdings:
-            # Auto-fetch missing weeks (silent) - using bulk_ai_fetcher instead
-                # result = weekly_manager.fetch_missing_weeks_till_current(user['id'])  # Removed - using bulk_ai_fetcher
-                result = {"success": True, "fetched": 0}  # Simplified for now
-                
-            # Smart price update - only if needed (silent)
                 try:
+                    # Check which holdings need price updates (not updated today)
                     holdings_needing_update = should_update_prices_today(holdings)
-                    if holdings_needing_update:
-                        # Only update holdings that haven't been updated today
+                    
+                    if holdings_needing_update and bulk_ai_fetcher.available:
+                        # Get unique tickers that need updating
+                        unique_tickers = list(set([h['ticker'] for h in holdings_needing_update if h.get('ticker')]))
+                        
+                        if unique_tickers:
+                            # Use bulk comprehensive fetching for holdings that need update
+                            asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings_needing_update if h.get('ticker')}
+                            stock_ids = db.bulk_process_new_stocks_with_comprehensive_data(
+                                tickers=unique_tickers,
+                                asset_types=asset_types
+                            )
+                            # All data (stock info, current prices, weekly prices) fetched in bulk!
+                    elif holdings_needing_update:
+                        # Fallback to individual price updates
                         st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
-                    # If no holdings need update, prices are already current
+                    # else: All prices are current, skip fetching
+                    
                 except Exception as e:
-                    st.sidebar.warning(f"⚠️ Price update: {str(e)[:50]}")
+                    # Silent fallback
+                    try:
+                        holdings_needing_update = should_update_prices_today(holdings)
+                        if holdings_needing_update:
+                            st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
+                    except:
+                        pass
+            
+                result = {'success': True, 'fetched': len(holdings_needing_update) if holdings_needing_update else 0}
             else:
                 result = {'success': True, 'fetched': 0}
         
@@ -772,6 +1774,83 @@ def portfolio_overview_page():
     
     user = st.session_state.user
     
+    # Show Corporate Actions Alert (Stock Splits/Bonus)
+    if 'corporate_actions_detected' in st.session_state and st.session_state.corporate_actions_detected:
+        corporate_actions = st.session_state.corporate_actions_detected
+        
+        st.warning(f"📊 **{len(corporate_actions)} Stock Splits/Bonus Shares Detected!**")
+        
+        with st.expander(f"🔧 View and Fix Corporate Actions ({len(corporate_actions)} stocks)", expanded=True):
+            st.markdown("""
+            **Corporate actions detected!** Your portfolio has stocks that underwent splits or bonus issues.  
+            Click the "Fix" button to automatically adjust quantities and prices.
+            """)
+            
+            # Create a table of detected corporate actions
+            for idx, action in enumerate(corporate_actions):
+                col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
+                
+                with col1:
+                    st.write(f"**{action['stock_name']}** (`{action['ticker']}`)")
+                
+                with col2:
+                    st.caption(f"Your Avg: ₹{action['avg_price']:,.2f}")
+                    st.caption(f"Current: ₹{action['current_price']:,.2f}")
+                
+                with col3:
+                    st.info(f"**1:{action['split_ratio']} Split**")
+                    st.caption(f"({action['ratio']:.1f}x difference)")
+                
+                with col4:
+                    if st.button(f"✅ Fix", key=f"fix_split_{idx}_{action['ticker']}"):
+                        with st.spinner(f"Adjusting {action['ticker']}..."):
+                            adjusted = adjust_for_corporate_action(
+                                user['id'], 
+                                action['stock_id'], 
+                                action['split_ratio'],
+                                db
+                            )
+                            
+                            if adjusted > 0:
+                                st.success(f"✅ Adjusted {adjusted} transactions for {action['ticker']}")
+                                # Clear from session state
+                                st.session_state.corporate_actions_detected = [
+                                    a for a in corporate_actions if a['ticker'] != action['ticker']
+                                ]
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error(f"❌ Failed to adjust {action['ticker']}")
+            
+            # Add "Fix All" button
+            st.markdown("---")
+            col_a, col_b, col_c = st.columns([1, 1, 2])
+            with col_a:
+                if st.button("✅ Fix All Splits", type="primary", use_container_width=True):
+                    with st.spinner("Adjusting all stocks..."):
+                        total_adjusted = 0
+                        for action in corporate_actions:
+                            adjusted = adjust_for_corporate_action(
+                                user['id'],
+                                action['stock_id'],
+                                action['split_ratio'],
+                                db
+                            )
+                            total_adjusted += adjusted
+                        
+                        if total_adjusted > 0:
+                            st.success(f"✅ Adjusted {total_adjusted} total transactions across {len(corporate_actions)} stocks!")
+                            st.session_state.corporate_actions_detected = None
+                            time.sleep(2)
+                            st.rerun()
+            
+            with col_b:
+                if st.button("❌ Dismiss", use_container_width=True):
+                    st.session_state.corporate_actions_detected = None
+                    st.rerun()
+        
+        st.markdown("---")
+    
     # Add AI-powered proactive alerts if available
     if AI_AGENTS_AVAILABLE:
         try:
@@ -798,20 +1877,91 @@ def portfolio_overview_page():
     with col1:
         # Check how many holdings need updating
         holdings = get_cached_holdings(user['id'])
-        holdings_needing_update = should_update_prices_today(holdings) if holdings else []
         
-        if holdings_needing_update:
-            button_text = f"🔄 Update {len(holdings_needing_update)}"
-            help_text = f"Update prices for {len(holdings_needing_update)} holdings that haven't been updated today"
+        # Find stocks with stale prices (current_price == avg_price or 0% return)
+        stale_prices = []
+        bonds_to_update = []
+        for h in holdings:
+            cp = h.get('current_price', 0)
+            ap = h.get('average_price', 0)
+            asset_type = h.get('asset_type', '')
+            
+            # Special handling for bonds - check if price seems wrong
+            if asset_type == 'bond':
+                # Bonds often show wrong prices, check if current price is suspiciously low
+                ticker = (h.get('ticker') or '').lower()
+                name = (h.get('stock_name') or '').lower()
+                is_sgb = any(k in ticker or k in name for k in ['sgb', 'gold bond', 'goldbond', 'sovereign', 'sr-'])
+                
+                # SGBs should be around ₹14,000-15,000, not ₹2,000
+                if is_sgb and cp < 9000:
+                    bonds_to_update.append(h)
+                elif cp is None or cp == 0 or cp < ap * 0.5:  # Price is < 50% of avg = likely wrong
+                    bonds_to_update.append(h)
+            
+            # If current_price is None, 0, or exactly equals avg_price → likely stale
+            if cp is None or cp == 0 or abs(cp - ap) < 0.01:
+                stale_prices.append(h)
+        
+        # Show bond update button if bonds need updating
+        if bonds_to_update:
+            if st.button(f"💰 Update {len(bonds_to_update)} Bond Price(s)", help=f"Update bond prices using AI (SGBs need market prices)"):
+                with st.spinner(f"Fetching bond prices for {len(bonds_to_update)} bonds..."):
+                    from enhanced_price_fetcher import EnhancedPriceFetcher
+                    price_fetcher = EnhancedPriceFetcher()
+                    
+                    updated = 0
+                    for bond in bonds_to_update:
+                        ticker = bond.get('ticker')
+                        stock_name = bond.get('stock_name')
+                        
+                        print(f"[BOND_UPDATE] Manual update: {stock_name} ({ticker})")
+                        price, source = price_fetcher._get_bond_price(ticker, stock_name)
+                        
+                        if price and price > 0:
+                            db._store_current_price(ticker, price, 'bond')
+                            print(f"[BOND_UPDATE] ✅ Updated {ticker}: ₹{price:.2f} (from {source})")
+                            updated += 1
+                        else:
+                            print(f"[BOND_UPDATE] ❌ Failed to get price for {ticker}")
+                    
+                    if updated > 0:
+                        st.success(f"✅ Updated {updated}/{len(bonds_to_update)} bond price(s)!")
+                    else:
+                        st.warning(f"⚠️ No bond prices updated (AI may be unavailable)")
+                    st.rerun()
+        
+        if stale_prices:
+            button_text = f"🔄 Update {len(stale_prices)} Prices"
+            help_text = f"{len(stale_prices)} holdings have stale/missing prices (showing 0% return)"
         else:
             button_text = "✅ All Current"
-            help_text = "All prices are up-to-date for today"
+            help_text = "All prices are up-to-date"
         
-        if st.button(button_text, help=help_text, disabled=(len(holdings_needing_update) == 0)):
-            with st.spinner(f"Updating {len(holdings_needing_update)} holdings..."):
-                if holdings_needing_update:
-                    st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
-                    st.success(f"✅ Updated {len(holdings_needing_update)} holdings!")
+        if st.button(button_text, help=help_text, disabled=(len(stale_prices) == 0)):
+            with st.spinner(f"Fetching prices for {len(stale_prices)} holdings..."):
+                if stale_prices:
+                    # Try to update stale prices using enhanced fetcher with AI fallback
+                    from enhanced_price_fetcher import EnhancedPriceFetcher
+                    price_fetcher = EnhancedPriceFetcher()
+                    
+                    updated = 0
+                    for holding in stale_prices:
+                        ticker = holding.get('ticker')
+                        asset_type = holding.get('asset_type')
+                        stock_name = holding.get('stock_name')
+                        
+                        # Fetch current price with AI fallback
+                        price, source = price_fetcher.get_current_price(ticker, asset_type, stock_name)
+                        
+                        if price and price > 0:
+                            db._store_current_price(ticker, price, asset_type)
+                            updated += 1
+                    
+                    if updated > 0:
+                        st.success(f"✅ Updated {updated}/{len(stale_prices)} prices (some may be delisted)")
+                    else:
+                        st.warning(f"⚠️ No prices updated (stocks may be delisted or AI unavailable)")
                     st.rerun()
                 else:
                     st.info("All prices are already up-to-date!")
@@ -3120,7 +4270,7 @@ def ai_assistant_page():
     if pdf_count > 0:
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.caption(f"📚 Loaded {pdf_count} PDFs from database for AI context")
+            st.caption(f"📚 Loaded {pdf_count} PDFs from shared library (all users) for AI context")
         with col2:
             if st.button("🔄", key="refresh_pdf_context_main", help="Refresh PDF context from database"):
                 st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
@@ -3208,10 +4358,10 @@ def ai_assistant_page():
                 # Include PDF context
                 pdf_context_text = ""
                 
-                # Include ALL PDF summaries (more comprehensive)
+                # Include ALL PDF summaries from shared library
                 recent_pdfs = db.get_user_pdfs(user['id'])
                 if recent_pdfs:
-                    pdf_context_text += f"\n\n📚 UPLOADED DOCUMENTS ({len(recent_pdfs)} total):"
+                    pdf_context_text += f"\n\n📚 SHARED PDF DOCUMENTS ({len(recent_pdfs)} total, all users):"
                     for pdf in recent_pdfs:
                         pdf_context_text += f"\n\n📄 {pdf['filename']}:"
                         if pdf.get('ai_summary'):
@@ -3342,9 +4492,10 @@ Use emojis appropriately and be encouraging but data-focused."""},
                 st.markdown(f"**Question:** {chat['q']}")
                 st.markdown(f"**Answer:** {chat['a']}")
     
-    # PDF Library Section
+    # PDF Library Section (Shared across all users)
     st.markdown("---")
-    st.markdown("**📚 Your PDF Library**")
+    st.markdown("**📚 Shared PDF Library (Available to All Users)**")
+    st.caption("💡 PDFs uploaded by any user are visible to everyone")
     
     if user_pdfs and len(user_pdfs) > 0:
         for pdf in user_pdfs:
@@ -3422,20 +4573,40 @@ Use emojis appropriately and be encouraging but data-focused."""},
     else:
         st.caption("No PDFs uploaded yet")
     
-    # PDF Upload for AI Analysis
+    # PDF Upload for AI Analysis (Multiple Files Supported)
     st.markdown("---")
-    st.markdown("**📤 Upload PDF for AI Analysis**")
+    st.markdown("**📤 Upload PDFs for AI Analysis**")
+    st.caption("💡 You can upload multiple PDFs at once!")
     
-    uploaded_pdf = st.file_uploader(
-        "Choose a PDF file to analyze",
+    uploaded_pdfs = st.file_uploader(
+        "Choose PDF file(s) to analyze",
         type=['pdf'],
-        help="Upload research reports, financial statements, or any document for AI analysis"
+        accept_multiple_files=True,
+        help="Upload research reports, financial statements, or any document for AI analysis. Select multiple files to upload them all at once!"
     )
     
-    if uploaded_pdf:
-        if st.button("🔍 Analyze PDF", type="primary"):
-            with st.spinner("🔍 Analyzing PDF..."):
+    if uploaded_pdfs:
+        # Handle both single file and multiple files
+        if not isinstance(uploaded_pdfs, list):
+            uploaded_pdfs = [uploaded_pdfs]
+        
+        if len(uploaded_pdfs) == 1:
+            button_text = f"🔍 Analyze 1 PDF"
+        else:
+            button_text = f"🔍 Analyze & Upload {len(uploaded_pdfs)} PDFs"
+        
+        if st.button(button_text, type="primary"):
+            success_count = 0
+            failed_count = 0
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for idx, uploaded_pdf in enumerate(uploaded_pdfs):
                 try:
+                    status_text.text(f"📄 Processing {idx + 1}/{len(uploaded_pdfs)}: {uploaded_pdf.name}...")
+                    progress_bar.progress((idx + 1) / len(uploaded_pdfs))
+                    
                     import PyPDF2
                     import pdfplumber
                     import openai
@@ -3446,9 +4617,9 @@ Use emojis appropriately and be encouraging but data-focused."""},
                     tables_found = []
                     page_count = 0
                     
-                    st.info("🔍 Extracting content from PDF (text, tables, structure)...")
-                    
                     # Try pdfplumber first (better for tables)
+                    # Reset file pointer for each file
+                    uploaded_pdf.seek(0)
                     with pdfplumber.open(uploaded_pdf) as pdf:
                         for page_num, page in enumerate(pdf.pages, 1):
                             page_count += 1
@@ -3467,8 +4638,6 @@ Use emojis appropriately and be encouraging but data-focused."""},
                                     })
                     
                     if pdf_text:
-                        st.success(f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, found {len(tables_found)} tables")
-                        
                         # Truncate if too long (OpenAI has token limits)
                         pdf_text_for_ai = pdf_text[:10000] + "..." if len(pdf_text) > 10000 else pdf_text
                         
@@ -3531,9 +4700,11 @@ Use emojis appropriately and be encouraging but data-focused."""},
                         
                         ai_analysis = response.choices[0].message.content
                         
-                        # Display the analysis
-                        st.markdown("### 🤖 AI Analysis")
-                        st.markdown(ai_analysis)
+                        # Display the analysis for this PDF
+                        with st.expander(f"📄 {uploaded_pdf.name} - Analysis", expanded=(idx == 0)):
+                            st.markdown("### 🤖 AI Analysis")
+                            st.markdown(ai_analysis)
+                            st.info(f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, found {len(tables_found)} tables")
                         
                         # Store in chat history
                         st.session_state.chat_history.append({
@@ -3557,21 +4728,33 @@ Use emojis appropriately and be encouraging but data-focused."""},
                         )
                         
                         if save_result['success']:
-                            st.success(f"✅ PDF '{uploaded_pdf.name}' saved to database!")
-                            # Refresh the page to update the PDF library count
-                            st.rerun()
-                            
-                            # Reload PDF context from database
-                            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                            st.info("📄 PDF content is now stored and available for all future sessions!")
-                            
+                            success_count += 1
                         else:
-                            st.error(f"❌ Could not save PDF: {save_result.get('error', 'Unknown error')}")
+                            failed_count += 1
+                            st.error(f"❌ Failed to save '{uploaded_pdf.name}': {save_result.get('error', 'Unknown error')}")
                     else:
-                        st.error("❌ Could not extract text from PDF. Please ensure the PDF contains readable text.")
+                        failed_count += 1
+                        st.error(f"❌ Could not extract text from '{uploaded_pdf.name}'. Please ensure the PDF contains readable text.")
                         
                 except Exception as e:
-                    st.error(f"❌ Error processing PDF: {str(e)[:100]}")
+                    failed_count += 1
+                    st.error(f"❌ Error processing '{uploaded_pdf.name}': {str(e)[:100]}")
+            
+            # Final summary
+            progress_bar.empty()
+            status_text.empty()
+            
+            if success_count > 0:
+                st.success(f"✅ Successfully processed and saved {success_count} PDF(s) to shared library!")
+                if failed_count > 0:
+                    st.warning(f"⚠️ {failed_count} PDF(s) failed to process")
+                
+                # Refresh the page to update the PDF library count
+                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+                st.info("📄 PDF content is now stored and available for all future sessions!")
+                st.rerun()
+            else:
+                st.error(f"❌ All {len(uploaded_pdfs)} PDF(s) failed to process. Please check the files and try again.")
     
     # Quick Tips Section
     st.markdown("---")
@@ -3606,6 +4789,13 @@ def ai_insights_page():
     
     # Get PDF context for enhanced AI analysis
     pdf_context = db.get_all_pdfs_text(user['id'])
+    pdf_count = len(db.get_user_pdfs(user['id']))
+    
+    # Show PDF context status
+    if pdf_count > 0:
+        st.info(f"📚 **PDF Context Active:** {pdf_count} PDF(s) from shared library will be included in AI analysis")
+    else:
+        st.caption("💡 Upload PDFs in the AI Assistant page to enhance insights with research documents")
     
     # Create tabs for different AI insights
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
@@ -4398,7 +5588,7 @@ def process_file_with_ai(uploaded_file, filename, user_id):
         st.error(f"❌ Error processing file {filename}: {str(e)}")
         import traceback
         st.error(traceback.format_exc())
-        return None
+        return []  # Return empty list instead of None
 
 def upload_files_page():
     """Enhanced upload more files page with AI PDF extraction"""
@@ -4472,26 +5662,26 @@ def upload_files_page():
         """)
     
     # AI-powered file extraction section
-    if AI_AGENTS_AVAILABLE:
+    if AI_FILE_EXTRACTION_ENABLED:
         st.markdown("""
         <div class="upload-section">
             <h3>🤖 AI-Powered Transaction Extraction</h3>
-            <p>Upload ANY file type (PDF, CSV, Excel) and let AI automatically extract transaction data!</p>
+            <p>Upload ANY file type (PDF, CSV, Excel, Images) and let AI automatically extract transaction data!</p>
         </div>
         """, unsafe_allow_html=True)
         
-        st.info("💡 **AI processes all file types**: CSV, PDF, Excel (XLSX/XLS), and Text files. Just upload and let AI handle the rest!")
+        st.info("💡 **AI processes all file types**: CSV, PDF, Excel (XLSX/XLS), Text files, and Images (JPG, PNG, JPEG). Just upload and let AI handle the rest!")
         
         # Universal file uploader
-        uploaded_files = st.file_uploader(
-            "📁 Choose files to upload (CSV, PDF, Excel, etc.)",
-            type=['csv', 'pdf', 'xlsx', 'xls', 'txt'],
+    uploaded_files = st.file_uploader(
+            "📁 Choose files to upload (CSV, PDF, Excel, Images, etc.)",
+            type=['csv', 'pdf', 'xlsx', 'xls', 'txt', 'jpg', 'jpeg', 'png'],
             accept_multiple_files=True,
             key="ai_file_uploader",
-            help="Upload transaction files in any format - AI will extract the data automatically"
+            help="Upload transaction files in any format - AI will extract the data automatically. Supports images too!"
         )
         
-        if uploaded_files:
+    if uploaded_files:
             for uploaded_file in uploaded_files:
                 file_type = uploaded_file.name.split('.')[-1].upper()
                 st.markdown(f"**🤖 AI Processing: {uploaded_file.name}** ({file_type})")
@@ -4531,20 +5721,22 @@ def upload_files_page():
                             for transaction in transactions:
                                 try:
                                     # Convert AI extracted data to database format
-                                    result = db.add_transaction(
-                                        user_id=user['id'],
-                                        ticker=transaction.get('ticker'),
-                                        stock_name=transaction.get('stock_name'),
-                                        scheme_name=transaction.get('scheme_name'),
-                                        quantity=transaction.get('quantity', 0),
-                                        price=transaction.get('price', 0),  # 0 triggers auto-fetch
-                                        transaction_date=transaction.get('date'),
-                                        transaction_type=transaction.get('transaction_type', 'buy'),
-                                        asset_type=transaction.get('asset_type', 'stock'),
-                                        channel=transaction.get('channel', 'Direct'),
-                                        sector=transaction.get('sector'),
-                                        filename=uploaded_file.name
-                                    )
+                                    transaction_data = {
+                                        'user_id': user['id'],
+                                        'portfolio_id': portfolio['id'],  # Add portfolio_id
+                                        'ticker': transaction.get('ticker'),
+                                        'stock_name': transaction.get('stock_name') or transaction.get('ticker', 'Unknown'),  # Fix null stock_name
+                                        'scheme_name': transaction.get('scheme_name'),
+                                        'quantity': transaction.get('quantity', 0),
+                                        'price': transaction.get('price', 0),  # 0 triggers auto-fetch
+                                        'transaction_date': transaction.get('date'),
+                                        'transaction_type': transaction.get('transaction_type', 'buy'),
+                                        'asset_type': transaction.get('asset_type', 'stock'),
+                                        'channel': transaction.get('channel', 'Direct'),
+                                        'sector': transaction.get('sector', 'Unknown'),  # Fix null sector
+                                        'filename': uploaded_file.name
+                                    }
+                                    result = db.add_transaction(transaction_data)
                                     if result.get('success'):
                                         success_count += 1
                                 except Exception as e:
@@ -4556,12 +5748,12 @@ def upload_files_page():
                             else:
                                 st.error("❌ Failed to upload transactions")
     else:
-        # File uploader with enhanced styling
+        # File uploader for CSV/Excel (no AI needed)
         uploaded_files = st.file_uploader(
-            "📁 Choose CSV files to upload",
-            type=['csv'],
+            "📁 Choose CSV or Excel files to upload",
+            type=['csv', 'xlsx', 'xls'],
             accept_multiple_files=True,
-            help="Select one or more CSV files containing your transaction data. Files will be processed automatically.",
+            help="Select CSV or Excel files with required columns: date, ticker, quantity, transaction_type, price, stock_name, sector, channel",
             key="upload_files_main"
         )
     
