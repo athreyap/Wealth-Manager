@@ -4262,6 +4262,19 @@ def ai_assistant_page():
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     
+    # Load chat history from database (user-specific)
+    try:
+        db_chat_history = db.get_user_chat_history(user['id'], limit=50)
+        if db_chat_history:
+            # Convert database format to session state format
+            st.session_state.chat_history = [
+                {"q": chat['question'], "a": chat['answer']}
+                for chat in reversed(db_chat_history)  # Reverse to show oldest first
+            ]
+    except Exception as e:
+        st.caption(f"⚠️ Could not load chat history: {str(e)[:100]}")
+        st.session_state.chat_history = []
+    
     # Always load PDF context from database to ensure older session PDFs are included
     st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
     
@@ -4310,94 +4323,92 @@ def ai_assistant_page():
                     except (ValueError, TypeError):
                         return default
                 
-                # Create comprehensive raw data context for AI
-                raw_data_context = "\n\n📊 RAW PORTFOLIO DATA (All Holdings with Details):\n"
-                raw_data_context += "=" * 80 + "\n"
+                # Create streamlined portfolio data context (limit to reduce tokens)
+                raw_data_context = "\n\n📊 PORTFOLIO DATA (Top Holdings):\n"
                 
-                for idx, holding in enumerate(holdings, 1):
+                # Limit to top 30 holdings to reduce token usage
+                top_holdings = holdings[:30]
+                for idx, holding in enumerate(top_holdings, 1):
                     current_price = holding.get('current_price') or holding.get('average_price', 0)
                     current_value = safe_float(current_price, 0) * safe_float(holding.get('total_quantity'), 0)
                     investment = safe_float(holding.get('total_quantity'), 0) * safe_float(holding.get('average_price'), 0)
                     pnl = current_value - investment
                     pnl_pct = ((current_value - investment) / investment * 100) if investment > 0 else 0
                     
-                    raw_data_context += f"\n[{idx}] {holding.get('ticker', 'N/A')} - {holding.get('stock_name', 'N/A')}\n"
-                    raw_data_context += f"  • Asset Type: {holding.get('asset_type', 'Unknown')}\n"
-                    raw_data_context += f"  • Channel: {holding.get('channel', 'Unknown')}\n"
-                    raw_data_context += f"  • Sector: {holding.get('sector', 'Unknown')}\n"
-                    raw_data_context += f"  • Quantity: {holding.get('total_quantity', 0):,.2f}\n"
-                    raw_data_context += f"  • Avg Buy Price: ₹{holding.get('average_price', 0):,.2f}\n"
-                    raw_data_context += f"  • Current Price: ₹{current_price:,.2f}\n"
-                    raw_data_context += f"  • Investment: ₹{investment:,.2f}\n"
-                    raw_data_context += f"  • Current Value: ₹{current_value:,.2f}\n"
-                    raw_data_context += f"  • P&L: ₹{pnl:,.2f} ({pnl_pct:+.1f}%)\n"
-                    raw_data_context += "-" * 80 + "\n"
+                    # Compact format to reduce tokens
+                    raw_data_context += f"{idx}. {holding.get('ticker', 'N/A')} ({holding.get('stock_name', 'N/A')[:30]}) | "
+                    raw_data_context += f"Qty: {holding.get('total_quantity', 0):,.0f} | "
+                    raw_data_context += f"Avg: ₹{holding.get('average_price', 0):,.0f} | "
+                    raw_data_context += f"Curr: ₹{current_price:,.0f} | "
+                    raw_data_context += f"P&L: {pnl_pct:+.1f}%\n"
                 
-                # Get transactions data for detailed analysis
-                transactions_context = "\n\n📝 TRANSACTION HISTORY (Recent Activity):\n"
-                transactions_context += "=" * 80 + "\n"
+                if len(holdings) > 30:
+                    raw_data_context += f"\n... and {len(holdings) - 30} more holdings\n"
+                
+                # Get transactions data (limited to reduce tokens)
+                transactions_context = "\n\n📝 RECENT TRANSACTIONS:\n"
                 try:
-                    # Get all transactions for the user (increased limit for comprehensive analysis)
-                    all_transactions = db.supabase.table('user_transactions').select('*').eq('user_id', user['id']).order('transaction_date', desc=True).limit(100).execute()
+                    # Limit to 20 most recent transactions
+                    all_transactions = db.supabase.table('user_transactions').select('*').eq('user_id', user['id']).order('transaction_date', desc=True).limit(20).execute()
                     
                     if all_transactions.data:
-                        transactions_context += f"Total Transactions Available: {len(all_transactions.data)}\n\n"
-                        # Show more transactions for better context (50 instead of 20)
-                        for trans in all_transactions.data[:50]:
-                            transactions_context += f"Date: {trans.get('transaction_date', 'N/A')} | "
-                            transactions_context += f"Stock: {trans.get('ticker', 'N/A')} | "
-                            transactions_context += f"Type: {trans.get('transaction_type', 'N/A')} | "
+                        for trans in all_transactions.data:
+                            # Compact format
+                            transactions_context += f"{trans.get('transaction_date', 'N/A')} | "
+                            transactions_context += f"{trans.get('ticker', 'N/A')} | "
+                            transactions_context += f"{trans.get('transaction_type', 'N/A')} | "
                             transactions_context += f"Qty: {trans.get('quantity', 0)} | "
-                            transactions_context += f"Price: ₹{trans.get('price', 0):,.2f} | "
-                            transactions_context += f"Channel: {trans.get('channel', 'N/A')}\n"
+                            transactions_context += f"₹{trans.get('price', 0):,.0f}\n"
                     else:
                         transactions_context += "No transactions found.\n"
                 except Exception as e:
-                    transactions_context += f"Error loading transactions: {str(e)[:100]}\n"
+                    transactions_context += f"Error loading transactions.\n"
                 
                 # Include PDF context
                 pdf_context_text = ""
                 
-                # Include ALL PDF summaries from shared library
+                # Include PDF summaries (limited to reduce tokens)
                 recent_pdfs = db.get_user_pdfs(user['id'])
                 if recent_pdfs:
-                    pdf_context_text += f"\n\n📚 SHARED PDF DOCUMENTS ({len(recent_pdfs)} total, all users):"
-                    for pdf in recent_pdfs:
+                    # Limit to last 5 PDFs and truncate summaries
+                    pdf_context_text += f"\n\n📚 PDF DOCUMENTS ({len(recent_pdfs)} total):"
+                    for pdf in recent_pdfs[:5]:  # Only last 5 PDFs
                         pdf_context_text += f"\n\n📄 {pdf['filename']}:"
                         if pdf.get('ai_summary'):
-                            # Include full AI summary (not truncated)
-                            pdf_context_text += f"\n{pdf.get('ai_summary', 'No summary')}"
+                            # Truncate summary to 500 chars to save tokens
+                            summary = pdf.get('ai_summary', 'No summary')
+                            pdf_context_text += f"\n{summary[:500]}{'...' if len(summary) > 500 else ''}"
                         else:
-                            # If no summary, include first part of PDF text
+                            # Truncate PDF text to 500 chars
                             pdf_text = pdf.get('pdf_text', '')
                             if pdf_text:
-                                pdf_context_text += f"\n{pdf_text[:1000]}..."
+                                pdf_context_text += f"\n{pdf_text[:500]}..."
+                    
+                    if len(recent_pdfs) > 5:
+                        pdf_context_text += f"\n\n... and {len(recent_pdfs) - 5} more PDFs"
                 
                 # If no PDFs, note that
                 if not recent_pdfs:
                     pdf_context_text = "\n\n📄 No documents uploaded yet."
                 
-                full_context = f"""🎯 COMPREHENSIVE DATA SOURCES (COMBINE BOTH for complete analysis):
-
-1️⃣ CURRENT PORTFOLIO DATA (Financial metrics - prices, P&L, values):
+                # Truncate portfolio summary if too long
+                summary_text = portfolio_summary[:2000] + "..." if len(portfolio_summary) > 2000 else portfolio_summary
+                
+                full_context = f"""📊 PORTFOLIO DATA:
 {raw_data_context}
 
-2️⃣ PORTFOLIO SUMMARY (Aggregated performance view):
-{portfolio_summary}
+📈 SUMMARY:
+{summary_text}
 
-3️⃣ TRANSACTION HISTORY (Recent activity and patterns):
+📝 RECENT TRANSACTIONS:
 {transactions_context}
 
-4️⃣ RESEARCH DOCUMENTS (Market analysis, insights, and outlook):
+📚 RESEARCH DOCUMENTS:
 {pdf_context_text}
 
-📋 USER QUESTION: {user_question}
+❓ QUESTION: {user_question}
 
-💡 ANALYSIS APPROACH: 
-- Use portfolio data for current financial performance
-- Use PDF research for market insights and future outlook  
-- COMBINE both sources for comprehensive analysis
-- Show how research insights align with current portfolio performance"""
+💡 Analyze using portfolio data, transactions, and PDF insights."""
                 
                 # Add debug expander to show what's being sent to AI (only if needed)
                 with st.expander("🔍 Debug: Full context sent to AI (click to expand)", expanded=False):
@@ -4472,11 +4483,14 @@ Use emojis appropriately and be encouraging but data-focused."""},
                 st.markdown("### 💬 AI Response:")
                 st.success(ai_response)
                 
-                # Store in chat history
+                # Store in chat history (session state)
                 st.session_state.chat_history.append({
                     "q": user_question,
                     "a": ai_response
                 })
+                
+                # Save to database (user-specific, persistent)
+                db.save_chat_history(user['id'], user_question, ai_response)
                 
             except Exception as e:
                 st.error(f"❌ Error: {str(e)[:100]}")
@@ -4555,11 +4569,13 @@ Use emojis appropriately and be encouraging but data-focused."""},
                             st.markdown("### 🔍 Fresh Analysis")
                             st.markdown(fresh_analysis)
                             
-                            # Store in chat history
+                            # Store in chat history (session state)
                             st.session_state.chat_history.append({
                                 "q": f"Analyze PDF: {pdf['filename']}", 
                                 "a": fresh_analysis
                             })
+                            # Save to database (user-specific, persistent)
+                            db.save_chat_history(user['id'], f"Analyze PDF: {pdf['filename']}", fresh_analysis)
                             
                         except Exception as e:
                             st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
@@ -4706,11 +4722,13 @@ Use emojis appropriately and be encouraging but data-focused."""},
                             st.markdown(ai_analysis)
                             st.info(f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, found {len(tables_found)} tables")
                         
-                        # Store in chat history
+                        # Store in chat history (session state)
                         st.session_state.chat_history.append({
                             "q": f"Analyze PDF: {uploaded_pdf.name}", 
                             "a": ai_analysis
                         })
+                        # Save to database (user-specific, persistent)
+                        db.save_chat_history(user['id'], f"Analyze PDF: {uploaded_pdf.name}", ai_analysis)
                         
                         # Clean PDF text before saving (remove null bytes and control characters)
                         import re
