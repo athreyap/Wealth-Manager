@@ -3480,16 +3480,26 @@ def charts_page():
                                 messages=[
                                     {"role": "system", "content": "You are a professional technical analyst. Provide a brief technical analysis summary based on the indicators provided. Focus on key signals and trading implications. Use emojis and be concise."},
                                     {"role": "user", "content": tech_summary}
-                                ],
-                                max_completion_tokens=300,
+                                ]
                                 # Note: GPT-5 only supports default temperature (1)
+                                # Removed max_completion_tokens to allow full response
                             )
                             
-                            ai_tech_analysis = response.choices[0].message.content
-                            st.markdown(f'<div class="ai-response-box"><strong>🤖 Technical Analysis:</strong><br><br>{ai_tech_analysis}</div>', unsafe_allow_html=True)
+                            if response and response.choices and len(response.choices) > 0:
+                                ai_tech_analysis = response.choices[0].message.content
+                                if ai_tech_analysis and ai_tech_analysis.strip():
+                                    st.markdown(f'<div class="ai-response-box"><strong>🤖 Technical Analysis:</strong><br><br>{ai_tech_analysis}</div>', unsafe_allow_html=True)
+                                else:
+                                    # Show fallback if AI response is empty
+                                    st.info("📊 **Technical Indicators Summary:**\n\n" + tech_summary.replace("\n", "\n- "))
+                            else:
+                                st.warning("⚠️ Empty response from AI. Showing technical indicators summary instead.")
+                                st.info("📊 **Technical Indicators Summary:**\n\n" + tech_summary.replace("\n", "\n- "))
                             
                         except Exception as e:
                             st.warning(f"⚠️ Could not generate AI analysis: {str(e)[:100]}")
+                            # Show fallback summary even if AI fails
+                            st.info("📊 **Technical Indicators Summary:**\n\n" + tech_summary.replace("\n", "\n- "))
                 
                 else:
                     st.warning(f"⚠️ No sufficient data available for {selected_ticker_tech}")
