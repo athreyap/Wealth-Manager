@@ -404,10 +404,10 @@ class EnhancedPriceFetcher:
             Current NAV: """
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-5-mini",  # GPT-5-mini for faster, cost-effective gold price fetching
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=50,
-                temperature=0.1,
+                max_completion_tokens=50,
+                # Note: GPT-5-mini only supports default temperature (1)
                 timeout=30
             )
             
@@ -564,10 +564,10 @@ IMPORTANT INSTRUCTIONS:
 The current 24k gold price per gram in India is:"""
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",  # Use GPT-4o for better accuracy
+                model="gpt-5",  # GPT-5 for better accuracy and SGB price fetching
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=50,
-                temperature=0.1
+                max_completion_tokens=50,
+                # Note: GPT-5 only supports default temperature (1)
             )
             
             ai_response = response.choices[0].message.content.strip()
@@ -684,13 +684,13 @@ Example: 14786.49
 Current Market Trading Price:"""
                 
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-4o",
+                    model="gpt-5",  # GPT-5 for better bond price fetching
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    max_tokens=100,
-                    temperature=0.1
+                    max_completion_tokens=100,
+                    # Note: GPT-5 only supports default temperature (1)
                 )
                 
                 ai_response = response.choices[0].message.content.strip()
@@ -760,15 +760,15 @@ Examples: 1000.00 or 950.50
 
 Current Price:"""
                 
-                # Use GPT-4o-mini for non-SGB bonds
+                # Use GPT-5-mini for non-SGB bonds (faster and cost-effective)
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model="gpt-5-mini",
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    max_tokens=100,
-                    temperature=0.1
+                    max_completion_tokens=100,
+                    # Note: GPT-5 only supports default temperature (1)
                 )
                 
                 ai_response = response.choices[0].message.content.strip()
@@ -896,13 +896,13 @@ If not found, return: NOT_FOUND"""
             
             # Call OpenAI with optimized parameters
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",  # Fast and cost-effective
+                model="gpt-5-mini",  # GPT-5-mini: Fast and cost-effective for PMS/AIF prices
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0,  # Deterministic output
-                max_tokens=20,  # We only need a number
+                max_completion_tokens=20,  # We only need a number
+                # Note: GPT-5-mini only supports default temperature (1)
                 timeout=10  # 10 second timeout
             )
             
@@ -1296,13 +1296,13 @@ If you cannot estimate, return: NOT_FOUND"""
                 return None
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",  # Use more capable model for historical data
+                model="gpt-5",  # GPT-5 for better historical data accuracy
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0,
-                max_tokens=50,
+                max_completion_tokens=50,
+                # Note: GPT-5 only supports default temperature (1)
                 timeout=30
             )
             

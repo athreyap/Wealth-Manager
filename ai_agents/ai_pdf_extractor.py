@@ -88,7 +88,7 @@ class AIPDFTransactionExtractor(BaseAgent):
         
         try:
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5",  # GPT-5 for better PDF extraction
                 messages=[
                     {
                         "role": "system",
@@ -122,8 +122,8 @@ Be conservative - only extract data you're confident about."""
                         "content": prompt
                     }
                 ],
-                max_tokens=4000,
-                temperature=0.1,  # Low temperature for consistent extraction
+                max_completion_tokens=4000,
+                # Note: GPT-5 only supports default temperature (1)
                 timeout=60
             )
             

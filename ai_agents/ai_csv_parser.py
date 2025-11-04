@@ -137,7 +137,7 @@ CRITICAL: Return ONLY the JSON array, no other text."""
 
             # Call OpenAI
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5",  # GPT-5 for better CSV parsing
                 messages=[
                     {
                         "role": "system",
@@ -164,8 +164,8 @@ RULES:
                         "content": prompt
                     }
                 ],
-                max_tokens=4000,
-                temperature=0.1,  # Low temperature for accuracy
+                max_completion_tokens=4000,
+                # Note: GPT-5 only supports default temperature (1)
                 timeout=90
             )
             

@@ -94,14 +94,14 @@ Rules:
         
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4o",  # Better for structured JSON
+                model="gpt-5",  # GPT-5 for better accuracy and structured JSON
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 response_format={"type": "json_object"},  # Force JSON
-                temperature=0,
-                max_tokens=200
+                max_completion_tokens=200,
+                # Note: GPT-5 only supports default temperature (1)
             )
             
             content = response.choices[0].message.content
@@ -193,14 +193,14 @@ Rules:
         
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5",  # Upgraded to GPT-5
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 response_format={"type": "json_object"},
-                temperature=0,
-                max_tokens=300
+                max_completion_tokens=300,
+                # Note: GPT-5 only supports default temperature (1)
             )
             
             content = response.choices[0].message.content

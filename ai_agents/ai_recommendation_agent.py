@@ -134,7 +134,7 @@ class AIInvestmentRecommendationAgent(BaseAgent):
         
         try:
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5",  # GPT-5 for better investment recommendations
                 messages=[
                     {
                         "role": "system",
@@ -194,8 +194,8 @@ CRITICAL:
                         "content": prompt
                     }
                 ],
-                max_tokens=3000,
-                temperature=0.3,  # Balance between creativity and consistency
+                max_completion_tokens=3000,
+                # Note: GPT-5 only supports default temperature (1)
                 timeout=60
             )
             

@@ -846,15 +846,15 @@ Return ONLY the JSON object, nothing else."""
         
         if not use_gemini:
             try:
-                st.caption(f"   🔄 Using OpenAI (gpt-4o) for ticker resolution...")
+                st.caption(f"   🔄 Using OpenAI (gpt-5) for ticker resolution...")
                 response = client.chat.completions.create(
-                    model="gpt-4o",  # Better model for accurate verification
+                    model="gpt-5",  # GPT-5 for better accuracy and reasoning
                     messages=[
                         {"role": "system", "content": "You are a financial ticker verification expert with access to real-time data. For each ticker, search online databases and verify it works with yfinance or mftool APIs. Return ONLY valid JSON with unique tickers for each holding."},
                         {"role": "user", "content": prompt}
                     ],
-                    max_tokens=2000,
-                    temperature=0.0  # Zero temperature for deterministic results
+                    max_completion_tokens=2000
+                    # Note: GPT-5 only supports default temperature (1)
                 )
                 ai_response = response.choices[0].message.content
                 st.caption(f"   ✅ OpenAI response received")
@@ -1022,10 +1022,10 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     except:
                         return ''
                 
-                imported = 0
-                skipped = 0
-                errors = 0
-                
+                    imported = 0
+                    skipped = 0
+                    errors = 0
+                    
                 # Show progress
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -1137,7 +1137,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                             'sector': 'bond' if asset_type == 'bond' else str(safe_value(row.get('sector', 'Unknown'), 'Unknown')),
                             'filename': uploaded_file.name
                         }
-                    
+                        
                         result = db.add_transaction(transaction_data)
                         if result.get('success'):
                             imported += 1
@@ -1146,7 +1146,6 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                             if imported % 50 == 0:
                                 import time
                                 time.sleep(0.5)  # 500ms pause
-
                         elif not result.get('success'):
                             # Show why it failed
                             error_msg = result.get('error', 'Unknown error')
@@ -1168,7 +1167,6 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                             else:
                                 st.caption(f"   ⚠️ Failed: {error_msg[:100]}")
                                 errors += 1
-                
                     except Exception as e:
                         errors += 1
                         st.caption(f"   ❌ Error processing row {idx + 1}: {str(e)[:100]}")
@@ -3428,13 +3426,13 @@ def charts_page():
                             openai.api_key = st.secrets["api_keys"]["open_ai"]
                             
                             response = openai.chat.completions.create(
-                                model="gpt-4o-mini",
+                                model="gpt-5",  # Upgraded to GPT-5 for better results
                                 messages=[
                                     {"role": "system", "content": "You are a professional technical analyst. Provide a brief technical analysis summary based on the indicators provided. Focus on key signals and trading implications. Use emojis and be concise."},
                                     {"role": "user", "content": tech_summary}
                                 ],
-                                temperature=0.7,
-                                max_tokens=300
+                                max_completion_tokens=300,
+                                # Note: GPT-5 only supports default temperature (1)
                             )
                             
                             ai_tech_analysis = response.choices[0].message.content
@@ -3653,13 +3651,13 @@ def charts_page():
                     """
                     
                     response = openai.chat.completions.create(
-                        model="gpt-4o-mini",
+                        model="gpt-5-mini",  # GPT-5-mini for faster risk analysis
                         messages=[
                             {"role": "system", "content": "You are a professional risk analyst. Analyze the portfolio risk metrics and provide actionable risk management recommendations. Focus on diversification, position sizing, and risk mitigation strategies. Use emojis and be practical."},
                             {"role": "user", "content": risk_summary_text}
                         ],
-                        temperature=0.7,
-                        max_tokens=400
+                        max_completion_tokens=400,
+                        # Note: GPT-5-mini only supports default temperature (1)
                     )
                     
                     ai_risk_analysis = response.choices[0].message.content
@@ -4328,387 +4326,452 @@ def ai_assistant_page():
                     except (ValueError, TypeError):
                         return default
                 
+                # Smart detection: Is this a data-related question or general question?
+                def is_data_related_question(question: str) -> bool:
+                    """Detect if question requires portfolio/transaction data"""
+                    question_lower = question.lower()
+                    
+                    # Data-related keywords
+                    data_keywords = [
+                        'my portfolio', 'my holdings', 'my stocks', 'my investments',
+                        'my transactions', 'my buys', 'my sells', 'my purchases',
+                        'my performance', 'my p&l', 'my profit', 'my loss',
+                        'show me', 'list my', 'what are my', 'how much did i',
+                        'which stocks', 'which funds', 'best performing', 'worst performing',
+                        'top holdings', 'sector', 'asset', 'ticker', 'holding',
+                        'transaction', 'buy', 'sell', 'purchase', 'investment amount',
+                        'current value', 'average price', 'quantity', 'how many',
+                        'last year', '1 year', '6 months', '3 months', 'quarter',
+                        'historical', 'price', 'return', 'gain', 'loss'
+                    ]
+                    
+                    # General question keywords (no data needed)
+                    general_keywords = [
+                        'what is', 'explain', 'how to', 'what are', 'tell me about',
+                        'meaning of', 'definition', 'difference between', 'compare',
+                        'should i', 'is it good', 'is it safe', 'recommendation',
+                        'advice', 'guide', 'tips', 'strategy', 'principle'
+                    ]
+                    
+                    # Check for data-related keywords
+                    has_data_keywords = any(keyword in question_lower for keyword in data_keywords)
+                    
+                    # Check for personal possessive pronouns (my, me, I) + financial terms
+                    personal_finance = any(word in question_lower for word in ['my', 'me', 'i']) and any(
+                        term in question_lower for term in ['portfolio', 'stock', 'fund', 'investment', 'holding', 'transaction']
+                    )
+                    
+                    # If it has data keywords OR personal finance terms, it's data-related
+                    if has_data_keywords or personal_finance:
+                        return True
+                    
+                    # If it's clearly a general question without data context, it's general
+                    has_only_general = any(keyword in question_lower for keyword in general_keywords) and not has_data_keywords
+                    if has_only_general and not personal_finance:
+                        return False
+                    
+                    # Default: include data context (safer to have it than not)
+                    return True
+                
+                # Detect question type
+                needs_data = is_data_related_question(user_question)
+                
                 # Create streamlined portfolio data context (limit to reduce tokens)
                 raw_data_context = "\n\n📊 PORTFOLIO DATA (Top Holdings):\n"
                 
-                # Limit to top 20 holdings to reduce token usage (was 30)
-                top_holdings = holdings[:20]
-                for idx, holding in enumerate(top_holdings, 1):
-                    current_price = holding.get('current_price') or holding.get('average_price', 0)
-                    current_value = safe_float(current_price, 0) * safe_float(holding.get('total_quantity'), 0)
-                    investment = safe_float(holding.get('total_quantity'), 0) * safe_float(holding.get('average_price'), 0)
-                    pnl = current_value - investment
-                    pnl_pct = ((current_value - investment) / investment * 100) if investment > 0 else 0
+                # Only include portfolio data if question is data-related
+                if needs_data and holdings:
+                    # Limit to top 20 holdings to reduce token usage (was 30)
+                    top_holdings = holdings[:20]
+                    for idx, holding in enumerate(top_holdings, 1):
+                        current_price = holding.get('current_price') or holding.get('average_price', 0)
+                        current_value = safe_float(current_price, 0) * safe_float(holding.get('total_quantity'), 0)
+                        investment = safe_float(holding.get('total_quantity'), 0) * safe_float(holding.get('average_price'), 0)
+                        pnl = current_value - investment
+                        pnl_pct = ((current_value - investment) / investment * 100) if investment > 0 else 0
+                        
+                        # Compact format to reduce tokens
+                        raw_data_context += f"{idx}. {holding.get('ticker', 'N/A')} ({holding.get('stock_name', 'N/A')[:25]}) | "
+                        raw_data_context += f"Qty: {holding.get('total_quantity', 0):,.0f} | "
+                        raw_data_context += f"Avg: ₹{holding.get('average_price', 0):,.0f} | "
+                        raw_data_context += f"Curr: ₹{current_price:,.0f} | "
+                        raw_data_context += f"P&L: {pnl_pct:+.1f}%\n"
                     
-                    # Compact format to reduce tokens
-                    raw_data_context += f"{idx}. {holding.get('ticker', 'N/A')} ({holding.get('stock_name', 'N/A')[:25]}) | "
-                    raw_data_context += f"Qty: {holding.get('total_quantity', 0):,.0f} | "
-                    raw_data_context += f"Avg: ₹{holding.get('average_price', 0):,.0f} | "
-                    raw_data_context += f"Curr: ₹{current_price:,.0f} | "
-                    raw_data_context += f"P&L: {pnl_pct:+.1f}%\n"
+                    if len(holdings) > 20:
+                        raw_data_context += f"\n... and {len(holdings) - 20} more holdings\n"
+                elif needs_data:
+                    raw_data_context += "No holdings found. Upload transaction files to see your portfolio."
+                else:
+                    raw_data_context = ""  # No portfolio data for general questions
                 
-                if len(holdings) > 20:
-                    raw_data_context += f"\n... and {len(holdings) - 20} more holdings\n"
-                
-                # Get transactions data (smart filtering based on question)
+                # Get transactions data (smart filtering based on question) - only if data-related
                 transactions_context = "\n\n📝 TRANSACTION HISTORY:\n"
-                try:
-                    from datetime import datetime, timedelta
-                    
-                    # Detect if question asks about specific time period
-                    question_lower = user_question.lower()
-                    date_filter = None
-                    transaction_type_filter = None
-                    
-                    # Check for time period filters (more comprehensive detection)
-                    one_year_ago = datetime.now() - timedelta(days=365)
-                    six_months_ago = datetime.now() - timedelta(days=180)
-                    three_months_ago = datetime.now() - timedelta(days=90)
-                    
-                    if any(word in question_lower for word in ['1 year', 'one year', 'last year', 'past year', 'year ago', '365 days']):
-                        date_filter = one_year_ago.date().isoformat()
-                        transactions_context += f"📅 Filtered: Transactions from last 1 year (since {date_filter})\n"
-                    elif any(word in question_lower for word in ['6 months', 'six months', 'half year', '180 days']):
-                        date_filter = six_months_ago.date().isoformat()
-                        transactions_context += f"📅 Filtered: Transactions from last 6 months (since {date_filter})\n"
-                    elif any(word in question_lower for word in ['3 months', 'three months', 'quarter', '90 days']):
-                        date_filter = three_months_ago.date().isoformat()
-                        transactions_context += f"📅 Filtered: Transactions from last 3 months (since {date_filter})\n"
-                    
-                    # Check for transaction type filters
-                    if 'buy' in question_lower or 'purchase' in question_lower:
-                        transaction_type_filter = 'buy'
-                        transactions_context += f"📊 Filtered: BUY transactions only\n"
-                    elif 'sell' in question_lower:
-                        transaction_type_filter = 'sell'
-                        transactions_context += f"📊 Filtered: SELL transactions only\n"
-                    
-                    # Build query with filters - always filter by user_id
-                    # Use user_transactions_detailed view which includes ticker directly
-                    query = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user['id'])
-                    
-                    if date_filter:
-                        query = query.gte('transaction_date', date_filter)
-                    
-                    if transaction_type_filter:
-                        query = query.eq('transaction_type', transaction_type_filter)
-                    
-                    # Get filtered transactions, ordered by date
-                    # Increase limit when filters are applied to get more relevant data
-                    limit = 200 if (date_filter or transaction_type_filter) else 15
-                    all_transactions = query.order('transaction_date', desc=True).limit(limit).execute()
-                    
-                    if all_transactions.data:
-                        # Calculate summary statistics for filtered transactions
-                        total_investment = 0
-                        ticker_price_map = {}  # Track current prices for tickers
+                if needs_data:
+                    try:
+                        from datetime import datetime, timedelta
                         
-                        # Get unique tickers from transactions
-                        unique_tickers = set()
-                        for trans in all_transactions.data:
-                            ticker = trans.get('ticker')
-                            if ticker:
-                                unique_tickers.add(ticker)
+                        # Detect if question asks about specific time period
+                        question_lower = user_question.lower()
+                        date_filter = None
+                        transaction_type_filter = None
                         
-                        # Fetch current prices for these tickers
-                        # Priority: stock_master.live_price (updated during login) > holdings > average_price
+                        # Check for time period filters (more comprehensive detection)
+                        one_year_ago = datetime.now() - timedelta(days=365)
+                        six_months_ago = datetime.now() - timedelta(days=180)
+                        three_months_ago = datetime.now() - timedelta(days=90)
                         
-                        # Method 1: Fetch all prices from stock_master in one query (most efficient)
-                        try:
-                            if unique_tickers:
-                                tickers_list = list(unique_tickers)[:100]  # Limit to 100 tickers
-                                stock_response = db.supabase.table('stock_master').select('ticker, live_price, asset_type').in_('ticker', tickers_list).execute()
-                                if stock_response.data:
-                                    for stock in stock_response.data:
-                                        ticker = stock.get('ticker')
-                                        live_price = stock.get('live_price')
-                                        if ticker and live_price:
-                                            price_val = safe_float(live_price, 0)
-                                            if price_val > 0:
-                                                ticker_price_map[ticker] = price_val
-                        except:
-                            pass
+                        if any(word in question_lower for word in ['1 year', 'one year', 'last year', 'past year', 'year ago', '365 days']):
+                            date_filter = one_year_ago.date().isoformat()
+                            transactions_context += f"📅 Filtered: Transactions from last 1 year (since {date_filter})\n"
+                        elif any(word in question_lower for word in ['6 months', 'six months', 'half year', '180 days']):
+                            date_filter = six_months_ago.date().isoformat()
+                            transactions_context += f"📅 Filtered: Transactions from last 6 months (since {date_filter})\n"
+                        elif any(word in question_lower for word in ['3 months', 'three months', 'quarter', '90 days']):
+                            date_filter = three_months_ago.date().isoformat()
+                            transactions_context += f"📅 Filtered: Transactions from last 3 months (since {date_filter})\n"
                         
-                        # Method 2: For any missing prices, check cached holdings
-                        for ticker in unique_tickers:
-                            if ticker not in ticker_price_map:
-                                # Try to get from cached holdings first
-                                for holding in holdings:
-                                    if holding.get('ticker') == ticker:
-                                        current_price = holding.get('current_price') or holding.get('live_price') or holding.get('average_price', 0)
-                                        if current_price and safe_float(current_price, 0) > 0:
-                                            ticker_price_map[ticker] = safe_float(current_price, 0)
-                                            break
+                        # Check for transaction type filters
+                        if 'buy' in question_lower or 'purchase' in question_lower:
+                            transaction_type_filter = 'buy'
+                            transactions_context += f"📊 Filtered: BUY transactions only\n"
+                        elif 'sell' in question_lower:
+                            transaction_type_filter = 'sell'
+                            transactions_context += f"📊 Filtered: SELL transactions only\n"
                         
-                        # Method 3: For any still missing, fetch from holdings_detailed
-                        missing_tickers = [t for t in unique_tickers if t not in ticker_price_map]
-                        if missing_tickers:
+                        # Build query with filters - always filter by user_id
+                        # Use user_transactions_detailed view which includes ticker directly
+                        query = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user['id'])
+                        
+                        if date_filter:
+                            query = query.gte('transaction_date', date_filter)
+                        
+                        if transaction_type_filter:
+                            query = query.eq('transaction_type', transaction_type_filter)
+                        
+                        # Get filtered transactions, ordered by date
+                        # Increase limit when filters are applied to get more relevant data
+                        limit = 200 if (date_filter or transaction_type_filter) else 15
+                        all_transactions = query.order('transaction_date', desc=True).limit(limit).execute()
+                        
+                        if all_transactions.data:
+                            # Calculate summary statistics for filtered transactions
+                            total_investment = 0
+                            ticker_price_map = {}  # Track current prices for tickers
+                            
+                            # Get unique tickers from transactions
+                            unique_tickers = set()
+                            for trans in all_transactions.data:
+                                ticker = trans.get('ticker')
+                                if ticker:
+                                    unique_tickers.add(ticker)
+                            
+                            # Fetch current prices for these tickers
+                            # Priority: stock_master.live_price (updated during login) > holdings > average_price
+                            
+                            # Method 1: Fetch all prices from stock_master in one query (most efficient)
                             try:
-                                holding_data = db.get_user_holdings_detailed(user['id'])
-                                for holding in holding_data:
-                                    ticker = holding.get('ticker')
-                                    if ticker in missing_tickers:
-                                        current_price = holding.get('current_price') or holding.get('live_price') or holding.get('average_price', 0)
-                                        if current_price and safe_float(current_price, 0) > 0:
-                                            ticker_price_map[ticker] = safe_float(current_price, 0)
+                                if unique_tickers:
+                                    tickers_list = list(unique_tickers)[:100]  # Limit to 100 tickers
+                                    stock_response = db.supabase.table('stock_master').select('ticker, live_price, asset_type').in_('ticker', tickers_list).execute()
+                                    if stock_response.data:
+                                        for stock in stock_response.data:
+                                            ticker = stock.get('ticker')
+                                            live_price = stock.get('live_price')
+                                            if ticker and live_price:
+                                                price_val = safe_float(live_price, 0)
+                                                if price_val > 0:
+                                                    ticker_price_map[ticker] = price_val
                             except:
                                 pass
-                        
-                        # Method 4: Last resort - use price_fetcher for any remaining missing prices
-                        still_missing = [t for t in unique_tickers if t not in ticker_price_map]
-                        if still_missing and hasattr(st.session_state, 'price_fetcher') and st.session_state.price_fetcher:
-                            # Get asset types from stock_master query above
-                            asset_type_map = {}
-                            if stock_response and stock_response.data:
-                                for stock in stock_response.data:
-                                    asset_type_map[stock.get('ticker')] = stock.get('asset_type', 'stock')
                             
-                            for ticker in still_missing[:10]:  # Limit to 10 to avoid too many API calls
+                            # Method 2: For any missing prices, check cached holdings
+                            for ticker in unique_tickers:
+                                if ticker not in ticker_price_map:
+                                    # Try to get from cached holdings first
+                                    for holding in holdings:
+                                        if holding.get('ticker') == ticker:
+                                            current_price = holding.get('current_price') or holding.get('live_price') or holding.get('average_price', 0)
+                                            if current_price and safe_float(current_price, 0) > 0:
+                                                ticker_price_map[ticker] = safe_float(current_price, 0)
+                                                break
+                            
+                            # Method 3: For any still missing, fetch from holdings_detailed
+                            missing_tickers = [t for t in unique_tickers if t not in ticker_price_map]
+                            if missing_tickers:
                                 try:
-                                    asset_type = asset_type_map.get(ticker, 'stock')
-                                    price, source = st.session_state.price_fetcher.get_current_price(ticker, asset_type)
-                                    if price and price > 0:
-                                        ticker_price_map[ticker] = safe_float(price, 0)
+                                    holding_data = db.get_user_holdings_detailed(user['id'])
+                                    for holding in holding_data:
+                                        ticker = holding.get('ticker')
+                                        if ticker in missing_tickers:
+                                            current_price = holding.get('current_price') or holding.get('live_price') or holding.get('average_price', 0)
+                                            if current_price and safe_float(current_price, 0) > 0:
+                                                ticker_price_map[ticker] = safe_float(current_price, 0)
                                 except:
                                     pass
-                        
-                        # Calculate totals (if filtering by transaction_type, only count that type)
-                        for trans in all_transactions.data:
-                            qty = safe_float(trans.get('quantity', 0), 0)
-                            price = safe_float(trans.get('price', 0), 0)
-                            trans_type = trans.get('transaction_type', '').lower()
-                            if transaction_type_filter:
-                                # If filtering by type, only count that type
-                                if trans_type == transaction_type_filter:
+                            
+                            # Method 4: Last resort - use price_fetcher for any remaining missing prices
+                            still_missing = [t for t in unique_tickers if t not in ticker_price_map]
+                            if still_missing and hasattr(st.session_state, 'price_fetcher') and st.session_state.price_fetcher:
+                                # Get asset types from stock_master query above
+                                asset_type_map = {}
+                                if stock_response and stock_response.data:
+                                    for stock in stock_response.data:
+                                        asset_type_map[stock.get('ticker')] = stock.get('asset_type', 'stock')
+                                
+                                for ticker in still_missing[:10]:  # Limit to 10 to avoid too many API calls
+                                    try:
+                                        asset_type = asset_type_map.get(ticker, 'stock')
+                                        price, source = st.session_state.price_fetcher.get_current_price(ticker, asset_type)
+                                        if price and price > 0:
+                                            ticker_price_map[ticker] = safe_float(price, 0)
+                                    except:
+                                        pass
+                            
+                            # Calculate totals (if filtering by transaction_type, only count that type)
+                            for trans in all_transactions.data:
+                                qty = safe_float(trans.get('quantity', 0), 0)
+                                price = safe_float(trans.get('price', 0), 0)
+                                trans_type = trans.get('transaction_type', '').lower()
+                                if transaction_type_filter:
+                                    # If filtering by type, only count that type
+                                    if trans_type == transaction_type_filter:
+                                        if trans_type == 'buy':
+                                            total_investment += qty * price
+                                        elif trans_type == 'sell':
+                                            total_investment += qty * price  # For sell analysis, track sell proceeds
+                                else:
+                                    # If no filter, include both buy and sell
                                     if trans_type == 'buy':
                                         total_investment += qty * price
                                     elif trans_type == 'sell':
-                                        total_investment += qty * price  # For sell analysis, track sell proceeds
-                            else:
-                                # If no filter, include both buy and sell
-                                if trans_type == 'buy':
-                                    total_investment += qty * price
-                                elif trans_type == 'sell':
-                                    total_investment -= qty * price  # Subtract sell proceeds
-                        
-                        transactions_context += f"Total filtered transactions: {len(all_transactions.data)}\n"
-                        transactions_context += f"📊 CALCULATED SUMMARY FOR FILTERED TRANSACTIONS:\n"
-                        transactions_context += f"   Total Investment: ₹{total_investment:,.2f}\n"
-                        
-                        # Calculate current value and P&L if we have prices
-                        if ticker_price_map and len(ticker_price_map) > 0:
-                            total_current_value = 0
-                            ticker_quantities = {}  # Track net quantity per ticker from filtered transactions
+                                        total_investment -= qty * price  # Subtract sell proceeds
                             
-                            # First, identify which tickers were bought in the filtered period
-                            tickers_bought_in_period = set()
-                            for trans in all_transactions.data:
-                                trans_type = trans.get('transaction_type', '').lower()
-                                ticker = trans.get('ticker')
-                                if trans_type == 'buy' and ticker:
-                                    tickers_bought_in_period.add(ticker)
+                            transactions_context += f"Total filtered transactions: {len(all_transactions.data)}\n"
+                            transactions_context += f"📊 CALCULATED SUMMARY FOR FILTERED TRANSACTIONS:\n"
+                            transactions_context += f"   Total Investment: ₹{total_investment:,.2f}\n"
                             
-                            # Get ALL transactions for these tickers (to account for sells that happened after the filter period)
-                            # This ensures we calculate net quantity correctly: buys from last year minus ALL sells
-                            if tickers_bought_in_period and date_filter:
-                                try:
-                                    # Get all transactions with ticker info via stock_master join
-                                    # Use the user_transactions_detailed view which already has ticker
-                                    all_trans_response = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user['id']).in_('ticker', list(tickers_bought_in_period)).order('transaction_date', desc=False).limit(1000).execute()
-                                    if all_trans_response.data:
-                                        all_transactions_for_calc = all_trans_response.data
-                                    else:
-                                        all_transactions_for_calc = all_transactions.data
-                                except Exception as e:
-                                    # Fallback to using filtered transactions only
-                                    all_transactions_for_calc = all_transactions.data
-                            else:
-                                all_transactions_for_calc = all_transactions.data
-                            
-                            # Calculate net quantities - only count buys from filtered period, but subtract ALL sells
-                            for trans in all_transactions_for_calc:
-                                trans_type = trans.get('transaction_type', '').lower()
-                                # Handle both direct ticker and nested ticker from stock_master join
-                                ticker = trans.get('ticker')
-                                qty = safe_float(trans.get('quantity', 0), 0)
-                                trans_date = trans.get('transaction_date')
+                            # Calculate current value and P&L if we have prices
+                            if ticker_price_map and len(ticker_price_map) > 0:
+                                total_current_value = 0
+                                ticker_quantities = {}  # Track net quantity per ticker from filtered transactions
                                 
-                                if ticker and ticker in ticker_price_map:
-                                    if ticker not in ticker_quantities:
-                                        ticker_quantities[ticker] = 0
-                                    
-                                    # If we have date filter AND transaction type filter (e.g., "1 year buy transactions")
-                                    if date_filter and transaction_type_filter == 'buy':
-                                        # Only count buys from the filtered date period
-                                        if trans_type == 'buy' and trans_date and str(trans_date) >= date_filter:
-                                            ticker_quantities[ticker] += qty
-                                        # Subtract ALL sells (even if outside the date range)
-                                        elif trans_type == 'sell':
-                                            ticker_quantities[ticker] -= qty
-                                    # If only date filter (no transaction type filter)
-                                    elif date_filter and not transaction_type_filter:
-                                        # Count buys from filtered period, subtract sells from filtered period
-                                        if trans_type == 'buy' and trans_date and str(trans_date) >= date_filter:
-                                            ticker_quantities[ticker] += qty
-                                        elif trans_type == 'sell' and trans_date and str(trans_date) >= date_filter:
-                                            ticker_quantities[ticker] -= qty
-                                    # If only transaction type filter (no date filter)
-                                    elif transaction_type_filter and not date_filter:
-                                        if trans_type == transaction_type_filter:
-                                            ticker_quantities[ticker] += qty
-                                    # No filters - count all buys and subtract all sells
-                                    else:
-                                        if trans_type == 'buy':
-                                            ticker_quantities[ticker] += qty
-                                        elif trans_type == 'sell':
-                                            ticker_quantities[ticker] -= qty
-                            
-                            for ticker, qty in ticker_quantities.items():
-                                if ticker in ticker_price_map and qty > 0:
-                                    total_current_value += qty * ticker_price_map[ticker]
-                            
-                            total_pnl = total_current_value - total_investment
-                            total_pnl_pct = (total_pnl / total_investment * 100) if total_investment > 0 else 0
-                            
-                            transactions_context += f"   Total Current Value: ₹{total_current_value:,.2f}\n"
-                            transactions_context += f"   Total P&L: ₹{total_pnl:+,.2f} ({total_pnl_pct:+.2f}%)\n"
-                            transactions_context += f"   ✅ Current prices available for {len(ticker_price_map)} ticker(s)\n"
-                        else:
-                            transactions_context += f"   ⚠️ Current prices not available - cannot calculate current value or P&L\n"
-                            transactions_context += f"   💡 Suggestion: Update prices using the 'Update Stale Prices' button\n"
-                        
-                        # Fetch historical price data for analysis (only if date filter is applied)
-                        historical_data_context = ""
-                        if unique_tickers and date_filter:
-                            try:
-                                historical_data_context += f"\n📊 HISTORICAL PRICE DATA FOR FILTERED TICKERS:\n"
+                                # First, identify which tickers were bought in the filtered period
+                                tickers_bought_in_period = set()
+                                for trans in all_transactions.data:
+                                    trans_type = trans.get('transaction_type', '').lower()
+                                    ticker = trans.get('ticker')
+                                    if trans_type == 'buy' and ticker:
+                                        tickers_bought_in_period.add(ticker)
                                 
-                                # Get historical prices for each ticker
-                                for ticker in list(unique_tickers)[:20]:  # Limit to top 20 tickers to avoid too much data
+                                # Get ALL transactions for these tickers (to account for sells that happened after the filter period)
+                                # This ensures we calculate net quantity correctly: buys from last year minus ALL sells
+                                if tickers_bought_in_period and date_filter:
                                     try:
-                                        # Get stock_id for this ticker
-                                        stock_response = db.supabase.table('stock_master').select('id').eq('ticker', ticker).execute()
-                                        if stock_response.data:
-                                            stock_id = stock_response.data[0]['id']
-                                            
-                                            # Get historical prices (52 weeks)
-                                            hist_response = db.supabase.table('historical_prices').select('price_date, price').eq('stock_id', stock_id).order('price_date', desc=True).limit(52).execute()
-                                            
-                                            if hist_response.data:
-                                                prices = hist_response.data
-                                                # Find prices at key dates
-                                                trans_dates_for_ticker = [
-                                                    t.get('transaction_date') for t in all_transactions.data 
-                                                    if t.get('ticker') == ticker
-                                                ]
-                                                
-                                                # Get min/max prices
-                                                price_values = [safe_float(p.get('price', 0), 0) for p in prices if p.get('price')]
-                                                if price_values:
-                                                    min_price = min(price_values)
-                                                    max_price = max(price_values)
-                                                    latest_price = price_values[0] if price_values else 0
-                                                    oldest_price = price_values[-1] if price_values else 0
-                                                    
-                                                    historical_data_context += f"\n{ticker}:\n"
-                                                    historical_data_context += f"  📈 52-week High: ₹{max_price:,.2f}\n"
-                                                    historical_data_context += f"  📉 52-week Low: ₹{min_price:,.2f}\n"
-                                                    historical_data_context += f"  📅 Oldest Price ({prices[-1].get('price_date', 'N/A')}): ₹{oldest_price:,.2f}\n"
-                                                    historical_data_context += f"  📅 Latest Price ({prices[0].get('price_date', 'N/A')}): ₹{latest_price:,.2f}\n"
-                                                    
-                                                    # Show price at transaction dates if available
-                                                    for trans_date in trans_dates_for_ticker[:5]:  # Limit to 5 transactions per ticker
-                                                        # Find closest price to transaction date
-                                                        closest_price = None
-                                                        closest_date = None
-                                                        min_diff = float('inf')
-                                                        
-                                                        for hist_price in prices:
-                                                            hist_date = hist_price.get('price_date')
-                                                            if hist_date:
-                                                                try:
-                                                                    from datetime import datetime
-                                                                    trans_dt = datetime.strptime(str(trans_date), '%Y-%m-%d').date() if isinstance(trans_date, str) else trans_date
-                                                                    hist_dt = datetime.strptime(str(hist_date), '%Y-%m-%d').date() if isinstance(hist_date, str) else hist_date
-                                                                    diff = abs((trans_dt - hist_dt).days)
-                                                                    if diff < min_diff:
-                                                                        min_diff = diff
-                                                                        closest_price = safe_float(hist_price.get('price', 0), 0)
-                                                                        closest_date = hist_date
-                                                                except Exception:
-                                                                    pass
-                                                        
-                                                        if closest_price and closest_date:
-                                                            historical_data_context += f"  💰 Price on {trans_date}: ₹{closest_price:,.2f} (closest: {closest_date})\n"
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
-                        
-                        if historical_data_context:
-                            transactions_context += historical_data_context
-                        
-                        transactions_context += f"\n📝 DETAILED TRANSACTIONS:\n"
-                        # Show all transactions if filtered (up to 50), otherwise limit to 15
-                        display_limit = min(50, len(all_transactions.data)) if (date_filter or transaction_type_filter) else 15
-                        for trans in all_transactions.data[:display_limit]:
-                            qty = safe_float(trans.get('quantity', 0), 0)
-                            price = safe_float(trans.get('price', 0), 0)
-                            amount = qty * price
-                            ticker = trans.get('ticker', 'N/A')
-                            current_price = ticker_price_map.get(ticker, 0)
+                                        # Get all transactions with ticker info via stock_master join
+                                        # Use the user_transactions_detailed view which already has ticker
+                                        all_trans_response = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user['id']).in_('ticker', list(tickers_bought_in_period)).order('transaction_date', desc=False).limit(1000).execute()
+                                        if all_trans_response.data:
+                                            all_transactions_for_calc = all_trans_response.data
+                                        else:
+                                            all_transactions_for_calc = all_transactions.data
+                                    except Exception as e:
+                                        # Fallback to using filtered transactions only
+                                        all_transactions_for_calc = all_transactions.data
+                                else:
+                                    all_transactions_for_calc = all_transactions.data
+                                
+                                # Calculate net quantities - only count buys from filtered period, but subtract ALL sells
+                                for trans in all_transactions_for_calc:
+                                    trans_type = trans.get('transaction_type', '').lower()
+                                    # Handle both direct ticker and nested ticker from stock_master join
+                                    ticker = trans.get('ticker')
+                                    qty = safe_float(trans.get('quantity', 0), 0)
+                                    trans_date = trans.get('transaction_date')
+                                    
+                                    if ticker and ticker in ticker_price_map:
+                                        if ticker not in ticker_quantities:
+                                            ticker_quantities[ticker] = 0
+                                        
+                                        # If we have date filter AND transaction type filter (e.g., "1 year buy transactions")
+                                        if date_filter and transaction_type_filter == 'buy':
+                                            # Only count buys from the filtered date period
+                                            if trans_type == 'buy' and trans_date and str(trans_date) >= date_filter:
+                                                ticker_quantities[ticker] += qty
+                                            # Subtract ALL sells (even if outside the date range)
+                                            elif trans_type == 'sell':
+                                                ticker_quantities[ticker] -= qty
+                                        # If only date filter (no transaction type filter)
+                                        elif date_filter and not transaction_type_filter:
+                                            # Count buys from filtered period, subtract sells from filtered period
+                                            if trans_type == 'buy' and trans_date and str(trans_date) >= date_filter:
+                                                ticker_quantities[ticker] += qty
+                                            elif trans_type == 'sell' and trans_date and str(trans_date) >= date_filter:
+                                                ticker_quantities[ticker] -= qty
+                                        # If only transaction type filter (no date filter)
+                                        elif transaction_type_filter and not date_filter:
+                                            if trans_type == transaction_type_filter:
+                                                ticker_quantities[ticker] += qty
+                                        # No filters - count all buys and subtract all sells
+                                        else:
+                                            if trans_type == 'buy':
+                                                ticker_quantities[ticker] += qty
+                                            elif trans_type == 'sell':
+                                                ticker_quantities[ticker] -= qty
+                                
+                                for ticker, qty in ticker_quantities.items():
+                                    if ticker in ticker_price_map and qty > 0:
+                                        total_current_value += qty * ticker_price_map[ticker]
+                                
+                                total_pnl = total_current_value - total_investment
+                                total_pnl_pct = (total_pnl / total_investment * 100) if total_investment > 0 else 0
+                                
+                                transactions_context += f"   Total Current Value: ₹{total_current_value:,.2f}\n"
+                                transactions_context += f"   Total P&L: ₹{total_pnl:+,.2f} ({total_pnl_pct:+.2f}%)\n"
+                                transactions_context += f"   ✅ Current prices available for {len(ticker_price_map)} ticker(s)\n"
+                            else:
+                                transactions_context += f"   ⚠️ Current prices not available - cannot calculate current value or P&L\n"
+                                transactions_context += f"   💡 Suggestion: Update prices using the 'Update Stale Prices' button\n"
                             
-                            # Compact format with investment amount
-                            transactions_context += f"{trans.get('transaction_date', 'N/A')} | "
-                            transactions_context += f"{ticker} | "
-                            transactions_context += f"{trans.get('transaction_type', 'N/A')} | "
-                            transactions_context += f"Qty: {qty:,.2f} | "
-                            transactions_context += f"Price: ₹{price:,.2f} | "
-                            transactions_context += f"Investment: ₹{amount:,.2f}"
-                            if current_price > 0:
-                                current_val = qty * current_price
-                                trans_pnl = current_val - amount
-                                transactions_context += f" | Current: ₹{current_val:,.2f} | P&L: ₹{trans_pnl:+,.2f}"
-                            transactions_context += "\n"
-                        
-                        if len(all_transactions.data) > display_limit:
-                            transactions_context += f"\n... and {len(all_transactions.data) - display_limit} more transactions\n"
-                    else:
-                        transactions_context += "No transactions found matching filters.\n"
-                except Exception as e:
-                    transactions_context += f"Error loading transactions: {str(e)[:100]}\n"
+                            # Fetch historical price data for analysis (only if date filter is applied)
+                            historical_data_context = ""
+                            if unique_tickers and date_filter:
+                                try:
+                                    historical_data_context += f"\n📊 HISTORICAL PRICE DATA FOR FILTERED TICKERS:\n"
+                                    
+                                    # Get historical prices for each ticker
+                                    for ticker in list(unique_tickers)[:20]:  # Limit to top 20 tickers to avoid too much data
+                                        try:
+                                            # Get stock_id for this ticker
+                                            stock_response = db.supabase.table('stock_master').select('id').eq('ticker', ticker).execute()
+                                            if stock_response.data:
+                                                stock_id = stock_response.data[0]['id']
+                                                
+                                                # Get historical prices (52 weeks)
+                                                hist_response = db.supabase.table('historical_prices').select('price_date, price').eq('stock_id', stock_id).order('price_date', desc=True).limit(52).execute()
+                                                
+                                                if hist_response.data:
+                                                    prices = hist_response.data
+                                                    # Find prices at key dates
+                                                    trans_dates_for_ticker = [
+                                                        t.get('transaction_date') for t in all_transactions.data 
+                                                        if t.get('ticker') == ticker
+                                                    ]
+                                                    
+                                                    # Get min/max prices
+                                                    price_values = [safe_float(p.get('price', 0), 0) for p in prices if p.get('price')]
+                                                    if price_values:
+                                                        min_price = min(price_values)
+                                                        max_price = max(price_values)
+                                                        latest_price = price_values[0] if price_values else 0
+                                                        oldest_price = price_values[-1] if price_values else 0
+                                                        
+                                                        historical_data_context += f"\n{ticker}:\n"
+                                                        historical_data_context += f"  📈 52-week High: ₹{max_price:,.2f}\n"
+                                                        historical_data_context += f"  📉 52-week Low: ₹{min_price:,.2f}\n"
+                                                        historical_data_context += f"  📅 Oldest Price ({prices[-1].get('price_date', 'N/A')}): ₹{oldest_price:,.2f}\n"
+                                                        historical_data_context += f"  📅 Latest Price ({prices[0].get('price_date', 'N/A')}): ₹{latest_price:,.2f}\n"
+                                                        
+                                                        # Show price at transaction dates if available
+                                                        for trans_date in trans_dates_for_ticker[:5]:  # Limit to 5 transactions per ticker
+                                                            # Find closest price to transaction date
+                                                            closest_price = None
+                                                            closest_date = None
+                                                            min_diff = float('inf')
+                                                            
+                                                            for hist_price in prices:
+                                                                hist_date = hist_price.get('price_date')
+                                                                if hist_date:
+                                                                    try:
+                                                                        from datetime import datetime
+                                                                        trans_dt = datetime.strptime(str(trans_date), '%Y-%m-%d').date() if isinstance(trans_date, str) else trans_date
+                                                                        hist_dt = datetime.strptime(str(hist_date), '%Y-%m-%d').date() if isinstance(hist_date, str) else hist_date
+                                                                        diff = abs((trans_dt - hist_dt).days)
+                                                                        if diff < min_diff:
+                                                                            min_diff = diff
+                                                                            closest_price = safe_float(hist_price.get('price', 0), 0)
+                                                                            closest_date = hist_date
+                                                                    except Exception:
+                                                                        pass
+                                                            
+                                                            if closest_price and closest_date:
+                                                                historical_data_context += f"  💰 Price on {trans_date}: ₹{closest_price:,.2f} (closest: {closest_date})\n"
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                            
+                            if historical_data_context:
+                                transactions_context += historical_data_context
+                            
+                            transactions_context += f"\n📝 DETAILED TRANSACTIONS:\n"
+                            # Show all transactions if filtered (up to 50), otherwise limit to 15
+                            display_limit = min(50, len(all_transactions.data)) if (date_filter or transaction_type_filter) else 15
+                            for trans in all_transactions.data[:display_limit]:
+                                qty = safe_float(trans.get('quantity', 0), 0)
+                                price = safe_float(trans.get('price', 0), 0)
+                                amount = qty * price
+                                ticker = trans.get('ticker', 'N/A')
+                                current_price = ticker_price_map.get(ticker, 0)
+                                
+                                # Compact format with investment amount
+                                transactions_context += f"{trans.get('transaction_date', 'N/A')} | "
+                                transactions_context += f"{ticker} | "
+                                transactions_context += f"{trans.get('transaction_type', 'N/A')} | "
+                                transactions_context += f"Qty: {qty:,.2f} | "
+                                transactions_context += f"Price: ₹{price:,.2f} | "
+                                transactions_context += f"Investment: ₹{amount:,.2f}"
+                                if current_price > 0:
+                                    current_val = qty * current_price
+                                    trans_pnl = current_val - amount
+                                    transactions_context += f" | Current: ₹{current_val:,.2f} | P&L: ₹{trans_pnl:+,.2f}"
+                                transactions_context += "\n"
+                            
+                            if len(all_transactions.data) > display_limit:
+                                transactions_context += f"\n... and {len(all_transactions.data) - display_limit} more transactions\n"
+                            else:
+                                transactions_context += "No transactions found matching filters.\n"
+                    except Exception as e:
+                        transactions_context += f"Error loading transactions: {str(e)[:100]}\n"
+                else:
+                    transactions_context = ""  # No transaction data for general questions
                 
-                # Include PDF context
+                # Include PDF context (only if data-related or question mentions PDFs/research)
                 pdf_context_text = ""
+                question_lower = user_question.lower()
+                mentions_research = any(word in question_lower for word in ['pdf', 'research', 'document', 'report', 'analysis', 'recommendation'])
                 
-                # Include PDF summaries (limited to reduce tokens)
-                recent_pdfs = db.get_user_pdfs(user['id'])
-                if recent_pdfs:
-                    # Limit to last 3 PDFs and truncate summaries (was 5 PDFs, 500 chars)
-                    pdf_context_text += f"\n\n📚 PDF DOCUMENTS ({len(recent_pdfs)} total):"
-                    for pdf in recent_pdfs[:3]:  # Only last 3 PDFs
-                        pdf_context_text += f"\n\n📄 {pdf['filename'][:40]}:"
-                        if pdf.get('ai_summary'):
-                            # Truncate summary to 300 chars to save tokens (was 500)
-                            summary = pdf.get('ai_summary', 'No summary')
-                            pdf_context_text += f"\n{summary[:300]}{'...' if len(summary) > 300 else ''}"
-                        else:
-                            # Truncate PDF text to 300 chars
-                            pdf_text = pdf.get('pdf_text', '')
-                            if pdf_text:
-                                pdf_context_text += f"\n{pdf_text[:300]}..."
+                if needs_data or mentions_research:
+                    # Include PDF summaries (limited to reduce tokens)
+                    recent_pdfs = db.get_user_pdfs(user['id'])
+                    if recent_pdfs:
+                        # Limit to last 3 PDFs and truncate summaries (was 5 PDFs, 500 chars)
+                        pdf_context_text += f"\n\n📚 PDF DOCUMENTS ({len(recent_pdfs)} total):"
+                        for pdf in recent_pdfs[:3]:  # Only last 3 PDFs
+                            pdf_context_text += f"\n\n📄 {pdf['filename'][:40]}:"
+                            if pdf.get('ai_summary'):
+                                # Truncate summary to 300 chars to save tokens (was 500)
+                                summary = pdf.get('ai_summary', 'No summary')
+                                pdf_context_text += f"\n{summary[:300]}{'...' if len(summary) > 300 else ''}"
+                            else:
+                                # Truncate PDF text to 300 chars
+                                pdf_text = pdf.get('pdf_text', '')
+                                if pdf_text:
+                                    pdf_context_text += f"\n{pdf_text[:300]}..."
+                        
+                        if len(recent_pdfs) > 3:
+                            pdf_context_text += f"\n\n... and {len(recent_pdfs) - 3} more PDFs"
                     
-                    if len(recent_pdfs) > 3:
-                        pdf_context_text += f"\n\n... and {len(recent_pdfs) - 3} more PDFs"
+                    # If no PDFs, note that
+                    if not recent_pdfs:
+                        pdf_context_text = "\n\n📄 No documents uploaded yet."
                 
-                # If no PDFs, note that
-                if not recent_pdfs:
-                    pdf_context_text = "\n\n📄 No documents uploaded yet."
-                
-                # Truncate portfolio summary if too long (reduced from 2000 to 1500)
-                summary_text = portfolio_summary[:1500] + "..." if len(portfolio_summary) > 1500 else portfolio_summary
-                
-                full_context = f"""📊 PORTFOLIO DATA (User ID: {user['id']}):
+                # Build context based on question type
+                if needs_data:
+                    # Data-related question: Include full context
+                    # Truncate portfolio summary if too long (reduced from 2000 to 1500)
+                    summary_text = portfolio_summary[:1500] + "..." if len(portfolio_summary) > 1500 else portfolio_summary
+                    
+                    full_context = f"""📊 PORTFOLIO DATA (User ID: {user['id']}):
 {raw_data_context}
 
 📈 PORTFOLIO SUMMARY:
@@ -4754,8 +4817,23 @@ def ai_assistant_page():
 - Format: "Total Investment: ₹X, Total Current Value: ₹Y, Total P&L: ₹Z (W%)"
 - Compare filtered performance with overall portfolio performance when relevant
 - Provide specific, actionable recommendations with tickers and reasoning"""
+                else:
+                    # General question: Minimal context, focus on general knowledge
+                    full_context = f"""You are an expert financial advisor and portfolio analyst. The user is asking a general financial/investment question.
+
+❓ USER QUESTION: {user_question}
+
+💡 INSTRUCTIONS FOR GENERAL QUESTIONS:
+- Use your comprehensive knowledge of finance, investing, and portfolio management
+- Provide clear, accurate, and helpful explanations
+- If the question is about investment concepts (diversification, SIP, risk, etc.), explain them thoroughly
+- If the question asks for advice, provide general best practices and principles
+- You can reference your knowledge of the Indian stock market and financial instruments
+- If relevant, mention that the user can ask specific questions about their portfolio data (e.g., "show my portfolio performance") to get personalized insights
+- Be conversational, educational, and practical
+- Do NOT make up specific portfolio data - only use data if explicitly provided above"""
                 
-                # Estimate tokens and warn if too large
+                # Estimate tokens and warn if too large (only for data-related questions)
                 approx_tokens = len(full_context) // 4
                 if approx_tokens > 25000:  # Warn if approaching limit
                     st.warning(f"⚠️ Large context: ~{approx_tokens:,} tokens. Reducing further...")
@@ -4814,13 +4892,14 @@ def ai_assistant_page():
                     st.caption(f"Total characters: {len(full_context):,} | Estimated tokens: {approx_tokens:,}")
                     st.text_area("Full context:", full_context, height=400)
                 
-                # Use GPT-4o with shorter system prompt to reduce tokens
-                model_to_use = "gpt-4o"
+                # Use GPT-5 for better reasoning and accuracy
+                model_to_use = "gpt-5"
                 
-                response = openai.chat.completions.create(
-                    model=model_to_use,
-                    messages=[
-                        {"role": "system", "content": f"""You are an expert portfolio analyst and financial advisor with access to the complete database for user_id: {user['id']}. 
+                try:
+                    response = openai.chat.completions.create(
+                        model=model_to_use,
+                        messages=[
+                            {"role": "system", "content": f"""You are an expert portfolio analyst and financial advisor with access to the complete database for user_id: {user['id']}. 
 
 You have access to:
 - ALL user transactions (filtered by user_id)
@@ -4849,20 +4928,42 @@ Always:
 - Reference PDF research documents when making recommendations
 - Compare filtered results with overall portfolio when relevant
 - Provide data-driven recommendations based on actual numbers and research"""},
-                        {"role": "user", "content": full_context}
-                    ],
-                    temperature=0.7,
-                    max_tokens=2000  # Limit output tokens as well
-                )
+                            {"role": "user", "content": full_context}
+                        ]
+                        # Note: GPT-5 only supports default temperature (1)
+                        # No max_completion_tokens - let OpenAI use default to allow reasoning + response
+                    )
+                except Exception as e:
+                    st.error(f"❌ Error calling AI API: {str(e)}")
+                    st.error("Please check your API key and try again.")
+                    st.stop()
                 
                 if not response or not response.choices:
                     st.error("❌ No response received from AI. Please try again.")
+                    if hasattr(response, 'error'):
+                        st.error(f"API Error: {response.error}")
                     st.stop()
                 
-                ai_response = response.choices[0].message.content
+                choice = response.choices[0]
+                ai_response = choice.message.content
                 
-                if not ai_response:
+                # Check if response was truncated due to token limit
+                if choice.finish_reason == 'length':
+                    st.warning("⚠️ Response was truncated due to token limit. Consider asking a more specific question or splitting your query.")
+                    if not ai_response or ai_response.strip() == "":
+                        st.error("❌ Empty response from AI - all tokens were used for reasoning.")
+                        st.error("The response was cut off because the token limit was reached during reasoning.")
+                        st.error("Try asking a shorter or more specific question.")
+                        st.stop()
+                
+                if not ai_response or ai_response.strip() == "":
                     st.error("❌ Empty response from AI. Please try again.")
+                    st.error(f"Debug: Finish reason: {choice.finish_reason if response.choices else 'N/A'}")
+                    if hasattr(response, 'usage'):
+                        usage = response.usage
+                        st.error(f"Debug: Tokens used - Completion: {usage.completion_tokens}, Prompt: {usage.prompt_tokens}")
+                        if hasattr(usage, 'completion_tokens_details') and hasattr(usage.completion_tokens_details, 'reasoning_tokens'):
+                            st.error(f"Debug: Reasoning tokens: {usage.completion_tokens_details.reasoning_tokens}")
                     st.stop()
                 
                 # Display the response immediately
@@ -4950,10 +5051,10 @@ Always:
                             """
                             
                             response = openai.chat.completions.create(
-                                model="gpt-4o-mini",
+                                model="gpt-5",  # Upgraded to GPT-5 for better results
                                 messages=[{"role": "user", "content": analysis_prompt}],
-                                temperature=0.7,
-                                max_tokens=800
+                                max_completion_tokens=800,
+                                # Note: GPT-5 only supports default temperature (1)
                             )
                             
                             fresh_analysis = response.choices[0].message.content
@@ -5105,10 +5206,10 @@ Always:
                         """
                         
                         response = openai.chat.completions.create(
-                            model="gpt-4o-mini",
+                            model="gpt-5",  # Upgraded to GPT-5 for better PDF analysis
                             messages=[{"role": "user", "content": analysis_prompt}],
-                            temperature=0.7,
-                            max_tokens=1000
+                            max_completion_tokens=1000,
+                            # Note: GPT-5 only supports default temperature (1)
                         )
                         
                         ai_analysis = response.choices[0].message.content
