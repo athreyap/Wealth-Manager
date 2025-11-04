@@ -78,41 +78,59 @@ class AgentManager:
                 "stock_master": stock_master or []  # Complete stock master data with current prices
             }
             
-            # Run analysis with each agent using performance optimization
-            portfolio_insights = performance_optimizer.optimize_agent_analysis(
-                "portfolio_agent", 
-                self.portfolio_agent.analyze, 
-                analysis_data, 
-                "portfolio_analysis"
-            )
+            # Run analysis with each agent in PARALLEL for faster execution
+            import concurrent.futures
+            from threading import Thread
             
-            market_insights = performance_optimizer.optimize_agent_analysis(
-                "market_agent", 
-                self.market_agent.analyze, 
-                analysis_data, 
-                "market_insights"
-            )
-            
-            strategy_insights = performance_optimizer.optimize_agent_analysis(
-                "strategy_agent", 
-                self.strategy_agent.analyze, 
-                analysis_data, 
-                "recommendations"
-            )
-            
-            scenario_insights = performance_optimizer.optimize_agent_analysis(
-                "scenario_agent", 
-                self.scenario_agent.analyze, 
-                analysis_data, 
-                "scenario_analysis"
-            )
-            
-            recommendation_insights = performance_optimizer.optimize_agent_analysis(
-                "recommendation_agent",
-                self.recommendation_agent.analyze,
-                analysis_data,
-                "investment_recommendations"
-            )
+            # Use ThreadPoolExecutor to run agents in parallel
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                # Submit all agent analyses at once
+                portfolio_future = executor.submit(
+                    performance_optimizer.optimize_agent_analysis,
+                    "portfolio_agent", 
+                    self.portfolio_agent.analyze, 
+                    analysis_data, 
+                    "portfolio_analysis"
+                )
+                
+                market_future = executor.submit(
+                    performance_optimizer.optimize_agent_analysis,
+                    "market_agent", 
+                    self.market_agent.analyze, 
+                    analysis_data, 
+                    "market_insights"
+                )
+                
+                strategy_future = executor.submit(
+                    performance_optimizer.optimize_agent_analysis,
+                    "strategy_agent", 
+                    self.strategy_agent.analyze, 
+                    analysis_data, 
+                    "recommendations"
+                )
+                
+                scenario_future = executor.submit(
+                    performance_optimizer.optimize_agent_analysis,
+                    "scenario_agent", 
+                    self.scenario_agent.analyze, 
+                    analysis_data, 
+                    "scenario_analysis"
+                )
+                
+                recommendation_future = executor.submit(
+                    performance_optimizer.optimize_agent_analysis,
+                    "recommendation_agent",
+                    self.recommendation_agent.analyze,
+                    analysis_data,
+                    "investment_recommendations"
+                )
+                
+                # Wait for all to complete and get results
+                portfolio_insights = portfolio_future.result()
+                market_insights = market_future.result()
+                strategy_insights = strategy_future.result()
+                scenario_insights = scenario_future.result()
+                recommendation_insights = recommendation_future.result()
             
             # Combine insights
             combined_analysis = {

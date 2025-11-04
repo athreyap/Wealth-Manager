@@ -86,12 +86,24 @@ class AIInvestmentStrategyAgent(BaseAgent):
         prompt = self._create_strategy_analysis_prompt(strategy_summary, user_profile)
         
         try:
+            # Get current date for context
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            current_year = datetime.now().year
+            
             response = self.openai_client.chat.completions.create(
                 model="gpt-5",  # GPT-5 for better strategy recommendations
                 messages=[
                     {
                         "role": "system",
-                        "content": """You are an expert investment strategist and financial advisor. Your task is to analyze investment portfolios and provide intelligent strategy recommendations.
+                        "content": f"""You are an expert investment strategist and financial advisor. Your task is to analyze investment portfolios and provide intelligent strategy recommendations.
+
+📅 CURRENT DATE: {current_date} (Year: {current_year})
+⚠️ CRITICAL: Today's date is {current_date}. Always use this date when:
+- Making time-based strategy recommendations
+- Referencing current market conditions
+- Calculating time horizons for goals
+- Analyzing portfolio holding periods
+Do NOT use 2024 or any other year - use {current_year}.
 
 IMPORTANT RULES:
 1. Analyze portfolio data intelligently - understand the structure and performance
@@ -122,14 +134,23 @@ Focus on:
                         "role": "user",
                         "content": prompt
                     }
-                ],
-                max_completion_tokens=3000,
+                ]
                 # Note: GPT-5 only supports default temperature (1)
-                timeout=60
+                # No max_completion_tokens - let OpenAI use default to allow reasoning + response (like AI assistant)
+                # No timeout - let OpenAI use default (like AI assistant)
+                # Removed response_format - GPT-5 may not support it, relying on prompt instructions instead
             )
             
-            # Parse AI response
+            # Parse AI response with error handling
+            if not response or not response.choices or len(response.choices) == 0:
+                self.logger.error("Empty response from OpenAI API")
+                return []
+            
             ai_response = response.choices[0].message.content
+            
+            if not ai_response or not ai_response.strip():
+                self.logger.error("AI response content is empty")
+                return []
             
             # Extract insights from response
             insights = self._parse_ai_strategy_response(ai_response)
@@ -289,34 +310,38 @@ STRATEGY SUMMARY:
 USER PROFILE:
 {json.dumps(user_profile, indent=2, default=str)}
 
-Please analyze this portfolio and provide strategy insights in the following JSON format:
+Return your analysis as a JSON object with an "insights" array. Use this EXACT format:
 
-[
-  {{
-    "type": "asset_allocation",
-    "severity": "high",
-    "title": "Asset Allocation Imbalance",
-    "description": "Portfolio is 90% stocks with no bond allocation, creating high risk",
-    "recommendation": "Consider adding 20-30% bond allocation for risk management",
-    "data": {{
-      "current_stock_allocation": 0.90,
-      "current_bond_allocation": 0.00,
-      "recommended_bond_allocation": 0.25
+{{
+  "insights": [
+    {{
+      "type": "asset_allocation",
+      "severity": "high",
+      "title": "Asset Allocation Imbalance",
+      "description": "Portfolio is 90% stocks with no bond allocation, creating high risk",
+      "recommendation": "Consider adding 20-30% bond allocation for risk management",
+      "data": {{
+        "current_stock_allocation": 0.90,
+        "current_bond_allocation": 0.00,
+        "recommended_bond_allocation": 0.25
+      }}
+    }},
+    {{
+      "type": "rebalancing",
+      "severity": "medium",
+      "title": "Portfolio Rebalancing Needed",
+      "description": "Technology sector has grown to 60% of portfolio, exceeding target allocation",
+      "recommendation": "Rebalance by reducing technology allocation to 30% and increasing other sectors",
+      "data": {{
+        "current_tech_allocation": 0.60,
+        "target_tech_allocation": 0.30,
+        "rebalancing_amount": 0.30
+      }}
     }}
-  }},
-  {{
-    "type": "rebalancing",
-    "severity": "medium",
-    "title": "Portfolio Rebalancing Needed",
-    "description": "Technology sector has grown to 60% of portfolio, exceeding target allocation",
-    "recommendation": "Rebalance by reducing technology allocation to 30% and increasing other sectors",
-    "data": {{
-      "current_tech_allocation": 0.60,
-      "target_tech_allocation": 0.30,
-      "rebalancing_amount": 0.30
-    }}
-  }}
-]
+  ]
+}}
+
+CRITICAL: Return ONLY valid JSON. No markdown, no explanations, no text outside the JSON object.
 
 ANALYSIS GUIDELINES:
 1. Analyze current asset allocation vs. recommended allocation based on risk tolerance
@@ -340,11 +365,23 @@ Focus on providing valuable, actionable strategy recommendations that will help 
             
             # Remove any markdown formatting
             if ai_response.startswith('```json'):
-                ai_response = ai_response[7:]
+                ai_response = ai_response[7:].strip()
+            elif ai_response.startswith('```'):
+                ai_response = ai_response[3:].strip()
             if ai_response.endswith('```'):
-                ai_response = ai_response[:-3]
+                ai_response = ai_response[:-3].strip()
             
-            # Try to find JSON array in the response
+            # Try to parse as JSON object first
+            try:
+                parsed = json.loads(ai_response)
+                if isinstance(parsed, dict) and "insights" in parsed:
+                    insights = parsed["insights"]
+                    if isinstance(insights, list):
+                        return insights
+            except:
+                pass
+            
+            # Fallback: Try to find JSON array in the response
             json_start = ai_response.find('[')
             json_end = ai_response.rfind(']') + 1
             
@@ -359,7 +396,8 @@ Focus on providing valuable, actionable strategy recommendations that will help 
                     self.logger.error("AI response is not a list")
                     return []
             else:
-                self.logger.error("No JSON array found in AI response")
+                self.logger.error("No JSON found in AI response")
+                self.logger.error(f"Response preview: {ai_response[:500]}")
                 return []
                 
         except json.JSONDecodeError as e:

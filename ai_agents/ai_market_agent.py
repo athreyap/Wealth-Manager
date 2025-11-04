@@ -86,12 +86,24 @@ class AIMarketAnalysisAgent(BaseAgent):
         prompt = self._create_market_analysis_prompt(market_summary, user_profile)
         
         try:
+            # Get current date for context
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            current_year = datetime.now().year
+            
             response = self.openai_client.chat.completions.create(
                 model="gpt-5",  # GPT-5 for better market analysis
                 messages=[
                     {
                         "role": "system",
-                        "content": """You are an expert market analyst and financial strategist. Your task is to analyze market conditions and provide intelligent insights about market trends, opportunities, and risks.
+                        "content": f"""You are an expert market analyst and financial strategist. Your task is to analyze market conditions and provide intelligent insights about market trends, opportunities, and risks.
+
+📅 CURRENT DATE: {current_date} (Year: {current_year})
+⚠️ CRITICAL: Today's date is {current_date}. Always use this date when:
+- Analyzing current market conditions
+- Referencing recent market events
+- Making time-based market predictions
+- Comparing historical vs current trends
+Do NOT use 2024 or any other year - use {current_year}.
 
 IMPORTANT RULES:
 1. Analyze market data intelligently - understand patterns and trends
@@ -121,14 +133,23 @@ Focus on:
                         "role": "user",
                         "content": prompt
                     }
-                ],
-                max_completion_tokens=3000,
+                ]
                 # Note: GPT-5 only supports default temperature (1)
-                timeout=60
+                # No max_completion_tokens - let OpenAI use default to allow reasoning + response (like AI assistant)
+                # No timeout - let OpenAI use default (like AI assistant)
+                # Removed response_format - GPT-5 may not support it, relying on prompt instructions instead
             )
             
-            # Parse AI response
+            # Parse AI response with error handling
+            if not response or not response.choices or len(response.choices) == 0:
+                self.logger.error("Empty response from OpenAI API")
+                return []
+            
             ai_response = response.choices[0].message.content
+            
+            if not ai_response or not ai_response.strip():
+                self.logger.error("AI response content is empty")
+                return []
             
             # Extract insights from response
             insights = self._parse_ai_market_response(ai_response)
@@ -285,35 +306,39 @@ MARKET SUMMARY:
 USER PROFILE:
 {json.dumps(user_profile, indent=2, default=str)}
 
-Please analyze this market data and provide insights in the following JSON format:
+Return your analysis as a JSON object with an "insights" array. Use this EXACT format:
 
-[
-  {{
-    "type": "market_sentiment",
-    "severity": "high",
-    "title": "Market Sentiment: Bearish",
-    "description": "Only 20% of holdings are positive, indicating bearish market sentiment",
-    "recommendation": "Consider defensive positioning and risk management strategies",
-    "data": {{
-      "sentiment": "bearish",
-      "positive_ratio": 0.20,
-      "positive_count": 20,
-      "total_count": 100
+{{
+  "insights": [
+    {{
+      "type": "market_sentiment",
+      "severity": "high",
+      "title": "Market Sentiment: Bearish",
+      "description": "Only 20% of holdings are positive, indicating bearish market sentiment",
+      "recommendation": "Consider defensive positioning and risk management strategies",
+      "data": {{
+        "sentiment": "bearish",
+        "positive_ratio": 0.20,
+        "positive_count": 20,
+        "total_count": 100
+      }}
+    }},
+    {{
+      "type": "sector_analysis",
+      "severity": "medium",
+      "title": "Technology Sector Outperformance",
+      "description": "Technology sector showing 25% returns while overall market is flat",
+      "recommendation": "Consider increasing technology allocation or sector rotation",
+      "data": {{
+        "sector": "Technology",
+        "performance": 0.25,
+        "market_performance": 0.02
+      }}
     }}
-  }},
-  {{
-    "type": "sector_analysis",
-    "severity": "medium",
-    "title": "Technology Sector Outperformance",
-    "description": "Technology sector showing 25% returns while overall market is flat",
-    "recommendation": "Consider increasing technology allocation or sector rotation",
-    "data": {{
-      "sector": "Technology",
-      "performance": 0.25,
-      "market_performance": 0.02
-    }}
-  }}
-]
+  ]
+}}
+
+CRITICAL: Return ONLY valid JSON. No markdown, no explanations, no text outside the JSON object.
 
 ANALYSIS GUIDELINES:
 1. Analyze market sentiment based on positive/negative holdings ratio
@@ -337,11 +362,23 @@ Focus on providing valuable, actionable market insights that will help optimize 
             
             # Remove any markdown formatting
             if ai_response.startswith('```json'):
-                ai_response = ai_response[7:]
+                ai_response = ai_response[7:].strip()
+            elif ai_response.startswith('```'):
+                ai_response = ai_response[3:].strip()
             if ai_response.endswith('```'):
-                ai_response = ai_response[:-3]
+                ai_response = ai_response[:-3].strip()
             
-            # Try to find JSON array in the response
+            # Try to parse as JSON object first
+            try:
+                parsed = json.loads(ai_response)
+                if isinstance(parsed, dict) and "insights" in parsed:
+                    insights = parsed["insights"]
+                    if isinstance(insights, list):
+                        return insights
+            except:
+                pass
+            
+            # Fallback: Try to find JSON array in the response
             json_start = ai_response.find('[')
             json_end = ai_response.rfind(']') + 1
             
@@ -356,7 +393,8 @@ Focus on providing valuable, actionable market insights that will help optimize 
                     self.logger.error("AI response is not a list")
                     return []
             else:
-                self.logger.error("No JSON array found in AI response")
+                self.logger.error("No JSON found in AI response")
+                self.logger.error(f"Response preview: {ai_response[:500]}")
                 return []
                 
         except json.JSONDecodeError as e:

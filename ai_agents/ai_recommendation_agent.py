@@ -133,12 +133,24 @@ class AIInvestmentRecommendationAgent(BaseAgent):
                         prompt += f"  • Error processing holding data\n"
         
         try:
+            # Get current date for context
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            current_year = datetime.now().year
+            
             response = self.openai_client.chat.completions.create(
                 model="gpt-5",  # GPT-5 for better investment recommendations
                 messages=[
                     {
                         "role": "system",
-                        "content": """You are an expert investment advisor and portfolio strategist specializing in the Indian stock market. Your task is to recommend NEW investment opportunities that complement the existing portfolio.
+                        "content": f"""You are an expert investment advisor and portfolio strategist specializing in the Indian stock market. Your task is to recommend NEW investment opportunities that complement the existing portfolio.
+
+📅 CURRENT DATE: {current_date} (Year: {current_year})
+⚠️ CRITICAL: Today's date is {current_date}. Always use this date when:
+- Making investment recommendations based on current market conditions
+- Referencing recent market performance and trends
+- Calculating time horizons for recommendations
+- Analyzing current valuations and entry points
+Do NOT use 2024 or any other year - use {current_year}.
 
 IMPORTANT RULES:
 1. Analyze the current portfolio to identify gaps and opportunities
@@ -193,14 +205,23 @@ CRITICAL:
                         "role": "user",
                         "content": prompt
                     }
-                ],
-                max_completion_tokens=3000,
+                ]
                 # Note: GPT-5 only supports default temperature (1)
-                timeout=60
+                # No max_completion_tokens - let OpenAI use default to allow reasoning + response (like AI assistant)
+                # No timeout - let OpenAI use default (like AI assistant)
+                # Removed response_format - GPT-5 may not support it, relying on prompt instructions instead
             )
             
-            # Parse AI response
+            # Parse AI response with error handling
+            if not response or not response.choices or len(response.choices) == 0:
+                self.logger.error("Empty response from OpenAI API")
+                return []
+            
             ai_response = response.choices[0].message.content
+            
+            if not ai_response or not ai_response.strip():
+                self.logger.error("AI response content is empty")
+                return []
             
             # Log AI response length and first 500 chars for debugging
             self.logger.info(f"AI response received: {len(ai_response)} characters")
@@ -357,31 +378,32 @@ RECOMMENDATION REQUIREMENTS:
 6. RISK-ADJUSTED RETURNS: Balance risk and return based on user risk tolerance
 7. REBALANCING: Suggest specific quantities to buy/sell for optimal portfolio balance
 
-Please provide 8-12 specific recommendations (both BUY and SELL) in the following JSON format:
+Return your analysis as a JSON object with a "recommendations" array. Use this EXACT format:
 
-[
-  {{
-    "type": "stock_recommendation",
-    "severity": "high",
-    "title": "HDFC Bank Ltd (HDFCBANK.NS)",
-    "description": "HDFC Bank is India's largest private sector bank with strong fundamentals. Current market conditions favor banking stocks due to improving credit growth and stable NIM. Your portfolio lacks banking sector exposure (only 5%), making this an ideal diversification opportunity. The stock has shown resilience with consistent RoE above 17% and is trading at attractive valuations.",
-    "recommendation": "Invest ₹2,00,000 (10% of portfolio) in HDFCBANK.NS. Buy gradually over 2-3 months to average out entry price. Target allocation: 10-15% of portfolio in banking sector.",
-    "data": {{
-      "ticker": "HDFCBANK.NS",
-      "asset_type": "stock",
-      "sector": "Banking & Financial Services",
-      "suggested_allocation_percentage": 10,
-      "suggested_amount": 200000,
-      "expected_return": "12-15% annually",
-      "risk_level": "medium",
-      "investment_thesis": "Strong fundamentals, improving credit growth, attractive valuations, fills banking sector gap",
-      "current_price_approx": "1600",
-      "why_now": "Banking sector showing strong credit growth, NIM stabilization, and favorable regulatory environment"
-    }}
-  }},
-  {{
-    "type": "mutual_fund_recommendation",
-    "severity": "medium",
+{{
+  "recommendations": [
+    {{
+      "type": "stock_recommendation",
+      "severity": "high",
+      "title": "HDFC Bank Ltd (HDFCBANK.NS)",
+      "description": "HDFC Bank is India's largest private sector bank with strong fundamentals. Current market conditions favor banking stocks due to improving credit growth and stable NIM. Your portfolio lacks banking sector exposure (only 5%), making this an ideal diversification opportunity. The stock has shown resilience with consistent RoE above 17% and is trading at attractive valuations.",
+      "recommendation": "Invest ₹2,00,000 (10% of portfolio) in HDFCBANK.NS. Buy gradually over 2-3 months to average out entry price. Target allocation: 10-15% of portfolio in banking sector.",
+      "data": {{
+        "ticker": "HDFCBANK.NS",
+        "asset_type": "stock",
+        "sector": "Banking & Financial Services",
+        "suggested_allocation_percentage": 10,
+        "suggested_amount": 200000,
+        "expected_return": "12-15% annually",
+        "risk_level": "medium",
+        "investment_thesis": "Strong fundamentals, improving credit growth, attractive valuations, fills banking sector gap",
+        "current_price_approx": "1600",
+        "why_now": "Banking sector showing strong credit growth, NIM stabilization, and favorable regulatory environment"
+      }}
+    }},
+    {{
+      "type": "mutual_fund_recommendation",
+      "severity": "medium",
     "title": "Parag Parikh Flexi Cap Fund - Direct Plan",
     "description": "This fund offers international diversification with 35% allocation to US stocks while maintaining strong domestic equity exposure. Your portfolio currently has 0% international exposure, and your risk profile allows for 20% international allocation. The fund has consistently outperformed its benchmark with 18% 3-year CAGR.",
     "recommendation": "Invest ₹1,50,000 via SIP (₹25,000/month for 6 months) in Parag Parikh Flexi Cap Fund. This provides instant international diversification and professional management.",
@@ -443,7 +465,10 @@ Please provide 8-12 specific recommendations (both BUY and SELL) in the followin
       "why_now": "Cut losses early, NBFC sector facing regulatory pressure, better opportunities available"
     }}
   }}
-]
+  ]
+}}
+
+CRITICAL: Return ONLY valid JSON. No markdown, no explanations, no text outside the JSON object.
 
 IMPORTANT: 
 - Recommend REAL instruments with actual ticker symbols
@@ -459,7 +484,34 @@ IMPORTANT:
         """Parse AI response and extract recommendations"""
         
         try:
-            # First try direct JSON parsing
+            # Clean the response
+            ai_response = ai_response.strip()
+            
+            # Remove any markdown formatting
+            if ai_response.startswith('```json'):
+                ai_response = ai_response[7:].strip()
+            elif ai_response.startswith('```'):
+                ai_response = ai_response[3:].strip()
+            if ai_response.endswith('```'):
+                ai_response = ai_response[:-3].strip()
+            
+            # First try parsing as JSON object with "insights" or "recommendations" key
+            try:
+                parsed = json.loads(ai_response)
+                if isinstance(parsed, dict):
+                    # Try "insights" key first
+                    if "insights" in parsed and isinstance(parsed["insights"], list):
+                        return self._validate_recommendations(parsed["insights"])
+                    # Try "recommendations" key
+                    elif "recommendations" in parsed and isinstance(parsed["recommendations"], list):
+                        return self._validate_recommendations(parsed["recommendations"])
+                    # If it's a list directly (fallback for old format)
+                    elif isinstance(parsed, list):
+                        return self._validate_recommendations(parsed)
+            except json.JSONDecodeError:
+                pass
+            
+            # Try direct JSON parsing as array (old format)
             try:
                 recommendations = json.loads(ai_response)
                 if isinstance(recommendations, list):

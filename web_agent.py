@@ -4831,7 +4831,14 @@ def ai_assistant_page():
                     # Truncate portfolio summary if too long (reduced from 2000 to 1500)
                     summary_text = portfolio_summary[:1500] + "..." if len(portfolio_summary) > 1500 else portfolio_summary
                     
-                    full_context = f"""📊 PORTFOLIO DATA (User ID: {user['id']}):
+                    # Get current date for context
+                    current_date = datetime.now().strftime("%Y-%m-%d")
+                    current_year = datetime.now().year
+                    
+                    full_context = f"""📅 CURRENT DATE: {current_date} (Year: {current_year})
+⚠️ IMPORTANT: Today's date is {current_date}. Use this date for all time-based calculations and references.
+
+📊 PORTFOLIO DATA (User ID: {user['id']}):
 {raw_data_context}
 
 📈 PORTFOLIO SUMMARY:
@@ -4879,7 +4886,14 @@ def ai_assistant_page():
 - Provide specific, actionable recommendations with tickers and reasoning"""
                 else:
                     # General question: Minimal context, focus on general knowledge
+                    # Get current date for context
+                    current_date = datetime.now().strftime("%Y-%m-%d")
+                    current_year = datetime.now().year
+                    
                     full_context = f"""You are an expert financial advisor and portfolio analyst. The user is asking a general financial/investment question.
+
+📅 CURRENT DATE: {current_date} (Year: {current_year})
+⚠️ IMPORTANT: Today's date is {current_date}. Use this date for all time-based references and calculations.
 
 ❓ USER QUESTION: {user_question}
 
@@ -4899,7 +4913,14 @@ def ai_assistant_page():
                     st.warning(f"⚠️ Large context: ~{approx_tokens:,} tokens. Reducing further...")
                     # Further reduce by truncating summary
                     summary_text = portfolio_summary[:1000] + "..."
-                    full_context = f"""📊 PORTFOLIO DATA (User ID: {user['id']}):
+                    # Get current date for context
+                    current_date = datetime.now().strftime("%Y-%m-%d")
+                    current_year = datetime.now().year
+                    
+                    full_context = f"""📅 CURRENT DATE: {current_date} (Year: {current_year})
+⚠️ IMPORTANT: Today's date is {current_date}. Use this date for all time-based calculations and references.
+
+📊 PORTFOLIO DATA (User ID: {user['id']}):
 {raw_data_context}
 
 📈 PORTFOLIO SUMMARY:
@@ -4956,10 +4977,22 @@ def ai_assistant_page():
                 model_to_use = "gpt-5"
                 
                 try:
+                    # Get current date for system prompt
+                    current_date = datetime.now().strftime("%Y-%m-%d")
+                    current_year = datetime.now().year
+                    
                     response = openai.chat.completions.create(
                         model=model_to_use,
                         messages=[
-                            {"role": "system", "content": f"""You are an expert portfolio analyst and financial advisor with access to the complete database for user_id: {user['id']}. 
+                            {"role": "system", "content": f"""You are an expert portfolio analyst and financial advisor with access to the complete database for user_id: {user['id']}.
+
+📅 CURRENT DATE: {current_date} (Year: {current_year})
+⚠️ CRITICAL: Today's date is {current_date}. Always use this date when:
+- Calculating time periods (e.g., "1 year ago" means {current_year - 1}-{datetime.now().strftime('%m-%d')})
+- Referencing current market conditions
+- Making time-based predictions
+- Analyzing transaction dates and holding periods
+Do NOT use 2024 or any other year - use {current_year}. 
 
 You have access to:
 - ALL user transactions (filtered by user_id)
@@ -5457,11 +5490,13 @@ def ai_insights_page():
         "⚙️ Agent Status"
     ])
     
-    with tab1:
-        st.subheader("🎯 Smart Recommendations")
-        
-        # Run AI analysis
-        with st.spinner("🤖 AI agents analyzing your portfolio..."):
+    # Run AI analysis ONCE and cache it (all tabs will use the same result)
+    # This prevents running 5 separate analyses (one per tab)
+    analysis_cache_key = f"ai_analysis_{user['id']}_{len(holdings)}_{len(all_transactions)}"
+    
+    if analysis_cache_key not in st.session_state or not st.session_state.get('ai_analysis_complete', False):
+        # Run analysis once for all tabs
+        with st.spinner("🤖 AI agents analyzing your portfolio (this may take 30-60 seconds)..."):
             try:
                 # Get user profile from database
                 user_profile_data = db.get_user_profile(user['id'])
@@ -5475,58 +5510,67 @@ def ai_insights_page():
                     "international_exposure": user_profile_data.get('international_exposure', 20)
                 }
                 
-                # Run comprehensive AI analysis with all context data
+                # Run comprehensive AI analysis with all context data (agents run in parallel)
                 analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
                 
-                if "error" in analysis_result:
-                    st.error(f"Analysis error: {analysis_result['error']}")
-                else:
-                    # Display top recommendations
-                    recommendations = get_ai_recommendations(5)
-                    
-                    if recommendations:
-                        st.success(f"✅ Found {len(recommendations)} AI recommendations")
-                        
-                        for i, rec in enumerate(recommendations, 1):
-                            severity_color = {
-                                "high": "🔴",
-                                "medium": "🟡", 
-                                "low": "🟢"
-                            }.get(rec.get("severity", "low"), "🟢")
-                            
-                            with st.expander(f"{severity_color} {rec.get('title', 'Recommendation')}", expanded=(rec.get("severity") == "high")):
-                                st.markdown(f"**Description:** {rec.get('description', 'No description')}")
-                                st.markdown(f"**Recommendation:** {rec.get('recommendation', 'No recommendation')}")
-                                
-                                if rec.get("data"):
-                                    st.json(rec["data"])
-                    else:
-                        st.info("🎉 No urgent recommendations found. Your portfolio looks well-balanced!")
-                        
+                # Cache the result
+                st.session_state[analysis_cache_key] = analysis_result
+                st.session_state['ai_analysis_complete'] = True
             except Exception as e:
                 st.error(f"Error running AI analysis: {str(e)}")
+                st.session_state[analysis_cache_key] = {"error": str(e)}
+    else:
+        # Use cached result
+        analysis_result = st.session_state[analysis_cache_key]
+    
+    with tab1:
+        st.subheader("🎯 Smart Recommendations")
+        
+        try:
+            # Use cached analysis result
+            if not analysis_result or "error" in analysis_result:
+                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+            else:
+                # Get recommendations from analysis result
+                recommendations = analysis_result.get("investment_recommendations", [])
+                
+                # If no recommendations in result, try getting from agent manager cache
+                if not recommendations:
+                    try:
+                        recommendations = get_ai_recommendations(5)
+                    except:
+                        recommendations = []
+                
+                if recommendations:
+                    st.success(f"✅ Found {len(recommendations)} AI recommendations")
+                    
+                    for i, rec in enumerate(recommendations, 1):
+                        severity_color = {
+                            "high": "🔴",
+                            "medium": "🟡", 
+                            "low": "🟢"
+                        }.get(rec.get("severity", "low"), "🟢")
+                        
+                        with st.expander(f"{severity_color} {rec.get('title', 'Recommendation')}", expanded=(rec.get("severity") == "high")):
+                            st.markdown(f"**Description:** {rec.get('description', 'No description')}")
+                            st.markdown(f"**Recommendation:** {rec.get('recommendation', 'No recommendation')}")
+                            
+                            if rec.get("data"):
+                                st.json(rec["data"])
+                else:
+                    st.info("🎉 No urgent recommendations found. Your portfolio looks well-balanced!")
+        except Exception as e:
+            st.error(f"Error running AI analysis: {str(e)}")
     
     with tab2:
         st.subheader("📊 Portfolio Analysis")
         
         try:
-            # Run fresh portfolio analysis
-            with st.spinner("🤖 AI analyzing your portfolio..."):
-                user_profile_data = db.get_user_profile(user['id'])
-                user_profile = {
-                    "user_id": user['id'],
-                    "risk_tolerance": user_profile_data.get('risk_tolerance', 'moderate'),
-                    "goals": user_profile_data.get('investment_goals', []),
-                    "rebalancing_frequency": user_profile_data.get('rebalancing_frequency', 'quarterly'),
-                    "tax_optimization": user_profile_data.get('tax_optimization', True),
-                    "esg_investing": user_profile_data.get('esg_investing', False),
-                    "international_exposure": user_profile_data.get('international_exposure', 20)
-                }
-                
-                # Get portfolio-specific insights from the analysis with all context data
-                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
-                
-                if analysis_result and "portfolio_insights" in analysis_result:
+            # Use cached analysis result (no need to run again)
+            if not analysis_result or "error" in analysis_result:
+                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+            else:
+                if "portfolio_insights" in analysis_result:
                     # Get portfolio insights directly
                     portfolio_insights = analysis_result["portfolio_insights"]
                     
@@ -5562,23 +5606,11 @@ def ai_insights_page():
         st.subheader("🔍 Market Insights")
         
         try:
-            # Run fresh market analysis
-            with st.spinner("🤖 AI analyzing market conditions..."):
-                user_profile_data = db.get_user_profile(user['id'])
-                user_profile = {
-                    "user_id": user['id'],
-                    "risk_tolerance": user_profile_data.get('risk_tolerance', 'moderate'),
-                    "goals": user_profile_data.get('investment_goals', []),
-                    "rebalancing_frequency": user_profile_data.get('rebalancing_frequency', 'quarterly'),
-                    "tax_optimization": user_profile_data.get('tax_optimization', True),
-                    "esg_investing": user_profile_data.get('esg_investing', False),
-                    "international_exposure": user_profile_data.get('international_exposure', 20)
-                }
-                
-                # Get market-specific insights from the analysis with all context data
-                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
-                
-                if analysis_result and "market_insights" in analysis_result:
+            # Use cached analysis result (no need to run again)
+            if not analysis_result or "error" in analysis_result:
+                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+            else:
+                if "market_insights" in analysis_result:
                     # Get market insights directly
                     market_insights = analysis_result["market_insights"]
                     
@@ -5614,23 +5646,11 @@ def ai_insights_page():
         st.subheader("🔮 Scenario Analysis")
         
         try:
-            # Run fresh scenario analysis
-            with st.spinner("🤖 AI running scenario analysis..."):
-                user_profile_data = db.get_user_profile(user['id'])
-                user_profile = {
-                    "user_id": user['id'],
-                    "risk_tolerance": user_profile_data.get('risk_tolerance', 'moderate'),
-                    "goals": user_profile_data.get('investment_goals', []),
-                    "rebalancing_frequency": user_profile_data.get('rebalancing_frequency', 'quarterly'),
-                    "tax_optimization": user_profile_data.get('tax_optimization', True),
-                    "esg_investing": user_profile_data.get('esg_investing', False),
-                    "international_exposure": user_profile_data.get('international_exposure', 20)
-                }
-                
-                # Get scenario-specific insights from the analysis with all context data
-                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
-                
-                if analysis_result and "scenario_insights" in analysis_result:
+            # Use cached analysis result (no need to run again)
+            if not analysis_result or "error" in analysis_result:
+                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+            else:
+                if "scenario_insights" in analysis_result:
                     # Get scenario insights directly
                     scenario_insights = analysis_result["scenario_insights"]
                     
@@ -5676,23 +5696,11 @@ def ai_insights_page():
         st.caption("AI-powered suggestions for new holdings to complement your portfolio")
         
         try:
-            # Run fresh analysis to get recommendations
-            with st.spinner("🤖 AI analyzing investment opportunities..."):
-                user_profile_data = db.get_user_profile(user['id'])
-                user_profile = {
-                    "user_id": user['id'],
-                    "risk_tolerance": user_profile_data.get('risk_tolerance', 'moderate'),
-                    "goals": user_profile_data.get('investment_goals', []),
-                    "rebalancing_frequency": user_profile_data.get('rebalancing_frequency', 'quarterly'),
-                    "tax_optimization": user_profile_data.get('tax_optimization', True),
-                    "esg_investing": user_profile_data.get('esg_investing', False),
-                    "international_exposure": user_profile_data.get('international_exposure', 20)
-                }
-                
-                # Get investment recommendations from analysis with all context data
-                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
-                
-                if analysis_result and "investment_recommendations" in analysis_result:
+            # Use cached analysis result (no need to run again)
+            if not analysis_result or "error" in analysis_result:
+                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+            else:
+                if "investment_recommendations" in analysis_result:
                     # Get investment recommendations directly
                     investment_recommendations = analysis_result["investment_recommendations"]
                     
