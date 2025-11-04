@@ -124,6 +124,8 @@ class EnhancedPriceFetcher:
         failed_count = 0
         mf_count = 0
         
+        print(f"[PRICE_UPDATE] Starting price update for {len(holdings)} holdings...")
+        
         for holding in holdings:
             try:
                 ticker = holding.get('ticker')
@@ -131,20 +133,25 @@ class EnhancedPriceFetcher:
                 stock_id = holding.get('stock_id')
                 
                 if not ticker or not stock_id:
-                    #st.caption(f"      ⚠️ Skipping holding with missing ticker or stock_id")
+                    print(f"[PRICE_UPDATE] ⚠️ Skipping holding with missing ticker or stock_id: ticker={ticker}, stock_id={stock_id}")
                     continue
                 
                 current_price = None
+                source = None
                 
                 if asset_type == 'stock':
                     # Fetching stock price (silent)
                     current_price, source = self._get_stock_price_with_fallback(ticker)
+                    if current_price:
+                        print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:.2f} (from {source})")
                     
                 elif asset_type == 'mutual_fund':
                     mf_count += 1
                     # Get fund name for enhanced AI fallback
                     fund_name = holding.get('stock_name', '')
                     current_price, source = self._get_mf_price_with_fallback(ticker, fund_name)
+                    if current_price:
+                        print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:.2f} (from {source})")
                     
                 elif asset_type in ['pms', 'aif']:
                     # Calculating PMS/AIF value (silent)
@@ -162,26 +169,44 @@ class EnhancedPriceFetcher:
                                 ticker, investment_date, investment_amount, is_aif=(asset_type == 'aif')
                             )
                             current_price = result['current_value'] / float(first_transaction['quantity'])
-                            ##st.caption(f"      ✅ {asset_type.upper()} {ticker}: ₹{current_price:,.2f}")
+                            print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:,.2f} (CAGR calculation)")
                 
                 elif asset_type == 'bond':
                     # Get bond name for AI fallback
                     bond_name = holding.get('stock_name', '')
                     current_price, source = self._get_bond_price(ticker, bond_name=bond_name)
+                    if current_price:
+                        print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:.2f} (from {source})")
                 
-                # Update live_price in stock_master
+                # Validate price before storing
+                avg_price = holding.get('average_price', 0)
+                
+                # Update live_price in stock_master with validation
                 if current_price and current_price > 0:
+                    # Price validation: Check if price is within reasonable bounds
+                    # For stocks: current price shouldn't be more than 10x or less than 0.1x of avg price
+                    # (unless there was a stock split/bonus, which would be handled separately)
+                    if asset_type == 'stock' and avg_price > 0:
+                        price_ratio = current_price / avg_price
+                        if price_ratio > 10 or price_ratio < 0.1:
+                            print(f"[PRICE_VALIDATION] ⚠️ Suspicious price for {ticker}: current={current_price:.2f}, avg={avg_price:.2f}, ratio={price_ratio:.2f}")
+                            # Still store it, but log a warning
+                            # Could be a legitimate huge gain/loss or data issue
+                    
                     db_manager.update_stock_live_price(stock_id, current_price)
                     success_count += 1
                 else:
                     # Could not get price
+                    print(f"[PRICE_UPDATE] ❌ {ticker} ({asset_type}): Failed to fetch price")
                     failed_count += 1
                     
             except Exception as e:
-                # Error updating holding (silent)
+                # Error updating holding
+                print(f"[PRICE_UPDATE] ❌ Error updating {holding.get('ticker', 'unknown')}: {str(e)}")
                 failed_count += 1
         
-        # Summary (silent)
+        # Summary
+        print(f"[PRICE_UPDATE] Complete: {success_count} succeeded, {failed_count} failed")
     
     def _get_stock_price_with_fallback(self, ticker: str) -> tuple:
         """

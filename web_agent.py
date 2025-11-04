@@ -411,24 +411,31 @@ def update_all_live_prices():
         else:
             st.warning("No holdings found to update.")
 
-def should_update_prices_today(holdings):
+def should_update_prices_today(holdings, db_manager):
     """Check if prices need to be updated today"""
     from datetime import datetime, date
     
     today = date.today()
     needs_update = []
     
+    if not db_manager:
+        # No database manager, assume all need update
+        return holdings
+    
     for holding in holdings:
         stock_id = holding.get('stock_id')
         if stock_id:
             # Get last updated date from database
             try:
-                # Check if method exists
-                if hasattr(db, 'get_stock_last_updated'):
-                    last_updated = db.get_stock_last_updated(stock_id)
+                if hasattr(db_manager, 'get_stock_last_updated'):
+                    last_updated = db_manager.get_stock_last_updated(stock_id)
                     if last_updated:
-                        last_updated_date = datetime.fromisoformat(last_updated).date()
-                        if last_updated_date < today:
+                        try:
+                            last_updated_date = datetime.fromisoformat(last_updated).date()
+                            if last_updated_date < today:
+                                needs_update.append(holding)
+                        except (ValueError, TypeError):
+                            # Invalid date format, needs update
                             needs_update.append(holding)
                     else:
                         # No last_updated record, needs update
@@ -437,8 +444,12 @@ def should_update_prices_today(holdings):
                     # Method not available, assume needs update
                     needs_update.append(holding)
             except Exception as e:
-                # Any error, assume needs update
+                # Any error, assume needs update (conservative approach)
+                print(f"[PRICE_CHECK] Error checking last_updated for stock_id {stock_id}: {str(e)}")
                 needs_update.append(holding)
+        else:
+            # No stock_id, needs update
+            needs_update.append(holding)
     
     return needs_update
 if 'bulk_ai_fetcher' not in st.session_state:
@@ -483,6 +494,40 @@ def login_page():
                     db.recalculate_holdings(user['id'])
                 except:
                     pass  # Silent failure
+                
+                # Fetch current prices for all holdings on login (only if not updated today OR if prices are stale)
+                try:
+                    holdings = db.get_user_holdings(user['id'])
+                    if holdings and 'price_fetcher' in st.session_state:
+                        # Check which holdings need price updates (not updated today)
+                        holdings_needing_update = should_update_prices_today(holdings, db)
+                        
+                        # Also check for stale prices (current_price == average_price or missing)
+                        stale_holdings = []
+                        for h in holdings:
+                            cp = h.get('current_price') or h.get('live_price') or 0
+                            ap = h.get('average_price', 0)
+                            if cp is None or cp == 0 or (ap > 0 and abs(cp - ap) < 0.01):
+                                stale_holdings.append(h)
+                        
+                        # Combine both lists (remove duplicates)
+                        all_needing_update = {h.get('stock_id'): h for h in holdings_needing_update}
+                        for h in stale_holdings:
+                            all_needing_update[h.get('stock_id')] = h
+                        
+                        holdings_to_fetch = list(all_needing_update.values())
+                        
+                        if holdings_to_fetch:
+                            print(f"[LOGIN] Fetching current prices for {len(holdings_to_fetch)} holdings ({len(holdings_needing_update)} not updated today, {len(stale_holdings)} stale)...")
+                            st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_to_fetch, db)
+                            print(f"[LOGIN] ✅ Price fetching complete")
+                        else:
+                            print(f"[LOGIN] ✅ All prices already updated today, skipping fetch")
+                except Exception as e:
+                    print(f"[LOGIN] ⚠️ Price fetching failed: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    pass  # Silent failure - don't break login
                 
                 # Detect corporate actions (splits/bonus) on login
                 try:
@@ -1137,7 +1182,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                             'sector': 'bond' if asset_type == 'bond' else str(safe_value(row.get('sector', 'Unknown'), 'Unknown')),
                             'filename': uploaded_file.name
                         }
-                        
+                    
                         result = db.add_transaction(transaction_data)
                         if result.get('success'):
                             imported += 1
@@ -1146,7 +1191,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                             if imported % 50 == 0:
                                 import time
                                 time.sleep(0.5)  # 500ms pause
-                        elif not result.get('success'):
+                        else:
                             # Show why it failed
                             error_msg = result.get('error', 'Unknown error')
                             if 'duplicate' in error_msg.lower():
@@ -1611,7 +1656,7 @@ def main_dashboard():
             if holdings:
                 try:
                     # Check which holdings need price updates (not updated today)
-                    holdings_needing_update = should_update_prices_today(holdings)
+                    holdings_needing_update = should_update_prices_today(holdings, db)
                     
                     if holdings_needing_update and bulk_ai_fetcher.available:
                         # Get unique tickers that need updating
@@ -1633,7 +1678,7 @@ def main_dashboard():
                 except Exception as e:
                     # Silent fallback
                     try:
-                        holdings_needing_update = should_update_prices_today(holdings)
+                        holdings_needing_update = should_update_prices_today(holdings, db)
                         if holdings_needing_update:
                             st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
                     except:
@@ -1876,30 +1921,55 @@ def portfolio_overview_page():
         # Check how many holdings need updating
         holdings = get_cached_holdings(user['id'])
         
-        # Find stocks with stale prices (current_price == avg_price or 0% return)
+        # Find ALL holdings with stale prices (current_price == avg_price, 0% return, or missing)
         stale_prices = []
         bonds_to_update = []
         for h in holdings:
-            cp = h.get('current_price', 0)
+            # Check both current_price and live_price fields
+            cp = h.get('current_price') or h.get('live_price') or 0
             ap = h.get('average_price', 0)
             asset_type = h.get('asset_type', '')
             
+            # If current_price is None, 0, or exactly equals avg_price → likely stale (for ALL asset types)
+            is_stale = False
+            
+            if cp is None or cp == 0:
+                # Missing price - definitely stale
+                is_stale = True
+            elif ap > 0 and abs(cp - ap) < 0.01:
+                # Current price equals average (within 1 paisa) = stale (price wasn't fetched)
+                is_stale = True
+            
             # Special handling for bonds - check if price seems wrong
             if asset_type == 'bond':
-                # Bonds often show wrong prices, check if current price is suspiciously low
                 ticker = (h.get('ticker') or '').lower()
                 name = (h.get('stock_name') or '').lower()
                 is_sgb = any(k in ticker or k in name for k in ['sgb', 'gold bond', 'goldbond', 'sovereign', 'sr-'])
                 
-                # SGBs should be around ₹14,000-15,000, not ₹2,000
-                if is_sgb and cp < 9000:
+                # SGBs should be around ₹12,000-15,000, not ₹6,000
+                if is_sgb and cp < 10000:
                     bonds_to_update.append(h)
-                elif cp is None or cp == 0 or cp < ap * 0.5:  # Price is < 50% of avg = likely wrong
+                    is_stale = True
+                elif cp is None or cp == 0 or (ap > 0 and cp < ap * 0.5):  # Price is < 50% of avg = likely wrong
                     bonds_to_update.append(h)
+                    is_stale = True
+                elif ap > 0 and cp < ap * 0.7:  # Current price < 70% of average = likely wrong
+                    bonds_to_update.append(h)
+                    is_stale = True
             
-            # If current_price is None, 0, or exactly equals avg_price → likely stale
-            if cp is None or cp == 0 or abs(cp - ap) < 0.01:
+            # Add to stale_prices if stale (for ALL asset types)
+            if is_stale:
                 stale_prices.append(h)
+        
+        # Show "Refresh All Prices" button if there are stale prices
+        if stale_prices:
+            if st.button(f"🔄 Refresh {len(stale_prices)} Price(s)", help=f"Refresh prices for holdings with missing or stale prices"):
+                with st.spinner(f"Refreshing prices for {len(stale_prices)} holdings..."):
+                    from enhanced_price_fetcher import EnhancedPriceFetcher
+                    price_fetcher = EnhancedPriceFetcher()
+                    price_fetcher.update_live_prices_for_holdings(stale_prices, db)
+                    st.success(f"✅ Refreshed prices for {len(stale_prices)} holdings!")
+                    st.rerun()
         
         # Show bond update button if bonds need updating
         if bonds_to_update:
@@ -1925,44 +1995,24 @@ def portfolio_overview_page():
                     
                     if updated > 0:
                         st.success(f"✅ Updated {updated}/{len(bonds_to_update)} bond price(s)!")
+                        st.rerun()
                     else:
                         st.warning(f"⚠️ No bond prices updated (AI may be unavailable)")
-                    st.rerun()
+                        # Don't rerun if update failed - prevent infinite loop
         
-        if stale_prices:
-            button_text = f"🔄 Update {len(stale_prices)} Prices"
-            help_text = f"{len(stale_prices)} holdings have stale/missing prices (showing 0% return)"
-        else:
-            button_text = "✅ All Current"
-            help_text = "All prices are up-to-date"
-        
-        if st.button(button_text, help=help_text, disabled=(len(stale_prices) == 0)):
-            with st.spinner(f"Fetching prices for {len(stale_prices)} holdings..."):
-                if stale_prices:
-                    # Try to update stale prices using enhanced fetcher with AI fallback
-                    from enhanced_price_fetcher import EnhancedPriceFetcher
-                    price_fetcher = EnhancedPriceFetcher()
-                    
-                    updated = 0
-                    for holding in stale_prices:
-                        ticker = holding.get('ticker')
-                        asset_type = holding.get('asset_type')
-                        stock_name = holding.get('stock_name')
-                        
-                        # Fetch current price with AI fallback
-                        price, source = price_fetcher.get_current_price(ticker, asset_type, stock_name)
-                        
-                        if price and price > 0:
-                            db._store_current_price(ticker, price, asset_type)
-                            updated += 1
-                    
-                    if updated > 0:
-                        st.success(f"✅ Updated {updated}/{len(stale_prices)} prices (some may be delisted)")
+        # Show general "Refresh All Prices" button
+        with col3:
+            if st.button("🔄 Refresh All Prices", help="Refresh current prices for all holdings"):
+                with st.spinner("Refreshing all prices (this may take a minute)..."):
+                    holdings = get_cached_holdings(user['id'])
+                    if holdings:
+                        from enhanced_price_fetcher import EnhancedPriceFetcher
+                        price_fetcher = EnhancedPriceFetcher()
+                        price_fetcher.update_live_prices_for_holdings(holdings, db)
+                        st.success(f"✅ Refreshed prices for {len(holdings)} holdings!")
+                        st.rerun()
                     else:
-                        st.warning(f"⚠️ No prices updated (stocks may be delisted or AI unavailable)")
-                    st.rerun()
-                else:
-                    st.info("All prices are already up-to-date!")
+                        st.warning("No holdings found to update.")
     
     # Use cached holdings data
     holdings = get_cached_holdings(user['id'])
@@ -1986,8 +2036,8 @@ def portfolio_overview_page():
         investment_value = float(holding['total_quantity']) * float(holding['average_price'])
         total_investment += investment_value
         
-        # Get current price - handle None values
-        current_price = holding.get('current_price')
+        # Get current price - handle None values (check both current_price and live_price)
+        current_price = holding.get('current_price') or holding.get('live_price')
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
         
@@ -2025,8 +2075,8 @@ def portfolio_overview_page():
     
     holdings_data = []
     for holding in holdings:
-        # Handle None current_price
-        current_price = holding.get('current_price')
+        # Handle None current_price - check both current_price and live_price fields
+        current_price = holding.get('current_price') or holding.get('live_price')
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
         current_value = float(holding['total_quantity']) * float(current_price) if current_price else 0
@@ -4748,22 +4798,22 @@ def ai_assistant_page():
                         pdf_context_text += f"\n\n📚 PDF DOCUMENTS ({len(recent_pdfs)} total):"
                         for pdf in recent_pdfs[:3]:  # Only last 3 PDFs
                             pdf_context_text += f"\n\n📄 {pdf['filename'][:40]}:"
-                            if pdf.get('ai_summary'):
+                        if pdf.get('ai_summary'):
                                 # Truncate summary to 300 chars to save tokens (was 500)
                                 summary = pdf.get('ai_summary', 'No summary')
                                 pdf_context_text += f"\n{summary[:300]}{'...' if len(summary) > 300 else ''}"
-                            else:
+                        else:
                                 # Truncate PDF text to 300 chars
-                                pdf_text = pdf.get('pdf_text', '')
-                                if pdf_text:
+                            pdf_text = pdf.get('pdf_text', '')
+                            if pdf_text:
                                     pdf_context_text += f"\n{pdf_text[:300]}..."
                         
                         if len(recent_pdfs) > 3:
                             pdf_context_text += f"\n\n... and {len(recent_pdfs) - 3} more PDFs"
-                    
-                    # If no PDFs, note that
-                    if not recent_pdfs:
-                        pdf_context_text = "\n\n📄 No documents uploaded yet."
+                
+                # If no PDFs, note that
+                if not recent_pdfs:
+                    pdf_context_text = "\n\n📄 No documents uploaded yet."
                 
                 # Build context based on question type
                 if needs_data:
