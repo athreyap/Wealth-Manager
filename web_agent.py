@@ -1043,8 +1043,89 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     except (ValueError, TypeError):
                         return default
                 
-                def normalize_date(date_str):
-                    """Convert ANY date format to YYYY-MM-DD"""
+                # Detect dominant date format in CSV by sampling dates
+                def detect_date_format(df, date_column='date'):
+                    """
+                    Detect the dominant date format in the CSV by sampling dates.
+                    Returns 'dayfirst' (DD-MM-YYYY) or 'monthfirst' (MM-DD-YYYY) or None (ambiguous)
+                    """
+                    if date_column not in df.columns:
+                        return None
+                    
+                    # Sample up to 50 non-null dates from the CSV
+                    sample_dates = df[date_column].dropna().head(50).tolist()
+                    if not sample_dates:
+                        return None
+                    
+                    dayfirst_count = 0
+                    monthfirst_count = 0
+                    unambiguous_count = 0
+                    
+                    for date_str in sample_dates:
+                        try:
+                            date_str = str(date_str).strip()
+                            # Remove time part if present
+                            if ' AM' in date_str.upper() or ' PM' in date_str.upper():
+                                date_str = date_str.split()[0]
+                            
+                            # Check if date has numeric parts separated by - or /
+                            parts = date_str.replace('/', '-').replace('.', '-').split('-')
+                            if len(parts) == 3:
+                                try:
+                                    first_part = int(parts[0])
+                                    second_part = int(parts[1])
+                                    
+                                    # If first part > 12, it MUST be DD-MM-YYYY (dayfirst)
+                                    if first_part > 12:
+                                        dayfirst_count += 1
+                                        unambiguous_count += 1
+                                    # If second part > 12, it MUST be MM-DD-YYYY (monthfirst)
+                                    elif second_part > 12:
+                                        monthfirst_count += 1
+                                        unambiguous_count += 1
+                                    # If both <= 12, it's ambiguous - try both and see which makes sense
+                                    else:
+                                        # Try dayfirst
+                                        dt1 = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
+                                        # Try monthfirst
+                                        dt2 = pd.to_datetime(date_str, dayfirst=False, errors='coerce')
+                                        
+                                        if pd.notna(dt1) and pd.notna(dt2):
+                                            # Both parse successfully - check which is more reasonable
+                                            # Prefer dates that are not too far in the future or past
+                                            from datetime import datetime
+                                            today = datetime.now()
+                                            diff1 = abs((dt1 - today).days)
+                                            diff2 = abs((dt2 - today).days)
+                                            
+                                            # If one is clearly more reasonable (closer to today), use that
+                                            if diff1 < diff2:
+                                                dayfirst_count += 0.5  # Half weight for ambiguous
+                                            elif diff2 < diff1:
+                                                monthfirst_count += 0.5
+                                except:
+                                    pass
+                        except:
+                            pass
+                    
+                    # Determine dominant format
+                    if unambiguous_count > 0:
+                        # If we have unambiguous dates, trust them
+                        if dayfirst_count > monthfirst_count:
+                            return 'dayfirst'
+                        elif monthfirst_count > dayfirst_count:
+                            return 'monthfirst'
+                    
+                    # If no clear winner, default to dayfirst for Indian CSVs
+                    return 'dayfirst'
+                
+                # Detect format once for this CSV
+                detected_format = detect_date_format(df)
+                if detected_format:
+                    st.caption(f"   📅 Detected date format: {'DD-MM-YYYY' if detected_format == 'dayfirst' else 'MM-DD-YYYY'}")
+                
+                def normalize_date(date_str, preferred_format=None):
+                    """Convert ANY date format to YYYY-MM-DD with robust format detection"""
                     try:
                         if pd.isna(date_str) or not date_str:
                             return ''
@@ -1056,15 +1137,119 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                         if ' AM' in date_str.upper() or ' PM' in date_str.upper():
                             date_str = date_str.split()[0]
                         
-                        # Use pandas to_datetime - handles most formats automatically!
-                        dt = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
+                        # Try multiple parsing strategies for maximum compatibility
+                        dt = None
                         
+                        # First, check if date is unambiguous (can determine format from values)
+                        parts = date_str.replace('/', '-').replace('.', '-').split('-')
+                        is_ambiguous = False
+                        if len(parts) == 3:
+                            try:
+                                first_part = int(parts[0])
+                                second_part = int(parts[1])
+                                # If first part > 12, it MUST be DD-MM-YYYY (unambiguous)
+                                # If second part > 12, it MUST be MM-DD-YYYY (unambiguous)
+                                # If both <= 12, it's ambiguous
+                                is_ambiguous = (first_part <= 12 and second_part <= 12)
+                            except:
+                                pass
+                        
+                        # For unambiguous dates, use the correct format
+                        # For ambiguous dates, use preferred_format (detected from CSV)
+                        use_dayfirst = preferred_format == 'dayfirst' if preferred_format else True
+                        
+                        # Strategy 1: Try preferred format first (for ambiguous dates) or dayfirst (for unambiguous)
+                        if not is_ambiguous or use_dayfirst:
+                            dt = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
+                            if pd.notna(dt):
+                                # Validate unambiguous dates
+                                if len(parts) == 3:
+                                    try:
+                                        first_part = int(parts[0])
+                                        if first_part > 12:
+                                            return dt.strftime('%Y-%m-%d')  # Definitely DD-MM-YYYY
+                                    except:
+                                        pass
+                                # For ambiguous dates, trust preferred format
+                                if is_ambiguous and use_dayfirst:
+                                    return dt.strftime('%Y-%m-%d')
+                                elif not is_ambiguous:
+                                    return dt.strftime('%Y-%m-%d')
+                        
+                        # Strategy 2: Try opposite format (for ambiguous dates with different preference)
+                        if is_ambiguous and not use_dayfirst:
+                            dt = pd.to_datetime(date_str, dayfirst=False, errors='coerce')
+                            if pd.notna(dt):
+                                return dt.strftime('%Y-%m-%d')
+                        
+                        # Strategy 3: Try both formats and validate (fallback for ambiguous dates)
+                        if is_ambiguous:
+                            dt1 = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
+                            dt2 = pd.to_datetime(date_str, dayfirst=False, errors='coerce')
+                            
+                            if pd.notna(dt1) and pd.notna(dt2):
+                                # Both parse successfully - use preferred format
+                                if use_dayfirst:
+                                    return dt1.strftime('%Y-%m-%d')
+                                else:
+                                    return dt2.strftime('%Y-%m-%d')
+                            elif pd.notna(dt1):
+                                return dt1.strftime('%Y-%m-%d')
+                            elif pd.notna(dt2):
+                                return dt2.strftime('%Y-%m-%d')
+                        
+                        # Strategy 4: Try dayfirst=False for unambiguous dates (if Strategy 1 failed)
+                        if not is_ambiguous:
+                            dt = pd.to_datetime(date_str, dayfirst=False, errors='coerce')
+                            if pd.notna(dt):
+                                # Validate
+                                if len(parts) == 3:
+                                    try:
+                                        second_part = int(parts[1])
+                                        if second_part > 12:
+                                            return dt.strftime('%Y-%m-%d')  # Definitely MM-DD-YYYY
+                                    except:
+                                        pass
+                                return dt.strftime('%Y-%m-%d')
+                        
+                        # Strategy 5: Try infer_datetime_format (auto-detect)
+                        dt = pd.to_datetime(date_str, infer_datetime_format=True, errors='coerce')
                         if pd.notna(dt):
                             return dt.strftime('%Y-%m-%d')
                         
-                        # If pandas failed, return empty
+                        # Strategy 6: Try common explicit formats
+                        common_formats = [
+                            '%d-%m-%Y',      # DD-MM-YYYY
+                            '%d/%m/%Y',      # DD/MM/YYYY
+                            '%m-%d-%Y',      # MM-DD-YYYY
+                            '%m/%d/%Y',      # MM/DD/YYYY
+                            '%Y-%m-%d',      # YYYY-MM-DD
+                            '%Y/%m/%d',      # YYYY/MM/DD
+                            '%d-%m-%y',      # DD-MM-YY
+                            '%d/%m/%y',      # DD/MM/YY
+                            '%m-%d-%y',      # MM-DD-YY
+                            '%m/%d/%y',      # MM/DD/YY
+                            '%d %b %Y',      # DD Mon YYYY (e.g., "10 Oct 2025")
+                            '%d %B %Y',      # DD Month YYYY (e.g., "10 October 2025")
+                            '%b %d, %Y',     # Mon DD, YYYY (e.g., "Oct 10, 2025")
+                            '%B %d, %Y',     # Month DD, YYYY (e.g., "October 10, 2025")
+                            '%Y-%m-%d %H:%M:%S',  # With timestamp
+                            '%d-%m-%Y %H:%M:%S',  # With timestamp
+                        ]
+                        
+                        for fmt in common_formats:
+                            try:
+                                dt = pd.to_datetime(date_str, format=fmt, errors='coerce')
+                                if pd.notna(dt):
+                                    return dt.strftime('%Y-%m-%d')
+                            except:
+                                continue
+                        
+                        # If all strategies failed, return empty
                         return ''
-                    except:
+                    except Exception as e:
+                        # Log error for debugging (but don't break the import)
+                        print(f"[DATE_PARSE_ERROR] Failed to parse date '{date_str}': {str(e)}")
                         return ''
                 
                     imported = 0
@@ -1143,7 +1328,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                             if csv_amount > 0 and csv_quantity > 0:
                                 csv_price = csv_amount / csv_quantity
                         
-                        transaction_date = normalize_date(row['date'])
+                        transaction_date = normalize_date(row['date'], preferred_format=detected_format)
                         
                         # Last resort: Fetch historical price for transaction date if price still missing
                         if csv_price == 0 and transaction_date:
@@ -4377,6 +4562,8 @@ def ai_assistant_page():
         with st.spinner("🤖 AI is thinking..."):
             try:
                 import openai
+                from datetime import datetime
+                import json
                 openai.api_key = st.secrets["api_keys"]["open_ai"]
                 
                 # Safe float conversion helper
@@ -4386,605 +4573,379 @@ def ai_assistant_page():
                     except (ValueError, TypeError):
                         return default
                 
-                # Smart detection: Is this a data-related question or general question?
-                def is_data_related_question(question: str) -> bool:
-                    """Detect if question requires portfolio/transaction data"""
-                    question_lower = question.lower()
-                    
-                    # Data-related keywords
-                    data_keywords = [
-                        'my portfolio', 'my holdings', 'my stocks', 'my investments',
-                        'my transactions', 'my buys', 'my sells', 'my purchases',
-                        'my performance', 'my p&l', 'my profit', 'my loss',
-                        'show me', 'list my', 'what are my', 'how much did i',
-                        'which stocks', 'which funds', 'best performing', 'worst performing',
-                        'top holdings', 'sector', 'asset', 'ticker', 'holding',
-                        'transaction', 'buy', 'sell', 'purchase', 'investment amount',
-                        'current value', 'average price', 'quantity', 'how many',
-                        'last year', '1 year', '6 months', '3 months', 'quarter',
-                        'historical', 'price', 'return', 'gain', 'loss'
-                    ]
-                    
-                    # General question keywords (no data needed)
-                    general_keywords = [
-                        'what is', 'explain', 'how to', 'what are', 'tell me about',
-                        'meaning of', 'definition', 'difference between', 'compare',
-                        'should i', 'is it good', 'is it safe', 'recommendation',
-                        'advice', 'guide', 'tips', 'strategy', 'principle'
-                    ]
-                    
-                    # Check for data-related keywords
-                    has_data_keywords = any(keyword in question_lower for keyword in data_keywords)
-                    
-                    # Check for personal possessive pronouns (my, me, I) + financial terms
-                    personal_finance = any(word in question_lower for word in ['my', 'me', 'i']) and any(
-                        term in question_lower for term in ['portfolio', 'stock', 'fund', 'investment', 'holding', 'transaction']
-                    )
-                    
-                    # If it has data keywords OR personal finance terms, it's data-related
-                    if has_data_keywords or personal_finance:
-                        return True
-                    
-                    # If it's clearly a general question without data context, it's general
-                    has_only_general = any(keyword in question_lower for keyword in general_keywords) and not has_data_keywords
-                    if has_only_general and not personal_finance:
-                        return False
-                    
-                    # Default: include data context (safer to have it than not)
-                    return True
+                # ===== DATABASE QUERY FUNCTIONS FOR AI =====
+                # These functions give the AI direct access to query the database
                 
-                # Detect question type
-                needs_data = is_data_related_question(user_question)
-                
-                # Create streamlined portfolio data context (limit to reduce tokens)
-                raw_data_context = "\n\n📊 PORTFOLIO DATA (Top Holdings):\n"
-                
-                # Only include portfolio data if question is data-related
-                if needs_data and holdings:
-                    # Limit to top 20 holdings to reduce token usage (was 30)
-                    top_holdings = holdings[:20]
-                    for idx, holding in enumerate(top_holdings, 1):
-                        current_price = holding.get('current_price') or holding.get('average_price', 0)
-                        current_value = safe_float(current_price, 0) * safe_float(holding.get('total_quantity'), 0)
-                        investment = safe_float(holding.get('total_quantity'), 0) * safe_float(holding.get('average_price'), 0)
-                        pnl = current_value - investment
-                        pnl_pct = ((current_value - investment) / investment * 100) if investment > 0 else 0
-                        
-                        # Compact format to reduce tokens
-                        raw_data_context += f"{idx}. {holding.get('ticker', 'N/A')} ({holding.get('stock_name', 'N/A')[:25]}) | "
-                        raw_data_context += f"Qty: {holding.get('total_quantity', 0):,.0f} | "
-                        raw_data_context += f"Avg: ₹{holding.get('average_price', 0):,.0f} | "
-                        raw_data_context += f"Curr: ₹{current_price:,.0f} | "
-                        raw_data_context += f"P&L: {pnl_pct:+.1f}%\n"
-                    
-                    if len(holdings) > 20:
-                        raw_data_context += f"\n... and {len(holdings) - 20} more holdings\n"
-                elif needs_data:
-                    raw_data_context += "No holdings found. Upload transaction files to see your portfolio."
-                else:
-                    raw_data_context = ""  # No portfolio data for general questions
-                
-                # Get transactions data (smart filtering based on question) - only if data-related
-                transactions_context = "\n\n📝 TRANSACTION HISTORY:\n"
-                if needs_data:
+                def get_holdings(user_id: str, asset_type: str = None, sector: str = None, limit: int = None) -> str:
+                    """Get user holdings from database. Returns JSON string of holdings data."""
                     try:
+                        query = db.supabase.table('user_holdings_detailed').select('*').eq('user_id', user_id)
+                        if asset_type:
+                            query = query.eq('asset_type', asset_type)
+                        if sector:
+                            query = query.eq('sector', sector)
+                        if limit:
+                            query = query.limit(limit)
+                        response = query.execute()
+                        return json.dumps(response.data if response.data else [], indent=2)
+                    except Exception as e:
+                        return json.dumps({"error": str(e)})
+                
+                def get_transactions(user_id: str, date_from: str = None, date_to: str = None, transaction_type: str = None, ticker: str = None, limit: int = 200) -> str:
+                    """Get user transactions from database. Returns JSON string of transactions data."""
+                    try:
+                        query = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user_id)
+                        if date_from:
+                            query = query.gte('transaction_date', date_from)
+                        if date_to:
+                            query = query.lte('transaction_date', date_to)
+                        if transaction_type:
+                            query = query.eq('transaction_type', transaction_type.lower())
+                        if ticker:
+                            query = query.eq('ticker', ticker)
+                        if limit:
+                            query = query.limit(limit)
+                        response = query.order('transaction_date', desc=True).execute()
+                        return json.dumps(response.data if response.data else [], indent=2)
+                    except Exception as e:
+                        return json.dumps({"error": str(e)})
+                
+                def get_historical_prices(ticker: str, date_from: str = None, date_to: str = None, limit: int = 52) -> str:
+                    """Get historical prices for a ticker. Returns JSON string of historical price data."""
+                    try:
+                        # Get stock_id first
+                        stock_response = db.supabase.table('stock_master').select('id').eq('ticker', ticker).execute()
+                        if not stock_response.data:
+                            return json.dumps({"error": f"Ticker {ticker} not found"})
+                        stock_id = stock_response.data[0]['id']
+                        
+                        # Get historical prices
+                        query = db.supabase.table('historical_prices').select('*').eq('stock_id', stock_id)
+                        if date_from:
+                            query = query.gte('price_date', date_from)
+                        if date_to:
+                            query = query.lte('price_date', date_to)
+                        query = query.order('price_date', desc=True)
+                        if limit:
+                            query = query.limit(limit)
+                        response = query.execute()
+                        return json.dumps(response.data if response.data else [], indent=2)
+                    except Exception as e:
+                        return json.dumps({"error": str(e)})
+                
+                def get_stock_master(ticker: str = None, asset_type: str = None, limit: int = 100) -> str:
+                    """Get stock master data. Returns JSON string of stock master records."""
+                    try:
+                        query = db.supabase.table('stock_master').select('*')
+                        if ticker:
+                            query = query.eq('ticker', ticker)
+                        if asset_type:
+                            query = query.eq('asset_type', asset_type)
+                        if limit:
+                            query = query.limit(limit)
+                        response = query.execute()
+                        return json.dumps(response.data if response.data else [], indent=2)
+                    except Exception as e:
+                        return json.dumps({"error": str(e)})
+                
+                def get_pdfs(user_id: str = None, search_term: str = None, limit: int = 10) -> str:
+                    """Get PDF documents and their summaries. Returns JSON string of PDF data."""
+                    try:
+                        pdfs = db.get_user_pdfs(user_id) if user_id else db.get_user_pdfs()
+                        if search_term:
+                            search_lower = search_term.lower()
+                            pdfs = [p for p in pdfs if search_lower in (p.get('filename', '') + p.get('ai_summary', '')).lower()]
+                        if limit:
+                            pdfs = pdfs[:limit]
+                        return json.dumps(pdfs, indent=2, default=str)
+                    except Exception as e:
+                        return json.dumps({"error": str(e)})
+                
+                def get_financial_news(ticker: str = None, company_name: str = None, sector: str = None, limit: int = 10) -> str:
+                    """Get latest financial news from Moneycontrol, Economic Times, and other sources. Returns JSON string of news articles."""
+                    try:
+                        import requests
+                        from bs4 import BeautifulSoup
                         from datetime import datetime, timedelta
                         
-                        # Detect if question asks about specific time period
-                        question_lower = user_question.lower()
-                        date_filter = None
-                        transaction_type_filter = None
+                        news_articles = []
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                        }
                         
-                        # Check for time period filters (more comprehensive detection)
-                        one_year_ago = datetime.now() - timedelta(days=365)
-                        six_months_ago = datetime.now() - timedelta(days=180)
-                        three_months_ago = datetime.now() - timedelta(days=90)
-                        
-                        if any(word in question_lower for word in ['1 year', 'one year', 'last year', 'past year', 'year ago', '365 days']):
-                            date_filter = one_year_ago.date().isoformat()
-                            transactions_context += f"📅 Filtered: Transactions from last 1 year (since {date_filter})\n"
-                        elif any(word in question_lower for word in ['6 months', 'six months', 'half year', '180 days']):
-                            date_filter = six_months_ago.date().isoformat()
-                            transactions_context += f"📅 Filtered: Transactions from last 6 months (since {date_filter})\n"
-                        elif any(word in question_lower for word in ['3 months', 'three months', 'quarter', '90 days']):
-                            date_filter = three_months_ago.date().isoformat()
-                            transactions_context += f"📅 Filtered: Transactions from last 3 months (since {date_filter})\n"
-                        
-                        # Check for transaction type filters
-                        if 'buy' in question_lower or 'purchase' in question_lower:
-                            transaction_type_filter = 'buy'
-                            transactions_context += f"📊 Filtered: BUY transactions only\n"
-                        elif 'sell' in question_lower:
-                            transaction_type_filter = 'sell'
-                            transactions_context += f"📊 Filtered: SELL transactions only\n"
-                        
-                        # Build query with filters - always filter by user_id
-                        # Use user_transactions_detailed view which includes ticker directly
-                        query = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user['id'])
-                        
-                        if date_filter:
-                            query = query.gte('transaction_date', date_filter)
-                        
-                        if transaction_type_filter:
-                            query = query.eq('transaction_type', transaction_type_filter)
-                        
-                        # Get filtered transactions, ordered by date
-                        # Increase limit when filters are applied to get more relevant data
-                        limit = 200 if (date_filter or transaction_type_filter) else 15
-                        all_transactions = query.order('transaction_date', desc=True).limit(limit).execute()
-                        
-                        if all_transactions.data:
-                            # Calculate summary statistics for filtered transactions
-                            total_investment = 0
-                            ticker_price_map = {}  # Track current prices for tickers
+                        # 1. Moneycontrol - Try multiple approaches
+                        try:
+                            moneycontrol_urls = []
                             
-                            # Get unique tickers from transactions
-                            unique_tickers = set()
-                            for trans in all_transactions.data:
-                                ticker = trans.get('ticker')
-                                if ticker:
-                                    unique_tickers.add(ticker)
+                            # Approach 1: Ticker-specific news (if ticker provided)
+                            if ticker:
+                                clean_ticker = ticker.replace('.NS', '').replace('.BO', '').upper()
+                                # Try different Moneycontrol URL patterns
+                                moneycontrol_urls.append(f"https://www.moneycontrol.com/news/tags/{clean_ticker.lower()}.html")
+                                moneycontrol_urls.append(f"https://www.moneycontrol.com/news/tags/{clean_ticker}.html")
+                                # Try company page news
+                                moneycontrol_urls.append(f"https://www.moneycontrol.com/india/stockpricequote/{clean_ticker.lower()}")
                             
-                            # Fetch current prices for these tickers
-                            # Priority: stock_master.live_price (updated during login) > holdings > average_price
+                            # Approach 2: General market news (always try)
+                            moneycontrol_urls.append("https://www.moneycontrol.com/news/business/")
+                            moneycontrol_urls.append("https://www.moneycontrol.com/news/business/markets/")
+                            moneycontrol_urls.append("https://www.moneycontrol.com/news/business/stocks/")
                             
-                            # Method 1: Fetch all prices from stock_master in one query (most efficient)
-                            try:
-                                if unique_tickers:
-                                    tickers_list = list(unique_tickers)[:100]  # Limit to 100 tickers
-                                    stock_response = db.supabase.table('stock_master').select('ticker, live_price, asset_type').in_('ticker', tickers_list).execute()
-                                    if stock_response.data:
-                                        for stock in stock_response.data:
-                                            ticker = stock.get('ticker')
-                                            live_price = stock.get('live_price')
-                                            if ticker and live_price:
-                                                price_val = safe_float(live_price, 0)
-                                                if price_val > 0:
-                                                    ticker_price_map[ticker] = price_val
-                            except:
-                                pass
+                            # Approach 3: Sector-specific news
+                            if sector:
+                                sector_lower = sector.lower().replace(' ', '-')
+                                moneycontrol_urls.append(f"https://www.moneycontrol.com/news/tags/{sector_lower}.html")
                             
-                            # Method 2: For any missing prices, check cached holdings
-                            for ticker in unique_tickers:
-                                if ticker not in ticker_price_map:
-                                    # Try to get from cached holdings first
-                                    for holding in holdings:
-                                        if holding.get('ticker') == ticker:
-                                            current_price = holding.get('current_price') or holding.get('live_price') or holding.get('average_price', 0)
-                                            if current_price and safe_float(current_price, 0) > 0:
-                                                ticker_price_map[ticker] = safe_float(current_price, 0)
-                                                break
-                            
-                            # Method 3: For any still missing, fetch from holdings_detailed
-                            missing_tickers = [t for t in unique_tickers if t not in ticker_price_map]
-                            if missing_tickers:
+                            # Try each URL until we get results
+                            for url in moneycontrol_urls[:3]:  # Limit to 3 URLs to avoid too many requests
                                 try:
-                                    holding_data = db.get_user_holdings_detailed(user['id'])
-                                    for holding in holding_data:
-                                        ticker = holding.get('ticker')
-                                        if ticker in missing_tickers:
-                                            current_price = holding.get('current_price') or holding.get('live_price') or holding.get('average_price', 0)
-                                            if current_price and safe_float(current_price, 0) > 0:
-                                                ticker_price_map[ticker] = safe_float(current_price, 0)
-                                except:
-                                    pass
-                            
-                            # Method 4: Last resort - use price_fetcher for any remaining missing prices
-                            still_missing = [t for t in unique_tickers if t not in ticker_price_map]
-                            if still_missing and hasattr(st.session_state, 'price_fetcher') and st.session_state.price_fetcher:
-                                # Get asset types from stock_master query above
-                                asset_type_map = {}
-                                if stock_response and stock_response.data:
-                                    for stock in stock_response.data:
-                                        asset_type_map[stock.get('ticker')] = stock.get('asset_type', 'stock')
-                                
-                                for ticker in still_missing[:10]:  # Limit to 10 to avoid too many API calls
-                                    try:
-                                        asset_type = asset_type_map.get(ticker, 'stock')
-                                        price, source = st.session_state.price_fetcher.get_current_price(ticker, asset_type)
-                                        if price and price > 0:
-                                            ticker_price_map[ticker] = safe_float(price, 0)
-                                    except:
-                                        pass
-                            
-                            # Calculate totals (if filtering by transaction_type, only count that type)
-                            for trans in all_transactions.data:
-                                qty = safe_float(trans.get('quantity', 0), 0)
-                                price = safe_float(trans.get('price', 0), 0)
-                                trans_type = trans.get('transaction_type', '').lower()
-                                if transaction_type_filter:
-                                    # If filtering by type, only count that type
-                                    if trans_type == transaction_type_filter:
-                                        if trans_type == 'buy':
-                                            total_investment += qty * price
-                                        elif trans_type == 'sell':
-                                            total_investment += qty * price  # For sell analysis, track sell proceeds
-                                else:
-                                    # If no filter, include both buy and sell
-                                    if trans_type == 'buy':
-                                        total_investment += qty * price
-                                    elif trans_type == 'sell':
-                                        total_investment -= qty * price  # Subtract sell proceeds
-                            
-                            transactions_context += f"Total filtered transactions: {len(all_transactions.data)}\n"
-                            transactions_context += f"📊 CALCULATED SUMMARY FOR FILTERED TRANSACTIONS:\n"
-                            transactions_context += f"   Total Investment: ₹{total_investment:,.2f}\n"
-                            
-                            # Calculate current value and P&L if we have prices
-                            if ticker_price_map and len(ticker_price_map) > 0:
-                                total_current_value = 0
-                                ticker_quantities = {}  # Track net quantity per ticker from filtered transactions
-                                
-                                # First, identify which tickers were bought in the filtered period
-                                tickers_bought_in_period = set()
-                                for trans in all_transactions.data:
-                                    trans_type = trans.get('transaction_type', '').lower()
-                                    ticker = trans.get('ticker')
-                                    if trans_type == 'buy' and ticker:
-                                        tickers_bought_in_period.add(ticker)
-                                
-                                # Get ALL transactions for these tickers (to account for sells that happened after the filter period)
-                                # This ensures we calculate net quantity correctly: buys from last year minus ALL sells
-                                if tickers_bought_in_period and date_filter:
-                                    try:
-                                        # Get all transactions with ticker info via stock_master join
-                                        # Use the user_transactions_detailed view which already has ticker
-                                        all_trans_response = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user['id']).in_('ticker', list(tickers_bought_in_period)).order('transaction_date', desc=False).limit(1000).execute()
-                                        if all_trans_response.data:
-                                            all_transactions_for_calc = all_trans_response.data
-                                        else:
-                                            all_transactions_for_calc = all_transactions.data
-                                    except Exception as e:
-                                        # Fallback to using filtered transactions only
-                                        all_transactions_for_calc = all_transactions.data
-                                else:
-                                    all_transactions_for_calc = all_transactions.data
-                                
-                                # Calculate net quantities - only count buys from filtered period, but subtract ALL sells
-                                for trans in all_transactions_for_calc:
-                                    trans_type = trans.get('transaction_type', '').lower()
-                                    # Handle both direct ticker and nested ticker from stock_master join
-                                    ticker = trans.get('ticker')
-                                    qty = safe_float(trans.get('quantity', 0), 0)
-                                    trans_date = trans.get('transaction_date')
-                                    
-                                    if ticker and ticker in ticker_price_map:
-                                        if ticker not in ticker_quantities:
-                                            ticker_quantities[ticker] = 0
+                                    response = requests.get(url, headers=headers, timeout=10)
+                                    if response.status_code == 200:
+                                        soup = BeautifulSoup(response.content, 'html.parser')
                                         
-                                        # If we have date filter AND transaction type filter (e.g., "1 year buy transactions")
-                                        if date_filter and transaction_type_filter == 'buy':
-                                            # Only count buys from the filtered date period
-                                            if trans_type == 'buy' and trans_date and str(trans_date) >= date_filter:
-                                                ticker_quantities[ticker] += qty
-                                            # Subtract ALL sells (even if outside the date range)
-                                            elif trans_type == 'sell':
-                                                ticker_quantities[ticker] -= qty
-                                        # If only date filter (no transaction type filter)
-                                        elif date_filter and not transaction_type_filter:
-                                            # Count buys from filtered period, subtract sells from filtered period
-                                            if trans_type == 'buy' and trans_date and str(trans_date) >= date_filter:
-                                                ticker_quantities[ticker] += qty
-                                            elif trans_type == 'sell' and trans_date and str(trans_date) >= date_filter:
-                                                ticker_quantities[ticker] -= qty
-                                        # If only transaction type filter (no date filter)
-                                        elif transaction_type_filter and not date_filter:
-                                            if trans_type == transaction_type_filter:
-                                                ticker_quantities[ticker] += qty
-                                        # No filters - count all buys and subtract all sells
-                                        else:
-                                            if trans_type == 'buy':
-                                                ticker_quantities[ticker] += qty
-                                            elif trans_type == 'sell':
-                                                ticker_quantities[ticker] -= qty
-                                
-                                for ticker, qty in ticker_quantities.items():
-                                    if ticker in ticker_price_map and qty > 0:
-                                        total_current_value += qty * ticker_price_map[ticker]
-                                
-                                total_pnl = total_current_value - total_investment
-                                total_pnl_pct = (total_pnl / total_investment * 100) if total_investment > 0 else 0
-                                
-                                transactions_context += f"   Total Current Value: ₹{total_current_value:,.2f}\n"
-                                transactions_context += f"   Total P&L: ₹{total_pnl:+,.2f} ({total_pnl_pct:+.2f}%)\n"
-                                transactions_context += f"   ✅ Current prices available for {len(ticker_price_map)} ticker(s)\n"
-                            else:
-                                transactions_context += f"   ⚠️ Current prices not available - cannot calculate current value or P&L\n"
-                                transactions_context += f"   💡 Suggestion: Update prices using the 'Update Stale Prices' button\n"
-                            
-                            # Fetch historical price data for analysis (only if date filter is applied)
-                            historical_data_context = ""
-                            if unique_tickers and date_filter:
-                                try:
-                                    historical_data_context += f"\n📊 HISTORICAL PRICE DATA FOR FILTERED TICKERS:\n"
-                                    
-                                    # Get historical prices for each ticker
-                                    for ticker in list(unique_tickers)[:20]:  # Limit to top 20 tickers to avoid too much data
-                                        try:
-                                            # Get stock_id for this ticker
-                                            stock_response = db.supabase.table('stock_master').select('id').eq('ticker', ticker).execute()
-                                            if stock_response.data:
-                                                stock_id = stock_response.data[0]['id']
+                                        # Try multiple selectors for Moneycontrol's article structure
+                                        articles = []
+                                        
+                                        # Selector 1: Standard news list
+                                        articles.extend(soup.find_all('li', class_='clearfix', limit=limit))
+                                        
+                                        # Selector 2: Article cards
+                                        if not articles:
+                                            articles.extend(soup.find_all('div', class_='newslist', limit=limit))
+                                        
+                                        # Selector 3: Generic article links
+                                        if not articles:
+                                            articles.extend(soup.find_all('a', href=lambda x: x and '/news/' in x, limit=limit))
+                                        
+                                        for article in articles[:limit]:
+                                            try:
+                                                # Try to find title
+                                                title_elem = (article.find('h2') or 
+                                                            article.find('h3') or 
+                                                            article.find('a', class_=lambda x: x and 'title' in str(x).lower()) or
+                                                            article.find('a'))
                                                 
-                                                # Get historical prices (52 weeks)
-                                                hist_response = db.supabase.table('historical_prices').select('price_date, price').eq('stock_id', stock_id).order('price_date', desc=True).limit(52).execute()
+                                                # Try to find link
+                                                link_elem = article.find('a') if not isinstance(article, type(soup.find('a'))) else article
                                                 
-                                                if hist_response.data:
-                                                    prices = hist_response.data
-                                                    # Find prices at key dates
-                                                    trans_dates_for_ticker = [
-                                                        t.get('transaction_date') for t in all_transactions.data 
-                                                        if t.get('ticker') == ticker
-                                                    ]
-                                                    
-                                                    # Get min/max prices
-                                                    price_values = [safe_float(p.get('price', 0), 0) for p in prices if p.get('price')]
-                                                    if price_values:
-                                                        min_price = min(price_values)
-                                                        max_price = max(price_values)
-                                                        latest_price = price_values[0] if price_values else 0
-                                                        oldest_price = price_values[-1] if price_values else 0
+                                                if title_elem:
+                                                    title = title_elem.get_text(strip=True)
+                                                    if title and len(title) > 10:  # Valid title
+                                                        url_link = ""
+                                                        if link_elem and hasattr(link_elem, 'get'):
+                                                            url_link = link_elem.get('href', '')
+                                                            # Make absolute URL if relative
+                                                            if url_link and not url_link.startswith('http'):
+                                                                url_link = f"https://www.moneycontrol.com{url_link}" if url_link.startswith('/') else f"https://www.moneycontrol.com/{url_link}"
                                                         
-                                                        historical_data_context += f"\n{ticker}:\n"
-                                                        historical_data_context += f"  📈 52-week High: ₹{max_price:,.2f}\n"
-                                                        historical_data_context += f"  📉 52-week Low: ₹{min_price:,.2f}\n"
-                                                        historical_data_context += f"  📅 Oldest Price ({prices[-1].get('price_date', 'N/A')}): ₹{oldest_price:,.2f}\n"
-                                                        historical_data_context += f"  📅 Latest Price ({prices[0].get('price_date', 'N/A')}): ₹{latest_price:,.2f}\n"
+                                                        # Try to find date
+                                                        date_elem = (article.find('span', class_='date') or 
+                                                                   article.find('span', class_=lambda x: x and 'date' in str(x).lower()) or
+                                                                   article.find('time'))
+                                                        date_str = date_elem.get_text(strip=True) if date_elem else datetime.now().strftime("%Y-%m-%d")
                                                         
-                                                        # Show price at transaction dates if available
-                                                        for trans_date in trans_dates_for_ticker[:5]:  # Limit to 5 transactions per ticker
-                                                            # Find closest price to transaction date
-                                                            closest_price = None
-                                                            closest_date = None
-                                                            min_diff = float('inf')
-                                                            
-                                                            for hist_price in prices:
-                                                                hist_date = hist_price.get('price_date')
-                                                                if hist_date:
-                                                                    try:
-                                                                        from datetime import datetime
-                                                                        trans_dt = datetime.strptime(str(trans_date), '%Y-%m-%d').date() if isinstance(trans_date, str) else trans_date
-                                                                        hist_dt = datetime.strptime(str(hist_date), '%Y-%m-%d').date() if isinstance(hist_date, str) else hist_date
-                                                                        diff = abs((trans_dt - hist_dt).days)
-                                                                        if diff < min_diff:
-                                                                            min_diff = diff
-                                                                            closest_price = safe_float(hist_price.get('price', 0), 0)
-                                                                            closest_date = hist_date
-                                                                    except Exception:
-                                                                        pass
-                                                            
-                                                            if closest_price and closest_date:
-                                                                historical_data_context += f"  💰 Price on {trans_date}: ₹{closest_price:,.2f} (closest: {closest_date})\n"
-                                        except Exception:
-                                            pass
+                                                        news_articles.append({
+                                                            "title": title,
+                                                            "url": url_link,
+                                                            "source": "Moneycontrol",
+                                                            "date": date_str,
+                                                            "ticker": ticker if ticker else None,
+                                                            "sector": sector if sector else None
+                                                        })
+                                                        
+                                                        if len(news_articles) >= limit:
+                                                            break
+                                            except Exception:
+                                                continue
+                                        
+                                        if len(news_articles) >= limit:
+                                            break
                                 except Exception:
-                                    pass
-                            
-                            if historical_data_context:
-                                transactions_context += historical_data_context
-                            
-                            transactions_context += f"\n📝 DETAILED TRANSACTIONS:\n"
-                            # Show all transactions if filtered (up to 50), otherwise limit to 15
-                            display_limit = min(50, len(all_transactions.data)) if (date_filter or transaction_type_filter) else 15
-                            for trans in all_transactions.data[:display_limit]:
-                                qty = safe_float(trans.get('quantity', 0), 0)
-                                price = safe_float(trans.get('price', 0), 0)
-                                amount = qty * price
-                                ticker = trans.get('ticker', 'N/A')
-                                current_price = ticker_price_map.get(ticker, 0)
-                                
-                                # Compact format with investment amount
-                                transactions_context += f"{trans.get('transaction_date', 'N/A')} | "
-                                transactions_context += f"{ticker} | "
-                                transactions_context += f"{trans.get('transaction_type', 'N/A')} | "
-                                transactions_context += f"Qty: {qty:,.2f} | "
-                                transactions_context += f"Price: ₹{price:,.2f} | "
-                                transactions_context += f"Investment: ₹{amount:,.2f}"
-                                if current_price > 0:
-                                    current_val = qty * current_price
-                                    trans_pnl = current_val - amount
-                                    transactions_context += f" | Current: ₹{current_val:,.2f} | P&L: ₹{trans_pnl:+,.2f}"
-                                transactions_context += "\n"
-                            
-                            if len(all_transactions.data) > display_limit:
-                                transactions_context += f"\n... and {len(all_transactions.data) - display_limit} more transactions\n"
-                            else:
-                                transactions_context += "No transactions found matching filters.\n"
-                    except Exception as e:
-                        transactions_context += f"Error loading transactions: {str(e)[:100]}\n"
-                else:
-                    transactions_context = ""  # No transaction data for general questions
-                
-                # Include PDF context (only if data-related or question mentions PDFs/research)
-                pdf_context_text = ""
-                question_lower = user_question.lower()
-                mentions_research = any(word in question_lower for word in ['pdf', 'research', 'document', 'report', 'analysis', 'recommendation'])
-                
-                if needs_data or mentions_research:
-                    # Include PDF summaries (limited to reduce tokens)
-                    recent_pdfs = db.get_user_pdfs(user['id'])
-                    if recent_pdfs:
-                        # Limit to last 3 PDFs and truncate summaries (was 5 PDFs, 500 chars)
-                        pdf_context_text += f"\n\n📚 PDF DOCUMENTS ({len(recent_pdfs)} total):"
-                        for pdf in recent_pdfs[:3]:  # Only last 3 PDFs
-                            pdf_context_text += f"\n\n📄 {pdf['filename'][:40]}:"
-                        if pdf.get('ai_summary'):
-                                # Truncate summary to 300 chars to save tokens (was 500)
-                                summary = pdf.get('ai_summary', 'No summary')
-                                pdf_context_text += f"\n{summary[:300]}{'...' if len(summary) > 300 else ''}"
-                        else:
-                                # Truncate PDF text to 300 chars
-                            pdf_text = pdf.get('pdf_text', '')
-                            if pdf_text:
-                                    pdf_context_text += f"\n{pdf_text[:300]}..."
+                                    continue
+                                    
+                        except Exception as e:
+                            pass  # Moneycontrol failed, try other sources
                         
-                        if len(recent_pdfs) > 3:
-                            pdf_context_text += f"\n\n... and {len(recent_pdfs) - 3} more PDFs"
+                        # 2. Use AI to fetch news if web scraping fails or for general queries
+                        if len(news_articles) < limit:
+                            try:
+                                # Use OpenAI to get recent financial news (GPT-5 has knowledge up to its training date)
+                                news_query = f"Latest financial news"
+                                if ticker:
+                                    news_query += f" about {ticker}"
+                                if company_name:
+                                    news_query += f" ({company_name})"
+                                if sector:
+                                    news_query += f" in {sector} sector"
+                                
+                                # Note: This uses AI's training knowledge, not real-time web access
+                                # For true real-time news, you'd need a news API like NewsAPI, Alpha Vantage, etc.
+                                ai_news_response = openai.chat.completions.create(
+                                    model="gpt-5",
+                                    messages=[{
+                                        "role": "user",
+                                        "content": f"Provide the latest financial news and market updates {news_query}. Include recent developments, market trends, and any significant events. Format as a list of news items with titles and brief summaries."
+                                    }],
+                                    max_completion_tokens=1000
+                                )
+                                
+                                if ai_news_response.choices:
+                                    ai_news_text = ai_news_response.choices[0].message.content
+                                    # Parse AI response into structured format
+                                    news_articles.append({
+                                        "title": "AI-Generated Market Update",
+                                        "content": ai_news_text,
+                                        "source": "AI Analysis (Training Data)",
+                                        "date": datetime.now().strftime("%Y-%m-%d"),
+                                        "note": "Based on AI training data - may not include very recent news"
+                                    })
+                            except Exception as e:
+                                pass
+                        
+                        # If no news found, return a helpful message
+                        if not news_articles:
+                            return json.dumps({
+                                "message": "No recent news found. For real-time financial news, consider integrating NewsAPI, Alpha Vantage News API, or other financial news services.",
+                                "suggestions": [
+                                    "Use NewsAPI.org for real-time news",
+                                    "Use Alpha Vantage News & Sentiment API",
+                                    "Scrape Moneycontrol, Economic Times, or Business Standard",
+                                    "Use RSS feeds from financial news sources"
+                                ]
+                            }, indent=2)
+                        
+                        return json.dumps(news_articles[:limit], indent=2, default=str)
+                    except Exception as e:
+                        return json.dumps({"error": str(e), "message": "Financial news fetching failed. Consider using a dedicated news API for real-time updates."})
                 
-                # If no PDFs, note that
-                if not recent_pdfs:
-                    pdf_context_text = "\n\n📄 No documents uploaded yet."
+                # Define OpenAI function tools
+                functions = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_holdings",
+                            "description": "Get user holdings from the database. Use this to query portfolio holdings, filter by asset_type (stock, mutual_fund, bond, pms, aif) or sector, and limit results.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "user_id": {"type": "string", "description": "User ID (required)"},
+                                    "asset_type": {"type": "string", "description": "Filter by asset type: stock, mutual_fund, bond, pms, aif"},
+                                    "sector": {"type": "string", "description": "Filter by sector"},
+                                    "limit": {"type": "integer", "description": "Maximum number of records to return"}
+                                },
+                                "required": ["user_id"]
+                            }
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_transactions",
+                            "description": "Get user transactions from the database. Use this to query transaction history, filter by date range, transaction type (buy/sell), or ticker.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "user_id": {"type": "string", "description": "User ID (required)"},
+                                    "date_from": {"type": "string", "description": "Start date (YYYY-MM-DD format)"},
+                                    "date_to": {"type": "string", "description": "End date (YYYY-MM-DD format)"},
+                                    "transaction_type": {"type": "string", "description": "Filter by transaction type: buy or sell"},
+                                    "ticker": {"type": "string", "description": "Filter by ticker symbol"},
+                                    "limit": {"type": "integer", "description": "Maximum number of records to return (default 200)"}
+                                },
+                                "required": ["user_id"]
+                            }
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_historical_prices",
+                            "description": "Get historical price data for a ticker. Use this to analyze price trends, 52-week highs/lows, and price movements over time.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "ticker": {"type": "string", "description": "Ticker symbol (required)"},
+                                    "date_from": {"type": "string", "description": "Start date (YYYY-MM-DD format)"},
+                                    "date_to": {"type": "string", "description": "End date (YYYY-MM-DD format)"},
+                                    "limit": {"type": "integer", "description": "Maximum number of records to return (default 52 for 52 weeks)"}
+                                },
+                                "required": ["ticker"]
+                            }
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_stock_master",
+                            "description": "Get stock master data including ticker information, asset types, sectors, and current prices. Use this to get metadata about stocks, mutual funds, bonds, etc.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "ticker": {"type": "string", "description": "Filter by specific ticker"},
+                                    "asset_type": {"type": "string", "description": "Filter by asset type: stock, mutual_fund, bond, pms, aif"},
+                                    "limit": {"type": "integer", "description": "Maximum number of records to return"}
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_pdfs",
+                            "description": "Get PDF documents and their AI summaries from the shared library. Use this to access research documents, reports, and analysis that can inform recommendations.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "user_id": {"type": "string", "description": "User ID (optional, if not provided returns all shared PDFs)"},
+                                    "search_term": {"type": "string", "description": "Search term to filter PDFs by filename or content"},
+                                    "limit": {"type": "integer", "description": "Maximum number of records to return"}
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_financial_news",
+                            "description": "Get latest financial news and market updates from Moneycontrol, Economic Times, and other sources. Use this to access real-time financial news, market trends, company updates, and sector news. Note: Currently uses web scraping and AI knowledge - for true real-time news, consider integrating NewsAPI or Alpha Vantage News API.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "ticker": {"type": "string", "description": "Stock ticker symbol (e.g., 'RELIANCE.NS', 'TCS.NS') to get news about a specific stock"},
+                                    "company_name": {"type": "string", "description": "Company name to search for news"},
+                                    "sector": {"type": "string", "description": "Sector name (e.g., 'Technology', 'Banking') to get sector-specific news"},
+                                    "limit": {"type": "integer", "description": "Maximum number of news articles to return (default 10)"}
+                                }
+                            }
+                        }
+                    }
+                ]
                 
-                # Build context based on question type
-                if needs_data:
-                    # Data-related question: Include full context
-                    # Truncate portfolio summary if too long (reduced from 2000 to 1500)
-                    summary_text = portfolio_summary[:1500] + "..." if len(portfolio_summary) > 1500 else portfolio_summary
-                    
-                    # Get current date for context
-                    current_date = datetime.now().strftime("%Y-%m-%d")
-                    current_year = datetime.now().year
-                    
-                    full_context = f"""📅 CURRENT DATE: {current_date} (Year: {current_year})
-⚠️ IMPORTANT: Today's date is {current_date}. Use this date for all time-based calculations and references.
-
-📊 PORTFOLIO DATA (User ID: {user['id']}):
-{raw_data_context}
-
-📈 PORTFOLIO SUMMARY:
-{summary_text}
-
-📝 TRANSACTION HISTORY (Filtered based on your question):
-{transactions_context}
-
-📚 RESEARCH DOCUMENTS:
-{pdf_context_text}
-
-❓ YOUR QUESTION: {user_question}
-
-💡 ANALYSIS INSTRUCTIONS:
-- You have access to ALL transactions for this user (user_id: {user['id']})
-- The transaction data above is FILTERED based on keywords in your question
-- ⚠️ **CRITICAL**: Look for the "📊 CALCULATED SUMMARY FOR FILTERED TRANSACTIONS" section above
-- If you see "Total Current Value" and "Total P&L" in that section, USE THOSE EXACT NUMBERS - they are already calculated
-- If you see "⚠️ Current prices not available", explain that prices need to be updated first
-- REQUIRED: When Current Value and P&L are provided, you MUST use them - do NOT say "we cannot calculate"
-- 📊 HISTORICAL PRICE DATA is provided for filtered tickers - use it to analyze:
-  * When buys/sells would have been most profitable (compare transaction prices vs 52-week high/low)
-  * Price trends and timing analysis
-  * Opportunity cost analysis (e.g., "If you had sold at the 52-week high...")
-- 📚 RESEARCH DOCUMENTS (PDFs) are provided above - use them to:
-  * Suggest BUY recommendations for stocks/ETFs/MFs mentioned in research documents
-  * Suggest SELL recommendations based on research findings or overvaluation concerns
-  * Analyze alignment between current holdings and research recommendations
-  * Provide actionable insights like: "Based on the research document X, consider buying TICKER because..."
-- 🎯 YOU CAN PROACTIVELY SUGGEST BUYS/SELLS based on:
-  * PDF research content and AI summaries
-  * Current portfolio performance and diversification gaps
-  * Historical price trends and opportunities
-  * Risk assessment and portfolio balance
-- 🔮 YOU CAN MAKE PREDICTIONS AND FORECASTS:
-  * Stock price movements and targets ("I predict TICKER could reach ₹X in Y months")
-  * Market trends and sector outlook ("The technology sector is likely to...")
-  * Economic indicators impact ("Given current inflation trends...")
-  * Short/medium-term forecasts with reasoning
-  * Risk and volatility predictions
-  * Market timing recommendations ("Consider waiting for pullback before buying")
-- Always cite the exact numbers from the CALCULATED SUMMARY section
-- Format: "Total Investment: ₹X, Total Current Value: ₹Y, Total P&L: ₹Z (W%)"
-- Compare filtered performance with overall portfolio performance when relevant
-- Provide specific, actionable recommendations with tickers and reasoning"""
-                else:
-                    # General question: Minimal context, focus on general knowledge
-                    # Get current date for context
-                    current_date = datetime.now().strftime("%Y-%m-%d")
-                    current_year = datetime.now().year
-                    
-                    full_context = f"""You are an expert financial advisor and portfolio analyst. The user is asking a general financial/investment question.
-
-📅 CURRENT DATE: {current_date} (Year: {current_year})
-⚠️ IMPORTANT: Today's date is {current_date}. Use this date for all time-based references and calculations.
-
-❓ USER QUESTION: {user_question}
-
-💡 INSTRUCTIONS FOR GENERAL QUESTIONS:
-- Use your comprehensive knowledge of finance, investing, and portfolio management
-- Provide clear, accurate, and helpful explanations
-- If the question is about investment concepts (diversification, SIP, risk, etc.), explain them thoroughly
-- If the question asks for advice, provide general best practices and principles
-- You can reference your knowledge of the Indian stock market and financial instruments
-- If relevant, mention that the user can ask specific questions about their portfolio data (e.g., "show my portfolio performance") to get personalized insights
-- Be conversational, educational, and practical
-- Do NOT make up specific portfolio data - only use data if explicitly provided above"""
+                # Get current date for context
+                current_date = datetime.now().strftime("%Y-%m-%d")
+                current_year = datetime.now().year
                 
-                # Estimate tokens and warn if too large (only for data-related questions)
-                approx_tokens = len(full_context) // 4
-                if approx_tokens > 25000:  # Warn if approaching limit
-                    st.warning(f"⚠️ Large context: ~{approx_tokens:,} tokens. Reducing further...")
-                    # Further reduce by truncating summary
-                    summary_text = portfolio_summary[:1000] + "..."
-                    # Get current date for context
-                    current_date = datetime.now().strftime("%Y-%m-%d")
-                    current_year = datetime.now().year
-                    
-                    full_context = f"""📅 CURRENT DATE: {current_date} (Year: {current_year})
-⚠️ IMPORTANT: Today's date is {current_date}. Use this date for all time-based calculations and references.
+                # Prepare session dataframes summary (available in memory)
+                session_data_summary = f"""
+📊 SESSION DATA AVAILABLE (Already loaded in memory):
+- Holdings DataFrame: {len(holdings)} holdings loaded
+- Portfolio Summary: Available
+- PDF Context: {len(user_pdfs)} PDFs loaded
+- User ID: {user['id']}
 
-📊 PORTFOLIO DATA (User ID: {user['id']}):
-{raw_data_context}
-
-📈 PORTFOLIO SUMMARY:
-{summary_text}
-
-📝 TRANSACTION HISTORY (Filtered based on your question):
-{transactions_context}
-
-📚 RESEARCH DOCUMENTS:
-{pdf_context_text}
-
-❓ YOUR QUESTION: {user_question}
-
-💡 ANALYSIS INSTRUCTIONS:
-- You have access to ALL transactions for this user (user_id: {user['id']})
-- The transaction data above is FILTERED based on keywords in your question
-- ⚠️ **CRITICAL**: Look for the "📊 CALCULATED SUMMARY FOR FILTERED TRANSACTIONS" section above
-- If you see "Total Current Value" and "Total P&L" in that section, USE THOSE EXACT NUMBERS - they are already calculated
-- If you see "⚠️ Current prices not available", explain that prices need to be updated first
-- REQUIRED: When Current Value and P&L are provided, you MUST use them - do NOT say "we cannot calculate"
-- 📊 HISTORICAL PRICE DATA is provided for filtered tickers - use it to analyze:
-  * When buys/sells would have been most profitable (compare transaction prices vs 52-week high/low)
-  * Price trends and timing analysis
-  * Opportunity cost analysis (e.g., "If you had sold at the 52-week high...")
-- 📚 RESEARCH DOCUMENTS (PDFs) are provided above - use them to:
-  * Suggest BUY recommendations for stocks/ETFs/MFs mentioned in research documents
-  * Suggest SELL recommendations based on research findings or overvaluation concerns
-  * Analyze alignment between current holdings and research recommendations
-  * Provide actionable insights like: "Based on the research document X, consider buying TICKER because..."
-- 🎯 YOU CAN PROACTIVELY SUGGEST BUYS/SELLS based on:
-  * PDF research content and AI summaries
-  * Current portfolio performance and diversification gaps
-  * Historical price trends and opportunities
-  * Risk assessment and portfolio balance
-- 🔮 YOU CAN MAKE PREDICTIONS AND FORECASTS:
-  * Stock price movements and targets ("I predict TICKER could reach ₹X in Y months")
-  * Market trends and sector outlook ("The technology sector is likely to...")
-  * Economic indicators impact ("Given current inflation trends...")
-  * Short/medium-term forecasts with reasoning
-  * Risk and volatility predictions
-  * Market timing recommendations ("Consider waiting for pullback before buying")
-- Always cite the exact numbers from the CALCULATED SUMMARY section
-- Format: "Total Investment: ₹X, Total Current Value: ₹Y, Total P&L: ₹Z (W%)"
-- Compare filtered performance with overall portfolio performance when relevant
-- Provide specific, actionable recommendations with tickers and reasoning"""
+💡 INSTRUCTIONS:
+- For data-related questions, use the database query functions (get_holdings, get_transactions, etc.) to fetch the exact data you need
+- The session dataframes are already loaded, but you can query the database for more specific or filtered data
+- Always query the database when you need:
+  * Filtered transactions (by date, type, ticker)
+  * Historical prices for specific tickers
+  * Stock master metadata
+  * PDF documents matching search terms
+- Use the functions based on what the user is asking - don't query everything, only what's needed
+"""
                 
-                # Add debug expander to show what's being sent to AI (only if needed)
-                with st.expander("🔍 Debug: Full context sent to AI (click to expand)", expanded=False):
-                    approx_tokens = len(full_context) // 4
-                    st.caption(f"Total characters: {len(full_context):,} | Estimated tokens: {approx_tokens:,}")
-                    st.text_area("Full context:", full_context, height=400)
-                
-                # Use GPT-5 for better reasoning and accuracy
-                model_to_use = "gpt-5"
-                
-                try:
-                    # Get current date for system prompt
-                    current_date = datetime.now().strftime("%Y-%m-%d")
-                    current_year = datetime.now().year
-                    
-                    response = openai.chat.completions.create(
-                        model=model_to_use,
-                        messages=[
-                            {"role": "system", "content": f"""You are an expert portfolio analyst and financial advisor with access to the complete database for user_id: {user['id']}.
+                # Build system prompt with full database access instructions
+                system_prompt = f"""You are an expert portfolio analyst and financial advisor with DIRECT ACCESS to the complete database for user_id: {user['id']}.
 
 📅 CURRENT DATE: {current_date} (Year: {current_year})
 ⚠️ CRITICAL: Today's date is {current_date}. Always use this date when:
@@ -4992,71 +4953,134 @@ def ai_assistant_page():
 - Referencing current market conditions
 - Making time-based predictions
 - Analyzing transaction dates and holding periods
-Do NOT use 2024 or any other year - use {current_year}. 
+Do NOT use 2024 or any other year - use {current_year}.
 
-You have access to:
-- ALL user transactions (filtered by user_id)
-- ALL user holdings (current portfolio)
-- ALL historical price data
-- ALL uploaded PDF research documents
+🔑 DATABASE ACCESS:
+You have DIRECT ACCESS to query the database using these functions:
+1. get_holdings(user_id, asset_type, sector, limit) - Query holdings
+2. get_transactions(user_id, date_from, date_to, transaction_type, ticker, limit) - Query transactions
+3. get_historical_prices(ticker, date_from, date_to, limit) - Query historical prices
+4. get_stock_master(ticker, asset_type, limit) - Query stock metadata
+5. get_pdfs(user_id, search_term, limit) - Query PDF documents
+6. get_financial_news(ticker, company_name, sector, limit) - Get latest financial news from Moneycontrol, Economic Times, and other sources
 
-The transaction data provided is intelligently filtered based on keywords in the user's question (e.g., "1 year", "buy transactions"). Use ONLY the filtered transaction data when calculating performance metrics.
+📰 FINANCIAL NEWS ACCESS:
+- Use get_financial_news() to fetch latest market news, company updates, and sector trends
+- You can search by ticker, company name, or sector
+- This helps you provide recommendations based on current market conditions and news
+- Note: Currently uses web scraping and AI knowledge - for true real-time news, consider integrating NewsAPI or Alpha Vantage News API
 
-You have the authority and capability to:
+📊 SESSION DATA:
+{session_data_summary}
+
+🎯 HOW TO USE:
+1. Analyze the user's question to determine what data you need
+2. Use the appropriate function(s) to query the database for the exact data needed
+3. Don't query everything - only query what's relevant to the question
+4. For example:
+   - "Show my tech stocks" → get_holdings(user_id="{user['id']}", asset_type="stock", sector="Technology")
+   - "1 year buy transactions" → get_transactions(user_id="{user['id']}", date_from="{datetime.now().replace(year=current_year-1).strftime('%Y-%m-%d')}", transaction_type="buy")
+   - "Price history of RELIANCE" → get_historical_prices(ticker="RELIANCE.NS")
+   - "PDFs about banking" → get_pdfs(search_term="banking")
+
+💡 CAPABILITIES:
 - ✅ Suggest BUY recommendations based on PDF research, market analysis, and portfolio gaps
 - ✅ Suggest SELL recommendations based on overvaluation, poor performance, or risk concerns
 - ✅ Analyze when transactions would have been more profitable using historical price data
 - ✅ Provide actionable investment recommendations with specific tickers and reasoning
-- ✅ Make PREDICTIONS and FORECASTS about:
-  * Stock price movements and potential upside/downside
-  * Market trends and sector performance outlook
-  * Economic indicators and their impact on holdings
-  * Short-term and medium-term price targets
-  * Risk assessments and volatility predictions
-  * Market sentiment analysis and timing recommendations
+- ✅ Make PREDICTIONS and FORECASTS about stock prices, market trends, and economic indicators
+- ✅ Calculate P&L, returns, and other metrics from transaction data
+- ✅ Compare filtered results with overall portfolio when relevant
 
 Always:
-- Cite specific tickers, dates, and amounts
-- Calculate P&L, returns, and other metrics from the provided transaction data
+- Use the database functions to get the exact data you need based on the question
+- Cite specific tickers, dates, and amounts from the queried data
 - Reference PDF research documents when making recommendations
-- Compare filtered results with overall portfolio when relevant
-- Provide data-driven recommendations based on actual numbers and research"""},
-                            {"role": "user", "content": full_context}
-                        ]
-                        # Note: GPT-5 only supports default temperature (1)
-                        # No max_completion_tokens - let OpenAI use default to allow reasoning + response
+- Provide data-driven recommendations based on actual numbers from the database"""
+                
+                # Start conversation with user question
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_question}
+                ]
+                
+                # Function calling loop - allow AI to query database multiple times
+                max_iterations = 5
+                for iteration in range(max_iterations):
+                    response = openai.chat.completions.create(
+                        model="gpt-5",
+                        messages=messages,
+                        tools=functions,
+                        tool_choice="auto"  # Let AI decide when to use functions
                     )
-                except Exception as e:
-                    st.error(f"❌ Error calling AI API: {str(e)}")
-                    st.error("Please check your API key and try again.")
-                    st.stop()
+                    
+                    choice = response.choices[0]
+                    # Convert message object to dict format for consistency
+                    message_dict = {
+                        "role": choice.message.role,
+                        "content": choice.message.content if choice.message.content else None
+                    }
+                    if choice.message.tool_calls:
+                        message_dict["tool_calls"] = [
+                            {
+                                "id": tc.id,
+                                "type": tc.type,
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
+                                }
+                            } for tc in choice.message.tool_calls
+                        ]
+                    messages.append(message_dict)
+                    
+                    # Check if AI wants to call a function
+                    if choice.message.tool_calls:
+                        # Execute function calls
+                        for tool_call in choice.message.tool_calls:
+                            function_name = tool_call.function.name
+                            function_args = json.loads(tool_call.function.arguments)
+                            
+                            # Add user_id to function calls that need it
+                            if function_name in ['get_holdings', 'get_transactions'] and 'user_id' not in function_args:
+                                function_args['user_id'] = user['id']
+                            
+                            # Execute the function
+                            if function_name == 'get_holdings':
+                                function_result = get_holdings(**function_args)
+                            elif function_name == 'get_transactions':
+                                function_result = get_transactions(**function_args)
+                            elif function_name == 'get_historical_prices':
+                                function_result = get_historical_prices(**function_args)
+                            elif function_name == 'get_stock_master':
+                                function_result = get_stock_master(**function_args)
+                            elif function_name == 'get_pdfs':
+                                function_result = get_pdfs(**function_args)
+                            elif function_name == 'get_financial_news':
+                                function_result = get_financial_news(**function_args)
+                            else:
+                                function_result = json.dumps({"error": f"Unknown function: {function_name}"})
+                            
+                            # Add function result to messages
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": function_result
+                            })
+                    else:
+                        # AI provided final answer, break loop
+                        break
                 
-                if not response or not response.choices:
-                    st.error("❌ No response received from AI. Please try again.")
-                    if hasattr(response, 'error'):
-                        st.error(f"API Error: {response.error}")
-                    st.stop()
+                # Get final AI response
+                # Handle both dict and object formats
+                last_message = messages[-1]
+                if isinstance(last_message, dict):
+                    ai_response = last_message.get("content", "") if last_message.get("content") else "I apologize, but I couldn't generate a response."
+                else:
+                    ai_response = last_message.content if hasattr(last_message, 'content') and last_message.content else "I apologize, but I couldn't generate a response."
                 
-                choice = response.choices[0]
-                ai_response = choice.message.content
-                
-                # Check if response was truncated due to token limit
-                if choice.finish_reason == 'length':
-                    st.warning("⚠️ Response was truncated due to token limit. Consider asking a more specific question or splitting your query.")
-                    if not ai_response or ai_response.strip() == "":
-                        st.error("❌ Empty response from AI - all tokens were used for reasoning.")
-                        st.error("The response was cut off because the token limit was reached during reasoning.")
-                        st.error("Try asking a shorter or more specific question.")
-                        st.stop()
-                
+                # Check if response was truncated
                 if not ai_response or ai_response.strip() == "":
                     st.error("❌ Empty response from AI. Please try again.")
-                    st.error(f"Debug: Finish reason: {choice.finish_reason if response.choices else 'N/A'}")
-                    if hasattr(response, 'usage'):
-                        usage = response.usage
-                        st.error(f"Debug: Tokens used - Completion: {usage.completion_tokens}, Prompt: {usage.prompt_tokens}")
-                        if hasattr(usage, 'completion_tokens_details') and hasattr(usage.completion_tokens_details, 'reasoning_tokens'):
-                            st.error(f"Debug: Reasoning tokens: {usage.completion_tokens_details.reasoning_tokens}")
                     st.stop()
                 
                 # Display the response immediately
@@ -5180,6 +5204,534 @@ Always:
     else:
         st.caption("No PDFs uploaded yet")
     
+    # PDF Upload for AI Analysis (Multiple Files Supported)
+    st.markdown("---")
+    st.markdown("**📤 Upload PDFs for AI Analysis**")
+    st.caption("💡 You can upload multiple PDFs at once!")
+    
+    uploaded_pdfs = st.file_uploader(
+        "Choose PDF file(s) to analyze",
+        type=['pdf'],
+        accept_multiple_files=True,
+        help="Upload research reports, financial statements, or any document for AI analysis. Select multiple files to upload them all at once!"
+    )
+    
+    if uploaded_pdfs:
+        # Handle both single file and multiple files
+        if not isinstance(uploaded_pdfs, list):
+            uploaded_pdfs = [uploaded_pdfs]
+        
+        if len(uploaded_pdfs) == 1:
+            button_text = f"🔍 Analyze 1 PDF"
+        else:
+            button_text = f"🔍 Analyze & Upload {len(uploaded_pdfs)} PDFs"
+        
+        if st.button(button_text, type="primary"):
+            success_count = 0
+            failed_count = 0
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for idx, uploaded_pdf in enumerate(uploaded_pdfs):
+                try:
+                    status_text.text(f"📄 Processing {idx + 1}/{len(uploaded_pdfs)}: {uploaded_pdf.name}...")
+                    progress_bar.progress((idx + 1) / len(uploaded_pdfs))
+                    
+                    import PyPDF2
+                    import pdfplumber
+                    import openai
+                    openai.api_key = st.secrets["api_keys"]["open_ai"]
+                    
+                    # Enhanced PDF extraction with tables and structure
+                    pdf_text = ""
+                    tables_found = []
+                    page_count = 0
+                    
+                    # Try pdfplumber first (better for tables)
+                    # Reset file pointer for each file
+                    uploaded_pdf.seek(0)
+                    with pdfplumber.open(uploaded_pdf) as pdf:
+                        for page_num, page in enumerate(pdf.pages, 1):
+                            page_count += 1
+                            page_text = page.extract_text()
+                            if page_text:
+                                pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+                            
+                            # Extract tables
+                            tables = page.extract_tables()
+                            if tables:
+                                for table_idx, table in enumerate(tables, 1):
+                                    tables_found.append({
+                                        'page': page_num,
+                                        'table': table_idx,
+                                        'data': table
+                                    })
+                    
+                    if pdf_text:
+                        # Truncate if too long (OpenAI has token limits)
+                        pdf_text_for_ai = pdf_text[:10000] + "..." if len(pdf_text) > 10000 else pdf_text
+                        
+                        # Prepare tables summary
+                        tables_summary = ""
+                        if tables_found:
+                            tables_summary = f"\n📊 Tables Found: {len(tables_found)}\n"
+                            for table in tables_found[:3]:  # Show first 3 tables
+                                tables_summary += f"• Page {table['page']}, Table {table['table']}: {len(table['data'])} rows\n"
+                        
+                        # Get portfolio context
+                        portfolio_summary = get_cached_portfolio_summary(holdings)
+                        
+                        # Enhanced analysis prompt with structured output
+                        analysis_prompt = f"""
+                        Analyze this PDF document comprehensively for portfolio management insights.
+                        
+                        📄 DOCUMENT INFO:
+                        - Filename: {uploaded_pdf.name}
+                        - Pages: {page_count}
+                        {tables_summary}
+                        
+                        💼 USER'S PORTFOLIO:
+                        {portfolio_summary}
+                        
+                        📝 PDF CONTENT:
+                        {pdf_text_for_ai}
+                        
+                        Please provide a STRUCTURED analysis using this format:
+                        
+                        📋 **DOCUMENT SUMMARY**
+                        [2-3 sentences describing what this PDF contains]
+                        
+                        📊 **KEY METRICS & DATA**
+                        [Extract specific numbers, percentages, dates, returns mentioned]
+                        • Metric: Value
+                        • Metric: Value
+                        
+                        📈 **INSIGHTS FROM CHARTS/TABLES**
+                        [Describe trends, patterns, or comparisons shown in tables/graphs]
+                        
+                        💡 **MAIN FINDINGS**
+                        [3-5 key takeaways from the document]
+                        
+                        🎯 **PORTFOLIO RELEVANCE**
+                        [How this information relates to the user's current holdings]
+                        
+                        ⚡ **RECOMMENDED ACTIONS**
+                        [Specific, actionable next steps - if applicable]
+                        
+                        Use actual numbers and be specific. Focus on actionable insights.
+                        """
+                        
+                        response = openai.chat.completions.create(
+                            model="gpt-5",  # Upgraded to GPT-5 for better PDF analysis
+                            messages=[{"role": "user", "content": analysis_prompt}],
+                            max_completion_tokens=1000,
+                            # Note: GPT-5 only supports default temperature (1)
+                        )
+                        
+                        ai_analysis = response.choices[0].message.content
+                        
+                        # Display the analysis for this PDF
+                        with st.expander(f"📄 {uploaded_pdf.name} - Analysis", expanded=(idx == 0)):
+                            st.markdown("### 🤖 AI Analysis")
+                            st.markdown(ai_analysis)
+                            st.info(f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, found {len(tables_found)} tables")
+                        
+                        # Store in chat history (session state)
+                        st.session_state.chat_history.append({
+                            "q": f"Analyze PDF: {uploaded_pdf.name}", 
+                            "a": ai_analysis
+                        })
+                        # Save to database (user-specific, persistent)
+                        if hasattr(db, 'save_chat_history'):
+                            try:
+                                db.save_chat_history(user['id'], f"Analyze PDF: {uploaded_pdf.name}", ai_analysis)
+                            except Exception:
+                                pass
+                        
+                        # Clean PDF text before saving (remove null bytes and control characters)
+                        import re
+                        cleaned_pdf_text = pdf_text.replace('\x00', ' ').replace('\u0000', ' ')
+                        cleaned_pdf_text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', ' ', cleaned_pdf_text)
+                        cleaned_pdf_text = ''.join(char if char.isprintable() or char in '\n\t\r ' else ' ' for char in cleaned_pdf_text)
+                        cleaned_pdf_text = re.sub(r'\s+', ' ', cleaned_pdf_text).strip()
+                        
+                        # Save PDF to database
+                        save_result = db.save_pdf(
+                            user_id=user['id'],
+                            filename=uploaded_pdf.name,
+                            pdf_text=cleaned_pdf_text,  # Store cleaned text
+                            ai_summary=ai_analysis
+                        )
+                        
+                        if save_result['success']:
+                            success_count += 1
+                        else:
+                            failed_count += 1
+                            st.error(f"❌ Failed to save '{uploaded_pdf.name}': {save_result.get('error', 'Unknown error')}")
+                    else:
+                        failed_count += 1
+                        st.error(f"❌ Could not extract text from '{uploaded_pdf.name}'. Please ensure the PDF contains readable text.")
+                        
+                except Exception as e:
+                    failed_count += 1
+                    st.error(f"❌ Error processing '{uploaded_pdf.name}': {str(e)[:100]}")
+            
+            # Final summary
+            progress_bar.empty()
+            status_text.empty()
+            
+            if success_count > 0:
+                st.success(f"✅ Successfully processed and saved {success_count} PDF(s) to shared library!")
+                if failed_count > 0:
+                    st.warning(f"⚠️ {failed_count} PDF(s) failed to process")
+                
+                # Refresh the page to update the PDF library count
+                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+                st.info("📄 PDF content is now stored and available for all future sessions!")
+                st.rerun()
+            else:
+                st.error(f"❌ All {len(uploaded_pdfs)} PDF(s) failed to process. Please check the files and try again.")
+    
+    # Quick Tips Section
+    st.markdown("---")
+    st.markdown("**💡 Quick Tips**")
+    st.caption("Try asking me:")
+    st.caption("• 'How is my portfolio performing overall?'")
+    st.caption("• 'Which sectors are my best performers?'")
+    st.caption("• 'How can I reduce portfolio risk?'")
+    st.caption("• 'Which channels are giving me the best returns?'")
+    st.caption("• 'Should I rebalance my portfolio?'")
+    st.caption("• 'Upload a research report for analysis'")
+
+def ai_insights_page():
+    """AI Insights page with agent analysis and recommendations"""
+    st.header("🧠 AI Insights")
+    st.caption("Powered by specialized AI agents for portfolio analysis")
+    
+    if not AI_AGENTS_AVAILABLE:
+        st.error("AI agents are not available. Please check the installation.")
+        return
+    
+    # Get user data
+    user = st.session_state.user
+    db = st.session_state.db
+    
+    # Get holdings data
+    holdings = get_cached_holdings(user['id'])
+    
+    if not holdings:
+        st.info("No holdings found. Upload transaction files to see AI insights.")
+        return
+    
+    # Get comprehensive context for AI analysis (same as AI Assistant has)
+    pdf_context = db.get_all_pdfs_text(user['id'])
+    pdf_count = len(db.get_user_pdfs(user['id']))
+    
+    # Get all transactions for the user
+    try:
+        all_transactions_response = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user['id']).order('transaction_date', desc=False).limit(1000).execute()
+        all_transactions = all_transactions_response.data if all_transactions_response.data else []
+    except:
+        all_transactions = []
+    
+    # Get historical prices for all tickers in holdings (increase limit)
+    historical_prices = {}
+    historical_prices_fetched = 0
+    historical_prices_missing = 0
+    try:
+        # Get unique tickers from all holdings
+        unique_tickers = set()
+        for holding in holdings:
+            ticker = holding.get('ticker')
+            if ticker:
+                unique_tickers.add(ticker)
+        
+        # Fetch historical prices for all unique tickers (not just top 30)
+        for ticker in unique_tickers:
+            try:
+                # Get stock_id
+                stock_response = db.supabase.table('stock_master').select('id').eq('ticker', ticker).execute()
+                if stock_response.data:
+                    stock_id = stock_response.data[0]['id']
+                    # Get 52 weeks of historical prices
+                    hist_response = db.supabase.table('historical_prices').select('price_date, price').eq('stock_id', stock_id).order('price_date', desc=True).limit(52).execute()
+                    if hist_response.data and len(hist_response.data) > 0:
+                        historical_prices[ticker] = hist_response.data
+                        historical_prices_fetched += 1
+                    else:
+                        historical_prices_missing += 1
+            except:
+                historical_prices_missing += 1
+    except Exception as e:
+        pass
+    
+    # Get stock master data for all holdings
+    try:
+        # Get all stock master records for holdings (get all unique tickers)
+        tickers = list(set([h.get('ticker') for h in holdings if h.get('ticker')]))
+        if tickers:
+            # Fetch in batches if needed (Supabase .in_() has limits)
+            stock_master = []
+            for i in range(0, len(tickers), 100):  # Process 100 at a time
+                batch = tickers[i:i+100]
+                try:
+                    stock_master_response = db.supabase.table('stock_master').select('*').in_('ticker', batch).execute()
+                    if stock_master_response.data:
+                        stock_master.extend(stock_master_response.data)
+                except:
+                    pass
+        else:
+            stock_master = []
+    except:
+        stock_master = []
+    
+    # Show context status with detailed information
+    context_info = []
+    if pdf_count > 0:
+        context_info.append(f"📚 {pdf_count} PDF(s)")
+    if all_transactions:
+        context_info.append(f"📝 {len(all_transactions)} transactions")
+    if historical_prices:
+        context_info.append(f"📊 Historical prices: {len(historical_prices)} tickers (52 weeks each)")
+    if stock_master:
+        context_info.append(f"🏢 {len(stock_master)} stock master records")
+    
+    if context_info:
+        st.info(f"**AI Context Active:** {' | '.join(context_info)}")
+        if historical_prices_missing > 0:
+            st.caption(f"ℹ️ Note: {historical_prices_missing} ticker(s) don't have historical price data yet. They will be automatically fetched during next login. Click below to fetch now if needed.")
+            if st.button("📊 Fetch Historical Prices Now", key="fetch_missing_historical", help="Manually fetch 52 weeks of historical prices for all tickers missing data (normally done automatically during login)"):
+                with st.spinner(f"Fetching historical prices for {historical_prices_missing} ticker(s)..."):
+                    try:
+                        # Get tickers missing historical data
+                        missing_tickers = []
+                        for holding in holdings:
+                            ticker = holding.get('ticker')
+                            if ticker and ticker not in historical_prices:
+                                missing_tickers.append(ticker)
+                        
+                        if missing_tickers:
+                            # Get asset types
+                            asset_types = {h.get('ticker'): h.get('asset_type', 'stock') for h in holdings if h.get('ticker')}
+                            
+                            # Fetch comprehensive data (includes historical prices)
+                            if 'bulk_ai_fetcher' in st.session_state and st.session_state.bulk_ai_fetcher.available:
+                                db.bulk_process_new_stocks_with_comprehensive_data(
+                                    tickers=list(set(missing_tickers)),
+                                    asset_types=asset_types
+                                )
+                                st.success(f"✅ Fetched historical prices for {len(set(missing_tickers))} ticker(s)!")
+                                st.rerun()
+                            else:
+                                st.warning("⚠️ Bulk AI fetcher not available. Historical prices will be fetched automatically during next login.")
+                                st.rerun()
+                        else:
+                            st.info("All tickers already have historical price data.")
+                    except Exception as e:
+                        st.error(f"❌ Error fetching historical prices: {str(e)[:100]}")
+    else:
+        st.caption("💡 Upload PDFs and transactions to enhance insights")
+    
+    # Create tabs for different AI insights
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "🎯 Smart Recommendations", 
+        "📊 Portfolio Analysis", 
+        "🔍 Market Insights",
+        "🔮 Scenario Analysis",
+        "💡 Investment Recommendations",
+        "⚙️ Agent Status"
+    ])
+    
+    # Run AI analysis ONCE and cache it (all tabs will use the same result)
+    # This prevents running 5 separate analyses (one per tab)
+    analysis_cache_key = f"ai_analysis_{user['id']}_{len(holdings)}_{len(all_transactions)}"
+    
+    if analysis_cache_key not in st.session_state or not st.session_state.get('ai_analysis_complete', False):
+        # Run analysis once for all tabs
+        with st.spinner("🤖 AI agents analyzing your portfolio (this may take 30-60 seconds)..."):
+            try:
+                # Get user profile from database
+                user_profile_data = db.get_user_profile(user['id'])
+                user_profile = {
+                    "user_id": user['id'],
+                    "risk_tolerance": user_profile_data.get('risk_tolerance', 'moderate'),
+                    "goals": user_profile_data.get('investment_goals', []),
+                    "rebalancing_frequency": user_profile_data.get('rebalancing_frequency', 'quarterly'),
+                    "tax_optimization": user_profile_data.get('tax_optimization', True),
+                    "esg_investing": user_profile_data.get('esg_investing', False),
+                    "international_exposure": user_profile_data.get('international_exposure', 20)
+                }
+                
+                # Run comprehensive AI analysis with all context data (agents run in parallel)
+                from ai_agents.agent_manager import run_ai_analysis
+                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
+                
+                # Cache the result
+                st.session_state[analysis_cache_key] = analysis_result
+                st.session_state['ai_analysis_complete'] = True
+            except Exception as e:
+                st.error(f"Error running AI analysis: {str(e)}")
+                st.session_state[analysis_cache_key] = {"error": str(e)}
+    else:
+        # Use cached result
+        analysis_result = st.session_state[analysis_cache_key]
+    
+    with tab1:
+        st.subheader("🎯 Smart Recommendations")
+        
+        try:
+            # Use cached analysis result
+            if not analysis_result or "error" in analysis_result:
+                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+            else:
+                # Get recommendations from analysis result
+                recommendations = analysis_result.get("investment_recommendations", [])
+                
+                # If no recommendations in result, try getting from agent manager cache
+                if not recommendations:
+                    try:
+                        from ai_agents.agent_manager import get_ai_recommendations
+                        recommendations = get_ai_recommendations(5)
+                    except:
+                        recommendations = []
+                
+                if recommendations:
+                    st.success(f"✅ Found {len(recommendations)} AI recommendations")
+                    
+                    for i, rec in enumerate(recommendations, 1):
+                        severity_color = {
+                            "high": "🔴",
+                            "medium": "🟡", 
+                            "low": "🟢"
+                        }.get(rec.get("severity", "low"), "🟢")
+                        
+                        with st.expander(f"{severity_color} {rec.get('title', 'Recommendation')}", expanded=(rec.get("severity") == "high")):
+                            st.markdown(f"**Description:** {rec.get('description', 'No description')}")
+                            st.markdown(f"**Recommendation:** {rec.get('recommendation', 'No recommendation')}")
+                            
+                            if rec.get("data"):
+                                st.json(rec["data"])
+                else:
+                    st.info("🎉 No urgent recommendations found. Your portfolio looks well-balanced!")
+        except Exception as e:
+            st.error(f"Error displaying recommendations: {str(e)}")
+    
+    with tab2:
+        st.subheader("📊 Portfolio Analysis")
+        
+        try:
+            # Use cached analysis result (no need to run again)
+            if not analysis_result or "error" in analysis_result:
+                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+            else:
+                if "portfolio_insights" in analysis_result:
+                    # Get portfolio insights directly
+                    portfolio_insights = analysis_result["portfolio_insights"]
+                    
+                    if portfolio_insights:
+                        st.success(f"📈 Portfolio analysis complete - {len(portfolio_insights)} insights found")
+                        
+                        for insight in portfolio_insights:
+                            with st.expander(f"💡 {insight.get('title', 'Insight')}", expanded=False):
+                                st.markdown(insight.get('description', 'No description'))
+                                if insight.get('data'):
+                                    st.json(insight['data'])
+                    else:
+                        st.info("No portfolio insights available yet.")
+                else:
+                    st.info("Portfolio insights are being generated...")
+        except Exception as e:
+            st.error(f"Error displaying portfolio analysis: {str(e)}")
+    
+    with tab3:
+        st.subheader("🔍 Market Insights")
+        
+        try:
+            if not analysis_result or "error" in analysis_result:
+                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+            else:
+                if "market_insights" in analysis_result:
+                    market_insights = analysis_result["market_insights"]
+                    
+                    if market_insights:
+                        st.success(f"🌍 Market analysis complete - {len(market_insights)} insights found")
+                        
+                        for insight in market_insights:
+                            with st.expander(f"📊 {insight.get('title', 'Market Insight')}", expanded=False):
+                                st.markdown(insight.get('description', 'No description'))
+                                if insight.get('data'):
+                                    st.json(insight['data'])
+                    else:
+                        st.info("No market insights available yet.")
+                else:
+                    st.info("Market insights are being generated...")
+        except Exception as e:
+            st.error(f"Error displaying market insights: {str(e)}")
+    
+    with tab4:
+        st.subheader("🔮 Scenario Analysis")
+        
+        try:
+            if not analysis_result or "error" in analysis_result:
+                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+            else:
+                if "scenario_insights" in analysis_result:
+                    scenario_insights = analysis_result["scenario_insights"]
+                    
+                    if scenario_insights:
+                        st.success(f"🔮 Scenario analysis complete - {len(scenario_insights)} scenarios analyzed")
+                        
+                        for scenario in scenario_insights:
+                            with st.expander(f"🎯 {scenario.get('title', 'Scenario')}", expanded=False):
+                                st.markdown(scenario.get('description', 'No description'))
+                                if scenario.get('data'):
+                                    st.json(scenario['data'])
+                    else:
+                        st.info("No scenario insights available yet.")
+                else:
+                    st.info("Scenario insights are being generated...")
+        except Exception as e:
+            st.error(f"Error displaying scenario analysis: {str(e)}")
+    
+    with tab5:
+        st.subheader("💡 Investment Recommendations")
+        
+        try:
+            if not analysis_result or "error" in analysis_result:
+                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+            else:
+                if "investment_recommendations" in analysis_result:
+                    recommendations = analysis_result["investment_recommendations"]
+                    
+                    if recommendations:
+                        st.success(f"💡 Investment recommendations complete - {len(recommendations)} recommendations found")
+                        
+                        for rec in recommendations:
+                            with st.expander(f"💼 {rec.get('title', 'Recommendation')}", expanded=False):
+                                st.markdown(rec.get('description', 'No description'))
+                                st.markdown(f"**Action:** {rec.get('recommendation', 'No specific action')}")
+                                if rec.get('data'):
+                                    st.json(rec['data'])
+                    else:
+                        st.info("No investment recommendations available yet.")
+                else:
+                    st.info("Investment recommendations are being generated...")
+        except Exception as e:
+            st.error(f"Error displaying investment recommendations: {str(e)}")
+    
+    with tab6:
+        st.subheader("⚙️ Agent Status")
+        
+        try:
+            if not analysis_result or "error" in analysis_result:
+                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+            else:
+                st.info("✅ All AI agents have completed their analysis")
+                st.json(analysis_result)
+        except Exception as e:
+            st.error(f"Error displaying agent status: {str(e)}")
+
     # PDF Upload for AI Analysis (Multiple Files Supported)
     st.markdown("---")
     st.markdown("**📤 Upload PDFs for AI Analysis**")
