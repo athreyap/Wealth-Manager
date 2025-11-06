@@ -1012,6 +1012,12 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
     for file_idx, uploaded_file in enumerate(uploaded_files, 1):
         st.caption(f"📁 [{file_idx}/{len(uploaded_files)}] Processing {uploaded_file.name}...")
         
+        # Initialize error tracking variables at the start
+        imported = 0
+        skipped = 0
+        errors = 0
+        tickers_in_this_file = set()  # Track tickers from this file to avoid re-fetching old data
+        
         try:
             # Direct CSV/Excel processing (AI file extraction is disabled)
             file_ext = uploaded_file.name.split('.')[-1].lower()
@@ -1252,10 +1258,6 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                         print(f"[DATE_PARSE_ERROR] Failed to parse date '{date_str}': {str(e)}")
                         return ''
                 
-                    imported = 0
-                    skipped = 0
-                    errors = 0
-                    
                 # Show progress
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -1349,6 +1351,10 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                                     st.caption(f"      📅 Fetched price for {ticker} on {transaction_date}: ₹{hist_price:.2f}")
                             except Exception as e:
                                 pass  # Keep price as 0, will show in logs
+                        
+                        # Track ticker from this file
+                        if ticker:
+                            tickers_in_this_file.add(ticker)
                         
                         # Import with placeholder ticker (AI will resolve later)
                         transaction_data = {
@@ -1706,30 +1712,44 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     except Exception as e:
                         st.caption(f"   ⚠️ Holdings recalculation skipped: {str(e)[:100]}")
                 
-                # Auto-fetch prices AND 52-week historical data
-                if imported > 0:
-                    st.caption(f"   📊 Fetching current prices and 52-week historical data...")
+                # Auto-fetch prices AND 52-week historical data (only for tickers in this file)
+                if imported > 0 and tickers_in_this_file:
+                    st.caption(f"   📊 Fetching current prices and 52-week historical data for {len(tickers_in_this_file)} ticker(s) from this file...")
                     
                     try:
+                        # Get asset types for tickers in this file
+                        new_asset_types = {}
                         holdings = db.get_user_holdings(user_id)
-                        
                         if holdings:
-                            # Get unique tickers and asset types
-                            unique_tickers = list(set([h['ticker'] for h in holdings if h.get('ticker')]))
-                            asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings if h.get('ticker')}
+                            # Map tickers to asset types from holdings
+                            for h in holdings:
+                                ticker = h.get('ticker')
+                                if ticker and ticker in tickers_in_this_file:
+                                    new_asset_types[ticker] = h.get('asset_type', 'stock')
+                        
+                        # If some tickers don't have asset types yet, default to 'stock'
+                        for ticker in tickers_in_this_file:
+                            if ticker not in new_asset_types:
+                                new_asset_types[ticker] = 'stock'
+                        
+                        if tickers_in_this_file:
+                            new_tickers_list = list(tickers_in_this_file)
+                            st.caption(f"      📈 Fetching comprehensive data for {len(new_tickers_list)} ticker(s)...")
                             
-                            st.caption(f"      📈 Fetching comprehensive data for {len(unique_tickers)} holdings...")
-                            
-                            # Fetch current prices + 52-week historical data
+                            # Fetch current prices + 52-week historical data (only for tickers in this file)
                             db.bulk_process_new_stocks_with_comprehensive_data(
-                                tickers=unique_tickers,
-                                asset_types=asset_types
+                                tickers=new_tickers_list,
+                                asset_types=new_asset_types
                             )
                             
-                            st.caption(f"   ✅ Updated current prices and 52-week data for {len(unique_tickers)} holdings")
+                            st.caption(f"   ✅ Updated current prices and 52-week data for {len(new_tickers_list)} ticker(s)")
+                        else:
+                            st.caption(f"   ℹ️  No tickers to fetch")
                             
                     except Exception as e:
                         st.caption(f"   ⚠️ Price/historical fetching skipped: {str(e)[:50]}")
+                elif imported > 0:
+                    st.caption(f"   ℹ️  No tickers identified in this file (skipping price fetch)")
                 
                     processing_log.append({
                 'file': uploaded_file.name,
@@ -4998,11 +5018,17 @@ Always:
 - Reference PDF research documents when making recommendations
 - Provide data-driven recommendations based on actual numbers from the database"""
                 
-                # Start conversation with user question
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_question}
-                ]
+                # Start conversation with chat history (if available) and user question
+                messages = [{"role": "system", "content": system_prompt}]
+                
+                # Add chat history to context (last 10 conversations)
+                if st.session_state.chat_history:
+                    for chat in st.session_state.chat_history[-10:]:  # Last 10 conversations
+                        messages.append({"role": "user", "content": chat.get("q", "")})
+                        messages.append({"role": "assistant", "content": chat.get("a", "")})
+                
+                # Add current user question
+                messages.append({"role": "user", "content": user_question})
                 
                 # Function calling loop - allow AI to query database multiple times
                 max_iterations = 5
@@ -6871,6 +6897,9 @@ def upload_files_page():
         - `channel`: Channel/platform name (optional - will use filename if missing)
         """)
     
+    # Initialize uploaded_files_ai to None
+    uploaded_files_ai = None
+    
     # AI-powered file extraction section
     if AI_FILE_EXTRACTION_ENABLED:
         st.markdown("""
@@ -6882,17 +6911,18 @@ def upload_files_page():
         
         st.info("💡 **AI processes all file types**: CSV, PDF, Excel (XLSX/XLS), Text files, and Images (JPG, PNG, JPEG). Just upload and let AI handle the rest!")
         
-        # Universal file uploader
-    uploaded_files = st.file_uploader(
+        # Universal file uploader (AI extraction)
+        uploaded_files_ai = st.file_uploader(
             "📁 Choose files to upload (CSV, PDF, Excel, Images, etc.)",
             type=['csv', 'pdf', 'xlsx', 'xls', 'txt', 'jpg', 'jpeg', 'png'],
             accept_multiple_files=True,
             key="ai_file_uploader",
             help="Upload transaction files in any format - AI will extract the data automatically. Supports images too!"
         )
-        
-    if uploaded_files:
-            for uploaded_file in uploaded_files:
+    
+    # Process AI-extracted files if any were uploaded
+    if uploaded_files_ai:
+            for uploaded_file in uploaded_files_ai:
                 file_type = uploaded_file.name.split('.')[-1].upper()
                 st.markdown(f"**🤖 AI Processing: {uploaded_file.name}** ({file_type})")
                 
