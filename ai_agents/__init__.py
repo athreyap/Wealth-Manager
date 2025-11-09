@@ -10,10 +10,18 @@ try:
     from .ai_strategy_agent import AIInvestmentStrategyAgent
     from .ai_scenario_agent import AIScenarioAnalysisAgent
     from .ai_recommendation_agent import AIInvestmentRecommendationAgent
+    from .ai_channel_agent import AIChannelAnalyticsAgent
     from .ai_pdf_extractor import AIPDFTransactionExtractor
     from .ai_csv_parser import AICSVTransactionParser
     from .communication import AgentCommunication, AgentMessage, MessageType, MessagePriority
-    from .agent_manager import AgentManager, get_agent_manager, run_ai_analysis, get_ai_recommendations, get_ai_alerts
+    from .agent_manager import (
+        AgentManager,
+        get_agent_manager,
+        run_ai_analysis,
+        get_ai_recommendations,
+        get_ai_alerts,
+        get_channel_analytics_summary,
+    )
     from .performance_optimizer import PerformanceOptimizer, performance_optimizer
     
     __all__ = [
@@ -23,6 +31,7 @@ try:
         'AIInvestmentStrategyAgent',
         'AIScenarioAnalysisAgent',
         'AIInvestmentRecommendationAgent',
+        'AIChannelAnalyticsAgent',
         'AIPDFTransactionExtractor',
         'AICSVTransactionParser',
         'AgentCommunication',
@@ -34,6 +43,7 @@ try:
         'run_ai_analysis',
         'get_ai_recommendations',
         'get_ai_alerts',
+        'get_channel_analytics_summary',
         'PerformanceOptimizer',
         'performance_optimizer'
     ]

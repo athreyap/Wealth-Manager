@@ -11,6 +11,8 @@ from typing import Optional, Dict, List, Any, Tuple
 import hashlib
 from datetime import datetime
 import pandas as pd
+from dateutil import parser as dateutil_parser
+import re
 
 class SharedDatabaseManager:
     """Manages database with shared historical data architecture"""
@@ -416,6 +418,16 @@ class SharedDatabaseManager:
             # Update stock price error
             pass
     
+    def update_stock_ticker(self, stock_id: str, new_ticker: str):
+        """Normalize ticker symbol for a stock."""
+        try:
+            self.supabase.table('stock_master').update({
+                'ticker': new_ticker,
+                'last_updated': datetime.now().isoformat()
+            }).eq('id', stock_id).execute()
+        except Exception:
+            pass
+    
     def get_stock_last_updated(self, stock_id: str) -> Optional[str]:
         """Get last updated timestamp for a stock"""
         try:
@@ -621,6 +633,34 @@ class SharedDatabaseManager:
         except Exception as e:
             return week_numbers  # Assume all missing if error
     
+    def _normalize_transaction_date(self, value: Any) -> Optional[str]:
+        """Normalize transaction date strings to YYYY-MM-DD."""
+        if value is None or value == '':
+            return None
+        if isinstance(value, datetime):
+            return value.strftime('%Y-%m-%d')
+
+        text = str(value).strip()
+        # Try parsing with dateutil, preferring day-first for Indian data
+        for dayfirst in (True, False):
+            try:
+                parsed = dateutil_parser.parse(text, dayfirst=dayfirst, fuzzy=True)
+                return parsed.strftime('%Y-%m-%d')
+            except Exception:
+                continue
+
+        # As a fallback, strip out noisy characters and retry
+        cleaned = re.sub(r'[^0-9A-Za-z:/\\ -]', ' ', text)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        for dayfirst in (True, False):
+            try:
+                parsed = dateutil_parser.parse(cleaned, dayfirst=dayfirst, fuzzy=True)
+                return parsed.strftime('%Y-%m-%d')
+            except Exception:
+                continue
+
+        return None
+
     # ========================================================================
     # USER TRANSACTIONS (UPDATED!)
     # ========================================================================
@@ -644,7 +684,12 @@ class SharedDatabaseManager:
             if not stock_id:
                 return {'success': False, 'error': 'Could not create stock'}
             
-            # Calculate week info from transaction date
+            # Normalize and calculate week info from transaction date
+            normalized_date = self._normalize_transaction_date(transaction_data['transaction_date'])
+            if not normalized_date:
+                return {'success': False, 'error': f"Invalid transaction date: {transaction_data['transaction_date']}"}
+            transaction_data['transaction_date'] = normalized_date
+
             try:
                 trans_date = pd.to_datetime(transaction_data['transaction_date'])
                 iso_year = trans_date.isocalendar()[0]
@@ -1068,7 +1113,14 @@ class SharedDatabaseManager:
                     transaction_prices = ticker_data.get('transaction_prices', {})
                     
                     # For current price, try multi-source fetching (yfinance → mftool → enhanced_fetcher)
-                    current_price = self._get_live_price_multi_source(ticker, asset_type, stock_name) or ai_current_price
+
+                    live_price, resolved_ticker, price_source = self._get_live_price_multi_source(ticker, asset_type, stock_name)
+                    if live_price <= 0 and ai_current_price:
+                        current_price = ai_current_price
+                        resolved_ticker = ticker
+                        price_source = 'ai_bulk'
+                    else:
+                        current_price = live_price
                     
                     # Get or create stock in database
                     stock_id = self.get_or_create_stock(
@@ -1080,7 +1132,14 @@ class SharedDatabaseManager:
                     
                     if stock_id:
                         stock_ids[ticker] = stock_id
-                        print(f"[BULK] Processing {ticker}: stock_id={stock_id}, current_price={current_price}")
+                        print(f"[BULK] Processing {ticker}: stock_id={stock_id}, current_price={current_price}, resolved_ticker={resolved_ticker}")
+                        
+                        if resolved_ticker != ticker and current_price > 0:
+                            try:
+                                self.update_stock_ticker(stock_id, resolved_ticker)
+                                ticker = resolved_ticker
+                            except Exception:
+                                pass
                         
                         # Store current price if available (prioritizes API over AI)
                         if current_price > 0:
@@ -1134,8 +1193,14 @@ class SharedDatabaseManager:
                     
                     # Fetch and store current price
                     print(f"[FALLBACK] Fetching current price for {ticker}...")
-                    current_price = self._get_live_price_multi_source(ticker, asset_type, None)
+                    current_price, resolved_ticker, price_source = self._get_live_price_multi_source(ticker, asset_type, None)
                     if current_price and current_price > 0:
+                        if resolved_ticker != ticker:
+                            try:
+                                self.update_stock_ticker(stock_id, resolved_ticker)
+                                ticker = resolved_ticker
+                            except Exception:
+                                pass
                         self._store_current_price(ticker, current_price, asset_type)
                     else:
                         print(f"[FALLBACK] No current price found for {ticker}")
@@ -1151,7 +1216,7 @@ class SharedDatabaseManager:
         print(f"[FALLBACK] Completed: {len(stock_ids)} stocks processed")
         return stock_ids
     
-    def _get_live_price_multi_source(self, ticker: str, asset_type: str = 'stock', stock_name: str = None) -> float:
+    def _get_live_price_multi_source(self, ticker: str, asset_type: str = 'stock', stock_name: str = None) -> Tuple[float, str, str]:
         """
         Get live current price from multiple sources
         Priority: yfinance → smart ticker mapping → mftool → enhanced_price_fetcher
@@ -1176,15 +1241,33 @@ class SharedDatabaseManager:
                 for tf in ticker_formats:
                     try:
                         stock = yf.Ticker(tf)
-                        info = stock.info
                         
-                        price = (info.get('currentPrice') or 
+                        hist = stock.history(period='1d')
+                        price = float(hist['Close'].iloc[-1]) if not hist.empty else None
+                        if (price is None or price <= 0):
+                            fast_info = getattr(stock, "fast_info", {}) or {}
+                            price = (
+                                fast_info.get("lastPrice")
+                                or fast_info.get("regularMarketPrice")
+                                or fast_info.get("previousClose")
+                            )
+                        if (price is None or price <= 0):
+                            info = getattr(stock, "info", {}) or {}
+                            price = (
+                                info.get('currentPrice') or 
                                 info.get('regularMarketPrice') or 
                                 info.get('navPrice') or
-                                info.get('previousClose'))
+                                info.get('previousClose')
+                            )
                         
                         if price and price > 0:
-                            return float(price)
+                            resolved = tf
+                            source = 'yfinance_raw'
+                            if tf.endswith('.BO'):
+                                source = 'yfinance_bse'
+                            elif tf.endswith('.NS'):
+                                source = 'yfinance_nse'
+                            return float(price), resolved, source
                     except:
                         continue
             
@@ -1197,7 +1280,7 @@ class SharedDatabaseManager:
                     # Try ticker as scheme code
                     quote = mf.get_scheme_quote(ticker)
                     if quote and quote.get('nav'):
-                        return float(quote.get('nav'))
+                            return float(quote.get('nav')), ticker, 'mftool'
                     
                     # Try searching by name if ticker fails
                     if stock_name:
@@ -1207,7 +1290,7 @@ class SharedDatabaseManager:
                             scheme_code = list(search.keys())[0]
                             quote = mf.get_scheme_quote(scheme_code)
                             if quote and quote.get('nav'):
-                                return float(quote.get('nav'))
+                                return float(quote.get('nav')), scheme_code, 'mftool'
                 except:
                     pass
             
@@ -1215,16 +1298,17 @@ class SharedDatabaseManager:
             try:
                 from enhanced_price_fetcher import EnhancedPriceFetcher
                 fetcher = EnhancedPriceFetcher()
-                price = fetcher.fetch_live_price(ticker, stock_name, asset_type)
+                price, source = fetcher.get_current_price(ticker, asset_type, stock_name)
+                resolved_ticker = getattr(fetcher, "_last_resolved_ticker", ticker)
                 if price and price > 0:
-                    return float(price)
+                    return float(price), resolved_ticker, source or 'enhanced_fetcher'
             except:
                 pass
         
         except Exception:
             pass
         
-        return 0.0
+        return 0.0, ticker, 'not_found'
     
     def _store_current_price(self, ticker: str, price: float, asset_type: str = 'stock'):
         """

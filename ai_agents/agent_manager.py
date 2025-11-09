@@ -13,6 +13,7 @@ from .ai_market_agent import AIMarketAnalysisAgent
 from .ai_strategy_agent import AIInvestmentStrategyAgent
 from .ai_scenario_agent import AIScenarioAnalysisAgent
 from .ai_recommendation_agent import AIInvestmentRecommendationAgent
+from .ai_channel_agent import AIChannelAnalyticsAgent
 from .communication import AgentCommunication
 from .performance_optimizer import performance_optimizer
 
@@ -31,6 +32,7 @@ class AgentManager:
         self.strategy_agent = AIInvestmentStrategyAgent()
         self.scenario_agent = AIScenarioAnalysisAgent()
         self.recommendation_agent = AIInvestmentRecommendationAgent()
+        self.channel_agent = AIChannelAnalyticsAgent()
         
         # Register agents for communication
         self.communication.register_agent("portfolio_agent", self.portfolio_agent)
@@ -38,13 +40,15 @@ class AgentManager:
         self.communication.register_agent("strategy_agent", self.strategy_agent)
         self.communication.register_agent("scenario_agent", self.scenario_agent)
         self.communication.register_agent("recommendation_agent", self.recommendation_agent)
+        self.communication.register_agent("channel_agent", self.channel_agent)
         
         self.agents = {
             "portfolio": self.portfolio_agent,
             "market": self.market_agent,
             "strategy": self.strategy_agent,
             "scenario": self.scenario_agent,
-            "recommendation": self.recommendation_agent
+            "recommendation": self.recommendation_agent,
+            "channel": self.channel_agent
         }
         
         self.last_analysis = None
@@ -83,7 +87,7 @@ class AgentManager:
             from threading import Thread
             
             # Use ThreadPoolExecutor to run agents in parallel
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
                 # Submit all agent analyses at once
                 portfolio_future = executor.submit(
                     performance_optimizer.optimize_agent_analysis,
@@ -124,6 +128,14 @@ class AgentManager:
                     analysis_data,
                     "investment_recommendations"
                 )
+
+                channel_future = executor.submit(
+                    performance_optimizer.optimize_agent_analysis,
+                    "channel_agent",
+                    self.channel_agent.analyze,
+                    analysis_data,
+                    "channel_insights"
+                )
                 
                 # Wait for all to complete and get results
                 portfolio_insights = portfolio_future.result()
@@ -131,6 +143,7 @@ class AgentManager:
                 strategy_insights = strategy_future.result()
                 scenario_insights = scenario_future.result()
                 recommendation_insights = recommendation_future.result()
+                channel_insights = channel_future.result()
             
             # Combine insights
             combined_analysis = {
@@ -139,8 +152,17 @@ class AgentManager:
                 "market_insights": market_insights.get("insights", []),
                 "strategy_insights": strategy_insights.get("insights", []),
                 "scenario_insights": scenario_insights.get("insights", []),
+                "channel_insights": channel_insights.get("insights", []),
+                "channel_summary": channel_insights.get("metadata", {}).get("channel_summary", {}) if isinstance(channel_insights, dict) else {},
                 "investment_recommendations": recommendation_insights.get("insights", []),
-                "summary": self._generate_analysis_summary(portfolio_insights, market_insights, strategy_insights, scenario_insights, recommendation_insights)
+                "summary": self._generate_analysis_summary(
+                    portfolio_insights,
+                    market_insights,
+                    strategy_insights,
+                    scenario_insights,
+                    channel_insights,
+                    recommendation_insights
+                )
             }
             
             # Cache the analysis
@@ -153,7 +175,15 @@ class AgentManager:
             self.logger.error(f"Error in portfolio analysis: {str(e)}")
             return {"error": str(e), "timestamp": datetime.now().isoformat()}
     
-    def _generate_analysis_summary(self, portfolio_insights: Dict, market_insights: Dict, strategy_insights: Dict, scenario_insights: Dict, recommendation_insights: Dict = None) -> Dict[str, Any]:
+    def _generate_analysis_summary(
+        self,
+        portfolio_insights: Dict,
+        market_insights: Dict,
+        strategy_insights: Dict,
+        scenario_insights: Dict,
+        channel_insights: Dict = None,
+        recommendation_insights: Dict = None
+    ) -> Dict[str, Any]:
         """Generate a summary of all agent insights"""
         
         # Count insights by severity
@@ -162,6 +192,8 @@ class AgentManager:
         all_insights.extend(market_insights.get("insights", []))
         all_insights.extend(strategy_insights.get("insights", []))
         all_insights.extend(scenario_insights.get("insights", []))
+        if channel_insights:
+            all_insights.extend(channel_insights.get("insights", []))
         if recommendation_insights:
             all_insights.extend(recommendation_insights.get("insights", []))
         
@@ -189,9 +221,10 @@ class AgentManager:
         portfolio_insights = self.portfolio_agent.get_insights()
         market_insights = self.market_agent.get_insights()
         strategy_insights = self.strategy_agent.get_insights()
+        channel_insights = self.channel_agent.get_insights()
         
         # Filter for high-priority insights that should be alerts
-        for insight in portfolio_insights + market_insights + strategy_insights:
+        for insight in portfolio_insights + market_insights + strategy_insights + channel_insights:
             if insight.get("severity") in ["high", "critical"]:
                 alerts.append({
                     "type": "proactive_alert",
@@ -219,8 +252,15 @@ class AgentManager:
             "summary": self.analysis_cache.get("summary", {}),
             "portfolio_insights_count": len(self.analysis_cache.get("portfolio_insights", [])),
             "market_insights_count": len(self.analysis_cache.get("market_insights", [])),
-            "strategy_insights_count": len(self.analysis_cache.get("strategy_insights", []))
+            "strategy_insights_count": len(self.analysis_cache.get("strategy_insights", [])),
+            "channel_insights_count": len(self.analysis_cache.get("channel_insights", [])),
         }
+    
+    def get_channel_summary(self) -> Dict[str, Any]:
+        """Get aggregated channel analytics summary"""
+        if not self.analysis_cache:
+            return {}
+        return self.analysis_cache.get("channel_summary", {}) or {}
     
     def _calculate_portfolio_summary(self, holdings: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Calculate comprehensive portfolio summary for scenario analysis"""
@@ -268,6 +308,7 @@ class AgentManager:
         all_insights.extend(self.analysis_cache.get("portfolio_insights", []))
         all_insights.extend(self.analysis_cache.get("market_insights", []))
         all_insights.extend(self.analysis_cache.get("strategy_insights", []))
+        all_insights.extend(self.analysis_cache.get("channel_insights", []))
         
         # Sort by severity (high > medium > low)
         severity_order = {"high": 3, "medium": 2, "low": 1}
@@ -329,3 +370,8 @@ def get_ai_alerts() -> List[Dict[str, Any]]:
     """Get proactive AI alerts"""
     agent_manager = get_agent_manager()
     return agent_manager.get_proactive_alerts()
+
+def get_channel_analytics_summary() -> Dict[str, Any]:
+    """Get channel analytics summary from the channel agent"""
+    agent_manager = get_agent_manager()
+    return agent_manager.get_channel_summary()

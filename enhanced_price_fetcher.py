@@ -3,11 +3,15 @@ Enhanced Price Fetcher with Complete Fallback Chain
 yfinance → mftool → AI (for stocks and mutual funds)
 """
 
+import csv
+import difflib
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
-from typing import Optional, Dict, Any, List
-from datetime import datetime
-import pandas as pd
 
 
 class EnhancedPriceFetcher:
@@ -21,6 +25,7 @@ class EnhancedPriceFetcher:
     def __init__(self):
         self.price_cache = {}
         self.cache_timeout = 300  # 5 minutes
+        self._amfi_cache: Optional[Dict[str, Any]] = None
         
         # Initialize OpenAI for AI fallback
         self.ai_available = False
@@ -62,6 +67,7 @@ class EnhancedPriceFetcher:
             if age < self.cache_timeout:
                 return cached_data['price'], cached_data.get('source', 'cache')
         
+        self._last_resolved_ticker = ticker
         price = None
         source = 'unknown'
         
@@ -70,27 +76,7 @@ class EnhancedPriceFetcher:
         elif asset_type == 'mutual_fund':
             price, source = self._get_mf_price_with_fallback(ticker, fund_name)
         elif asset_type in ['pms', 'aif']:
-            # For PMS/AIF, calculate using CAGR if context provided
-            if hasattr(self, 'pms_aif_calculator') and self.pms_aif_calculator:
-                try:
-                    # Try to get transaction context from cache or use conservative estimate
-                    # This is a simplified version - full context should be provided by caller
-                    ##st.caption(f"      💰 Calculating PMS/AIF value using CAGR...")
-                    
-                    # Use conservative CAGR estimates
-                    conservative_cagr = 0.12 if asset_type == 'aif' else 0.10
-                    
-                    # For now, return a placeholder that indicates CAGR calculation needed
-                    # The actual calculation should be done with proper transaction context
-                    price = None
-                    source = 'cagr_calculation_required'
-                except Exception as e:
-                    ##st.caption(f"      ⚠️ PMS/AIF calculation error: {str(e)}")
-                    price = None
-                    source = 'cagr_error'
-            else:
-                price = None
-                source = 'cagr_calculator_unavailable'
+            price, source = self._get_pms_aif_price(ticker, asset_type)
         elif asset_type == 'bond':
             # Pass bond name for AI fallback
             result = self._get_bond_price(ticker, bond_name=fund_name)
@@ -142,7 +128,20 @@ class EnhancedPriceFetcher:
                 if asset_type == 'stock':
                     # Fetching stock price (silent)
                     current_price, source = self._get_stock_price_with_fallback(ticker)
+                    resolved_ticker = getattr(self, "_last_resolved_ticker", ticker)
                     if current_price:
+                        if resolved_ticker != ticker:
+                            try:
+                                db_manager.supabase.table('stock_master').update({
+                                    'ticker': resolved_ticker,
+                                    'last_updated': datetime.now().isoformat()
+                                }).eq('id', stock_id).execute()
+                                holding['ticker'] = resolved_ticker
+                                ticker = resolved_ticker
+                                print(f"[PRICE_UPDATE] 🔁 Normalized ticker: {resolved_ticker}")
+                            except Exception:
+                                pass
+
                         print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:.2f} (from {source})")
                     
                 elif asset_type == 'mutual_fund':
@@ -150,26 +149,25 @@ class EnhancedPriceFetcher:
                     # Get fund name for enhanced AI fallback
                     fund_name = holding.get('stock_name', '')
                     current_price, source = self._get_mf_price_with_fallback(ticker, fund_name)
+                    resolved_ticker = getattr(self, "_last_resolved_ticker", ticker)
                     if current_price:
+                        if resolved_ticker != ticker:
+                            try:
+                                db_manager.supabase.table('stock_master').update({
+                                    'ticker': resolved_ticker,
+                                    'last_updated': datetime.now().isoformat()
+                                }).eq('id', stock_id).execute()
+                                holding['ticker'] = resolved_ticker
+                                ticker = resolved_ticker
+                                print(f"[PRICE_UPDATE] 🔁 Normalized MF ticker: {resolved_ticker}")
+                            except Exception:
+                                pass
                         print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:.2f} (from {source})")
                     
                 elif asset_type in ['pms', 'aif']:
-                    # Calculating PMS/AIF value (silent)
-                    # Calculate PMS/AIF value using CAGR
-                    if self.pms_aif_calculator:
-                        # Get transaction details for CAGR calculation
-                        transactions = db_manager.get_transactions_by_stock(holding['user_id'], stock_id)
-                        if transactions:
-                            # Use first transaction for calculation
-                            first_transaction = transactions[0]
-                            investment_date = first_transaction['transaction_date']
-                            investment_amount = float(first_transaction['quantity']) * float(first_transaction['price'])
-                            
-                            result = self.pms_aif_calculator.calculate_pms_aif_value(
-                                ticker, investment_date, investment_amount, is_aif=(asset_type == 'aif')
-                            )
-                            current_price = result['current_value'] / float(first_transaction['quantity'])
-                            print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:,.2f} (CAGR calculation)")
+                    current_price, source = self._calculate_pms_aif_live_price(ticker, asset_type, db_manager, holding)
+                    if current_price:
+                        print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:,.2f} (from {source})")
                 
                 elif asset_type == 'bond':
                     # Get bond name for AI fallback
@@ -218,6 +216,7 @@ class EnhancedPriceFetcher:
         5. AI (OpenAI)
         """
         # Fetching with fallback chain (silent)
+        self._last_resolved_ticker = ticker
         
         # Method 1: Try NSE
         # Trying yfinance NSE (silent)
@@ -230,6 +229,7 @@ class EnhancedPriceFetcher:
                 price = float(hist['Close'].iloc[-1])
                 if price > 0:
                     # Found on NSE (silent)
+                    self._last_resolved_ticker = nse_ticker
                     return price, 'yfinance_nse'
         except Exception as e:
             pass
@@ -246,6 +246,7 @@ class EnhancedPriceFetcher:
                 price = float(hist['Close'].iloc[-1])
                 if price > 0:
                     # Found on BSE
+                    self._last_resolved_ticker = bse_ticker
                     return price, 'yfinance_bse'
         except Exception as e:
             pass
@@ -263,6 +264,7 @@ class EnhancedPriceFetcher:
                     price = float(hist['Close'].iloc[-1])
                     if price > 0:
                         # Found without suffix
+                        self._last_resolved_ticker = clean_ticker
                         return price, 'yfinance_raw'
             except Exception as e:
                 pass
@@ -321,15 +323,15 @@ class EnhancedPriceFetcher:
         """
         # Fetching MF with fallback chain
         
+        resolved_code = self._resolve_amfi_code(ticker, fund_name)
+        scheme_code = resolved_code or ticker
+        self._last_resolved_ticker = scheme_code
+
         # Method 1: Try mftool
         # Trying mftool (AMFI API)
         try:
             from mftool import Mftool
             mf = Mftool()
-            
-            # Extract scheme code - remove any prefix
-            scheme_code = ticker.replace('MF_', '').replace('mf_', '').strip()
-            # Using scheme code
             
             quote = mf.get_scheme_quote(scheme_code)
             
@@ -347,6 +349,19 @@ class EnhancedPriceFetcher:
         except Exception as e:
             pass
 # mftool failed
+
+        # Fallback to cached AMFI dataset if available
+        try:
+            dataset = self._get_amfi_dataset()
+            scheme_entry = dataset.get("code_lookup", {}).get(scheme_code)
+            if scheme_entry:
+                nav_value = scheme_entry.get("nav")
+                if nav_value:
+                    price = float(nav_value)
+                    if price > 0:
+                        return price, 'amfi_dataset'
+        except Exception:
+            pass
         
         # Method 2: AI Fallback with Enhanced Context
         # Trying AI (OpenAI) with enhanced context
@@ -379,6 +394,204 @@ class EnhancedPriceFetcher:
         # All methods failed for MF
         return None, 'not_found'
     
+    def _calculate_pms_aif_live_price(
+        self,
+        ticker: str,
+        asset_type: str,
+        db_manager,
+        holding: Dict[str, Any],
+    ) -> Tuple[Optional[float], str]:
+        """Calculate PMS/AIF price for a specific holding using CAGR."""
+        if not self.pms_aif_calculator:
+            return None, 'cagr_calculator_unavailable'
+
+        try:
+            user_id = holding.get('user_id')
+            stock_id = holding.get('stock_id')
+            if not user_id or not stock_id:
+                return None, 'cagr_missing_context'
+
+            transactions = db_manager.get_transactions_by_stock(user_id, stock_id)
+            if not transactions:
+                return None, 'cagr_no_transactions'
+
+            buy_transactions = [
+                txn for txn in transactions
+                if str(txn.get('transaction_type', '')).lower() == 'buy'
+            ] or transactions
+
+            buy_transactions.sort(key=lambda txn: txn.get('transaction_date') or '')
+            first_transaction = buy_transactions[0]
+
+            quantity = float(first_transaction.get('quantity') or 0)
+            price = float(first_transaction.get('price') or 0)
+            investment_date = first_transaction.get('transaction_date')
+            total_quantity = float(holding.get('total_quantity') or quantity or 1)
+            investment_amount = quantity * price
+
+            if investment_amount <= 0 or not investment_date:
+                return None, 'cagr_invalid_transaction'
+
+            result = self.pms_aif_calculator.calculate_pms_aif_value(
+                ticker,
+                investment_date,
+                investment_amount,
+                is_aif=(asset_type == 'aif')
+            )
+
+            current_value = result.get('current_value')
+            if not current_value:
+                return None, 'cagr_no_result'
+
+            nav = current_value / total_quantity if total_quantity > 0 else current_value
+            source = result.get('source', 'cagr_calculated')
+            return nav, source
+        except Exception as exc:
+            return None, f'cagr_error:{exc}'
+
+    def _get_pms_aif_price(self, ticker: str, asset_type: str) -> Tuple[Optional[float], str]:
+        """Get PMS/AIF price using earliest transaction available."""
+        if not self.pms_aif_calculator:
+            return None, 'cagr_calculator_unavailable'
+
+        try:
+            from database_shared import SharedDatabaseManager
+
+            db = SharedDatabaseManager()
+            stock_response = db.supabase.table('stock_master').select('id').eq('ticker', ticker).execute()
+            if not stock_response.data:
+                return None, 'cagr_stock_not_found'
+
+            stock_id = stock_response.data[0]['id']
+            txn_response = db.supabase.table('user_transactions').select(
+                'quantity, price, transaction_date'
+            ).eq('stock_id', stock_id).order('transaction_date', asc=True).limit(1).execute()
+
+            if not txn_response.data:
+                return None, 'cagr_no_transactions'
+
+            first_transaction = txn_response.data[0]
+            quantity = float(first_transaction.get('quantity') or 0)
+            price = float(first_transaction.get('price') or 0)
+            investment_date = first_transaction.get('transaction_date')
+            investment_amount = quantity * price
+
+            if investment_amount <= 0 or not investment_date:
+                return None, 'cagr_invalid_transaction'
+
+            result = self.pms_aif_calculator.calculate_pms_aif_value(
+                ticker,
+                investment_date,
+                investment_amount,
+                is_aif=(asset_type == 'aif')
+            )
+
+            current_value = result.get('current_value')
+            if not current_value:
+                return None, 'cagr_no_result'
+
+            nav = current_value / quantity if quantity > 0 else current_value
+            source = result.get('source', 'cagr_calculated')
+            return nav, source
+        except Exception as exc:
+            return None, f'cagr_error:{exc}'
+
+    @staticmethod
+    def _normalize_scheme_name(name: str) -> str:
+        cleaned = name.lower().strip()
+        replacements = [
+            ("- regular plan - growth", ""),
+            ("- regular plan growth", ""),
+            ("regular plan - growth", ""),
+            ("regular plan growth", ""),
+            ("- growth", ""),
+            ("growth", ""),
+            (" plan", ""),
+            (" (regular)", ""),
+            (" direct plan", ""),
+            (" direct growth", ""),
+        ]
+        for old, new in replacements:
+            cleaned = cleaned.replace(old, new)
+        cleaned = ''.join(ch for ch in cleaned if ch.isalnum())
+        return cleaned
+
+    def _get_amfi_dataset(self) -> Dict[str, Any]:
+        if self._amfi_cache is not None:
+            return self._amfi_cache
+
+        try:
+            response = requests.get("https://portal.amfiindia.com/spages/NAVAll.txt", timeout=60)
+            response.raise_for_status()
+            data = response.text.splitlines()
+            reader = csv.DictReader(data, delimiter=';')
+
+            code_lookup: Dict[str, Dict[str, str]] = {}
+            name_lookup: Dict[str, List[Dict[str, str]]] = {}
+
+            for row in reader:
+                code = (row.get("Scheme Code") or "").strip()
+                name = (row.get("Scheme Name") or "").strip()
+                if not code or not name:
+                    continue
+                scheme = {
+                    "code": code,
+                    "name": name,
+                    "nav": (row.get("Net Asset Value") or "").strip(),
+                    "date": (row.get("Date") or "").strip(),
+                }
+                code_lookup[code] = scheme
+                normalized = self._normalize_scheme_name(name)
+                if normalized:
+                    name_lookup.setdefault(normalized, []).append(scheme)
+
+            self._amfi_cache = {
+                "code_lookup": code_lookup,
+                "name_lookup": name_lookup,
+            }
+        except Exception:
+            self._amfi_cache = {}
+
+        return self._amfi_cache
+
+    def _resolve_amfi_code(self, ticker: str, fund_name: Optional[str]) -> Optional[str]:
+        """Resolve a mutual fund identifier to an AMFI scheme code."""
+        if not ticker:
+            ticker = ''
+        normalized_ticker = ticker.replace('MF_', '').replace('mf_', '').strip()
+        if normalized_ticker.isdigit():
+            return normalized_ticker
+
+        if ticker and ticker.isdigit():
+            return ticker
+
+        dataset = self._get_amfi_dataset()
+        code_lookup = dataset.get("code_lookup", {})
+        name_lookup = dataset.get("name_lookup", {})
+
+        if not dataset:
+            return None
+
+        if normalized_ticker in code_lookup:
+            return normalized_ticker
+        if ticker in code_lookup:
+            return ticker
+
+        search_name = fund_name or ticker
+        normalized = self._normalize_scheme_name(search_name)
+        if not normalized:
+            return None
+
+        if normalized in name_lookup:
+            return name_lookup[normalized][0]["code"]
+
+        candidates = difflib.get_close_matches(normalized, name_lookup.keys(), n=3, cutoff=0.72)
+        for candidate in candidates:
+            schemes = name_lookup.get(candidate, [])
+            if schemes:
+                return schemes[0]["code"]
+
+        return None
     def _get_fund_name_from_context(self, ticker: str) -> Optional[str]:
         """Get fund name from database context if available"""
         try:

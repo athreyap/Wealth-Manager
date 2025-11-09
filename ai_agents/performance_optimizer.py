@@ -24,6 +24,7 @@ class PerformanceOptimizer:
             "market_insights": 600,     # 10 minutes
             "scenario_analysis": 900,   # 15 minutes
             "recommendations": 300,     # 5 minutes
+            "channel_insights": 600,    # 10 minutes
             "alerts": 60                # 1 minute
         }
         self.performance_metrics = {

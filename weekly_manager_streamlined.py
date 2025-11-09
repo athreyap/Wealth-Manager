@@ -127,6 +127,9 @@ class StreamlinedWeeklyManager:
             
             # Grouped into weeks for bulk fetching (silent)
             
+            progress_bar = st.empty()
+            progress_text = st.empty()
+
             fetched_count = 0
             updated_tickers = set()
             failed_weeks = []
@@ -340,14 +343,13 @@ class StreamlinedWeeklyManager:
         Calculate PMS/AIF NAV using CAGR (as per your requirements)
         """
         try:
-            # This would integrate with your PMS/AIF calculator
-            # For now, return a placeholder
-            if asset_type == 'pms':
-                return 1000.0  # Placeholder PMS NAV
-            elif asset_type == 'aif':
-                return 1200.0  # Placeholder AIF NAV
-            return None
-        except:
+            fetcher = getattr(self, 'price_fetcher', None)
+            if not fetcher or not hasattr(fetcher, '_get_pms_aif_price'):
+                return None
+
+            price, _ = fetcher._get_pms_aif_price(ticker, asset_type)
+            return price
+        except Exception:
             return None
     
     def _save_week_prices(self, prices: List[Dict[str, Any]], week_monday: datetime, year: int, week_num: int):

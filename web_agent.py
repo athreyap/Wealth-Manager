@@ -17,9 +17,17 @@ from datetime import datetime, timedelta
 import time
 import warnings
 import functools
+import csv
+import importlib
+import difflib
+import json
+import re
 from typing import Dict, List, Any, Optional
 import sys
 import os
+
+import requests
+from dateutil import parser as dateutil_parser
 warnings.filterwarnings('ignore')
 
 # Add current directory to Python path for AI agents import
@@ -36,6 +44,17 @@ if cwd not in sys.path:
 AI_AGENTS_AVAILABLE = False
 AI_FILE_EXTRACTION_ENABLED = False  # DISABLED to avoid API quota issues - use direct CSV/Excel processing
 AI_TICKER_RESOLUTION_ENABLED = True  # ENABLED - uses Gemini fallback (free/cheap)
+
+AMFI_NAV_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
+
+try:
+    _assistant_helper = importlib.import_module("assistant_helper")
+    run_gpt5_completion = getattr(_assistant_helper, "run_gpt5_completion")
+except Exception as exc:  # pragma: no cover - runtime dependency
+    run_gpt5_completion = None  # type: ignore[assignment]
+    AI_COMPLETION_IMPORT_ERROR = exc
+else:
+    AI_COMPLETION_IMPORT_ERROR = None
 
 try:
     from ai_agents.agent_manager import get_agent_manager, run_ai_analysis, get_ai_recommendations, get_ai_alerts
@@ -307,7 +326,7 @@ def detect_corporate_actions(user_id, db):
                 print(f"  - {action['ticker']}: 1:{action['split_ratio']} {action['action_type']}")
         
         return corporate_actions
-        
+
     except Exception as e:
         print(f"[CORPORATE_ACTIONS] Error detecting: {e}")
         return []
@@ -452,6 +471,7 @@ def should_update_prices_today(holdings, db_manager):
             needs_update.append(holding)
     
     return needs_update
+
 if 'bulk_ai_fetcher' not in st.session_state:
     st.session_state.bulk_ai_fetcher = BulkAIFetcher()
 if 'weekly_manager' not in st.session_state:
@@ -567,7 +587,7 @@ def login_page():
                 type=['csv', 'xlsx', 'xls'],
                 accept_multiple_files=True,
                 help="Upload CSV or Excel files with transaction data. Format: date,ticker,quantity,transaction_type,price,stock_name,sector,channel"
-        )
+            )
         
         if st.button("Register"):
             if password != confirm_password:
@@ -631,6 +651,428 @@ def login_page():
                         st.rerun()
                 else:
                     st.error(f"Registration failed: {result['error']}")
+
+
+def normalize_scheme_name(name: str) -> str:
+    """Normalize mutual fund scheme names for comparison."""
+    cleaned = name.lower().strip()
+    replacements = [
+        ("- regular plan - growth", ""),
+        ("- regular plan growth", ""),
+        ("regular plan - growth", ""),
+        ("regular plan growth", ""),
+        ("- growth", ""),
+        ("growth", ""),
+        (" plan", ""),
+        (" (regular)", ""),
+        (" direct plan", ""),
+        (" direct growth", ""),
+    ]
+    for old, new in replacements:
+        cleaned = cleaned.replace(old, new)
+    return "".join(ch for ch in cleaned if ch.isalnum())
+
+
+@st.cache_data(ttl=3600)  # Cache AMFI download for 1 hour
+def get_amfi_dataset() -> Dict[str, Any]:
+    """Download AMFI NAV dataset and build lookup tables."""
+    try:
+        response = requests.get(AMFI_NAV_URL, timeout=60)
+        response.raise_for_status()
+
+        data = response.text.splitlines()
+        reader = csv.DictReader(data, delimiter=';')
+
+        schemes: List[Dict[str, str]] = []
+        code_lookup: Dict[str, Dict[str, str]] = {}
+        name_lookup: Dict[str, List[Dict[str, str]]] = {}
+
+        for row in reader:
+            scheme = {
+                "code": (row.get("Scheme Code") or "").strip(),
+                "name": (row.get("Scheme Name") or "").strip(),
+                "nav": (row.get("Net Asset Value") or "").strip(),
+                "date": (row.get("Date") or "").strip(),
+            }
+            if not scheme["code"] or not scheme["name"]:
+                continue
+
+            schemes.append(scheme)
+            code_lookup[scheme["code"]] = scheme
+
+            normalized = normalize_scheme_name(scheme["name"])
+            if normalized:
+                name_lookup.setdefault(normalized, []).append(scheme)
+
+        return {
+            "schemes": schemes,
+            "code_lookup": code_lookup,
+            "name_lookup": name_lookup,
+        }
+    except Exception as exc:  # pragma: no cover - network dependent
+        st.caption(f"   ⚠️ AMFI dataset unavailable: {str(exc)[:80]}")
+        return {"schemes": [], "code_lookup": {}, "name_lookup": {}}
+
+
+def match_scheme_by_name(
+    scheme_name: str,
+    name_lookup: Dict[str, List[Dict[str, str]]],
+    *,
+    max_matches: int = 5,
+) -> List[Dict[str, Any]]:
+    """Return candidate AMFI schemes ranked by similarity."""
+    normalized = normalize_scheme_name(scheme_name)
+    if not normalized or not name_lookup:
+        return []
+
+    if normalized in name_lookup:
+        return [
+            {
+                "code": scheme["code"],
+                "name": scheme["name"],
+                "nav": scheme["nav"],
+                "date": scheme["date"],
+                "score": 1.0,
+            }
+            for scheme in name_lookup[normalized][:max_matches]
+        ]
+
+    candidates = difflib.get_close_matches(
+        normalized,
+        name_lookup.keys(),
+        n=max_matches * 5,
+        cutoff=0.6,
+    )
+
+    matches: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        score = difflib.SequenceMatcher(a=normalized, b=candidate).ratio()
+        for scheme in name_lookup.get(candidate, []):
+            matches.append(
+                {
+                    "code": scheme["code"],
+                    "name": scheme["name"],
+                    "nav": scheme["nav"],
+                    "date": scheme["date"],
+                    "score": score,
+                }
+            )
+
+    matches.sort(key=lambda item: item["score"], reverse=True)
+    return matches[:max_matches]
+
+
+def resolve_mutual_fund_with_amfi(
+    scheme_name: str,
+    current_code: str,
+    dataset: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Resolve mutual fund against AMFI dataset using code and name heuristics."""
+    code_lookup = dataset.get("code_lookup", {})
+    name_lookup = dataset.get("name_lookup", {})
+
+    result: Dict[str, Any] = {
+        "status": "unresolved",
+        "direct_scheme": None,
+        "matches": [],
+    }
+
+    cleaned_code = str(current_code).strip()
+    direct_scheme = code_lookup.get(cleaned_code)
+    matches = match_scheme_by_name(scheme_name, name_lookup)
+
+    result["matches"] = matches
+
+    if direct_scheme:
+        normalized_target = normalize_scheme_name(scheme_name) if scheme_name else ""
+        normalized_direct = normalize_scheme_name(direct_scheme["name"]) if direct_scheme["name"] else ""
+        similarity = (
+            difflib.SequenceMatcher(a=normalized_target, b=normalized_direct).ratio()
+            if normalized_target and normalized_direct
+            else 0.0
+        )
+        result["direct_scheme"] = {**direct_scheme, "similarity": similarity}
+        result["status"] = "direct" if similarity >= 0.9 else "direct_mismatch"
+        return result
+
+    if matches:
+        result["status"] = "name_matches"
+
+    return result
+
+
+def _format_amfi_matches_for_prompt(matches: List[Dict[str, Any]]) -> str:
+    if not matches:
+        return "None"
+
+    lines = []
+    for candidate in matches[:5]:
+        lines.append(
+            f"- code: {candidate['code']} | name: {candidate['name']} | NAV: {candidate['nav']} ({candidate['date']}) | score: {candidate['score']:.3f}"
+        )
+    return "\n".join(lines)
+
+
+def _extract_json_block(text: str) -> Optional[str]:
+    """Extract first JSON object or array from text."""
+    if not text:
+        return None
+    pattern = re.compile(r"(\{.*\}|\[.*\])", re.DOTALL)
+    match = pattern.search(text)
+    return match.group(1) if match else None
+
+
+def _parse_ai_amfi_response(raw: str) -> Optional[Dict[str, Any]]:
+    """Parse AI response for AMFI code suggestions."""
+    if not raw:
+        return None
+
+    candidates = []
+    try:
+        candidates.append(json.loads(raw))
+    except json.JSONDecodeError:
+        block = _extract_json_block(raw)
+        if block:
+            try:
+                candidates.append(json.loads(block))
+            except json.JSONDecodeError:
+                pass
+
+    for payload in candidates:
+        if isinstance(payload, dict):
+            if "code" in payload:
+                return payload
+            suggestions = payload.get("suggestions")
+            if isinstance(suggestions, list) and suggestions:
+                first = suggestions[0]
+                if isinstance(first, dict) and "code" in first:
+                    return first
+        elif isinstance(payload, list) and payload:
+            first = payload[0]
+            if isinstance(first, dict) and "code" in first:
+                return first
+
+    return None
+
+
+def ai_select_amfi_code(
+    scheme_name: str,
+    user_code: str,
+    matches: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Ask GPT to choose the best AMFI code from candidates."""
+    if run_gpt5_completion is None:
+        return None
+
+    matches_prompt = _format_amfi_matches_for_prompt(matches)
+    user_content = (
+        "Determine the most likely AMFI mutual fund scheme code based on the user-provided name.\n"
+        "Respond with JSON containing at minimum 'code' and 'confidence' (0-1). Include 'reason' if helpful.\n"
+        "If none of the candidates are suitable, return an empty JSON object.\n\n"
+        f"User scheme name: {scheme_name}\n"
+        f"User provided code: {user_code}\n"
+        f"Candidate matches:\n{matches_prompt}"
+    )
+
+    try:
+        response = run_gpt5_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert in Indian mutual funds. Choose the correct AMFI scheme code "
+                        "given candidate matches. Only output JSON."
+                    ),
+                },
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0,
+            max_tokens=200,
+        )
+    except Exception as exc:  # pragma: no cover - network dependent
+        st.caption(f"   ⚠️ AI AMFI suggestion failed: {str(exc)[:80]}")
+        return None
+
+    suggestion = _parse_ai_amfi_response(response)
+    return suggestion
+
+
+def ai_suggest_market_identifiers(
+    name: str,
+    user_ticker: str,
+    *,
+    asset_hint: Optional[str] = None,
+    max_suggestions: int = 3,
+) -> List[Dict[str, Any]]:
+    """Use GPT to propose market identifiers (ticker/AMFI/PMS/AIF) with type classification."""
+    if run_gpt5_completion is None:
+        return []
+
+    hint_text = asset_hint or "unknown"
+    system_message = {
+        "role": "system",
+        "content": (
+            "You map Indian financial instruments to tickers/codes that work with finance APIs. "
+            "Return ONLY JSON array. Each item must include ticker, instrument_type "
+            "(stock, mutual_fund, bond, pms, aif), confidence (0-1), and source "
+            "indicating which API/database to use (yfinance_nse, yfinance_bse, mftool, manual, isin). "
+            "Ensure tickers are directly usable with the stated API."
+        ),
+    }
+    user_message = {
+        "role": "user",
+        "content": (
+            f"Instrument name: {name}\n"
+            f"User ticker/code: {user_ticker}\n"
+            f"Instrument type hint: {hint_text}\n"
+            "Provide up to {max_suggestions} high-confidence identifiers.\n"
+            "Rules:\n"
+            "- Stocks/BSE listings: return NSE (.NS) or BSE (.BO) symbols that resolve on Yahoo Finance.\n"
+            "- Mutual funds: return the 6-digit AMFI scheme code that works with the mftool library.\n"
+            "- Bonds (incl. SGB): return the exchange symbol or ISIN that works with yfinance (e.g., SGBFEB32IV).\n"
+            "- PMS: return SEBI registration code (INP...).\n"
+            "- AIF: return the AIF registration code.\n"
+            "- Exclude guesses that fail these rules.\n"
+            "Respond with a JSON array, e.g.:\n"
+            '[{\"ticker\": \"TIMEX.BO\", \"instrument_type\": \"stock\", \"source\": \"yfinance_bse\", \"confidence\": 0.82, \"notes\": \"BSE symbol\"}]'
+        ).format(max_suggestions=max_suggestions),
+    }
+
+    try:
+        response = run_gpt5_completion(
+            messages=[system_message, user_message],
+            temperature=0,
+            max_tokens=400,
+        )
+    except Exception as exc:  # pragma: no cover - network dependent
+        st.caption(f"   ⚠️ AI identifier suggestion failed: {str(exc)[:80]}")
+        return []
+
+    suggestions: List[Dict[str, Any]] = []
+    candidates: List[Any] = []
+    try:
+        candidates.append(json.loads(response))
+    except json.JSONDecodeError:
+        block = _extract_json_block(response)
+        if block:
+            try:
+                candidates.append(json.loads(block))
+            except json.JSONDecodeError:
+                pass
+
+    for payload in candidates:
+        if isinstance(payload, dict):
+            raw = payload.get("suggestions")
+            if isinstance(raw, list):
+                suggestions = [s for s in raw if isinstance(s, dict)]
+                break
+        elif isinstance(payload, list):
+            suggestions = [item for item in payload if isinstance(item, dict)]
+            break
+
+    if suggestions:
+        return suggestions[:max_suggestions]
+
+    # Deterministic fallbacks when AI cannot help
+    fallback_suggestions: List[Dict[str, Any]] = []
+    ticker_clean = (user_ticker or "").strip()
+    name_lower = (name or "").lower()
+    hint_lower = hint_text.lower()
+
+    if ticker_clean.isdigit() and len(ticker_clean) <= 6:
+        fallback_suggestions.append({
+            "ticker": f"{ticker_clean}.BO" if not ticker_clean.endswith(".BO") else ticker_clean,
+            "instrument_type": "stock",
+            "confidence": 0.6,
+            "source": "yfinance_bse",
+            "notes": "Numeric ticker mapped to BSE code",
+        })
+
+    if ("mutual_fund" in hint_lower) or ("fund" in name_lower):
+        try:
+            dataset = get_amfi_dataset()
+            amfi_resolution = resolve_mutual_fund_with_amfi(name or ticker_clean, ticker_clean, dataset)
+
+            candidate_code = None
+            confidence = 0.0
+
+            if amfi_resolution.get("direct_scheme"):
+                candidate_code = amfi_resolution["direct_scheme"]["code"]
+                confidence = 0.9 if amfi_resolution["status"] == "direct" else 0.75
+            elif amfi_resolution.get("matches"):
+                candidate_code = amfi_resolution["matches"][0]["code"]
+                confidence = amfi_resolution["matches"][0].get("score", 0.7)
+
+            if candidate_code:
+                fallback_suggestions.append({
+                    "ticker": candidate_code,
+                    "instrument_type": "mutual_fund",
+                    "confidence": min(1.0, confidence),
+                    "source": "amfi_lookup",
+                    "notes": "Resolved using AMFI dataset",
+                })
+        except Exception:
+            pass
+
+    if fallback_suggestions:
+        return fallback_suggestions[:max_suggestions]
+
+    return []
+
+
+def _should_refine_identifier(
+    original_ticker: str,
+    resolved_data: Dict[str, Any],
+) -> bool:
+    verified_ticker = (resolved_data.get('ticker') or "").strip()
+    asset_type = (resolved_data.get('asset_type') or "").lower()
+    if not verified_ticker:
+        return True
+    if verified_ticker == original_ticker:
+        return True
+    if asset_type == 'stock' and not (verified_ticker.endswith('.NS') or verified_ticker.endswith('.BO')):
+        return True
+    if asset_type == 'mutual_fund' and not verified_ticker.isdigit():
+        return True
+    if asset_type == 'bond' and verified_ticker.isdigit():
+        return True
+    if asset_type in {'pms', 'aif'} and verified_ticker == original_ticker:
+        return True
+    return False
+
+
+def refine_resolved_identifier_with_ai(
+    original_ticker: str,
+    resolved_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Refine ticker/type using GPT suggestions when deterministic mapping is weak."""
+    if run_gpt5_completion is None:
+        return resolved_data
+
+    if not _should_refine_identifier(original_ticker, resolved_data):
+        return resolved_data
+
+    name = resolved_data.get('name') or original_ticker
+    asset_hint = resolved_data.get('asset_type')
+    suggestions = ai_suggest_market_identifiers(name, original_ticker, asset_hint=asset_hint)
+    if not suggestions:
+        return resolved_data
+
+    for candidate in suggestions:
+        ticker_candidate = (candidate.get('ticker') or "").strip()
+        instrument_type = (candidate.get('instrument_type') or "").strip().lower()
+        if not ticker_candidate or not instrument_type:
+            continue
+
+        resolved_data['ticker'] = ticker_candidate
+        resolved_data['asset_type'] = instrument_type
+        resolved_data['source'] = candidate.get('source', resolved_data.get('source', 'ai'))
+        resolved_data['confidence'] = candidate.get('confidence')
+        resolved_data['notes'] = candidate.get('notes')
+        break
+
+    return resolved_data
+
 
 def search_mftool_for_amfi_code(scheme_name):
     """
@@ -932,7 +1374,7 @@ Return ONLY the JSON object, nothing else."""
             except Exception as e:
                 st.caption(f"   ❌ Gemini also failed: {str(e)[:50]}")
                 return {}
-        
+
         if not ai_response:
             return {}
         
@@ -1251,12 +1693,45 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                             except:
                                 continue
                         
+                        # Final fallback: try python-dateutil parser with different assumptions
+                        for dayfirst_flag in (
+                            preferred_format != 'monthfirst',
+                            True,
+                            False,
+                        ):
+                            try:
+                                dt = dateutil_parser.parse(
+                                    date_str,
+                                    dayfirst=dayfirst_flag,
+                                    fuzzy=True,
+                                )
+                                return dt.strftime('%Y-%m-%d')
+                            except Exception:
+                                continue
+
+                        # Final resort: strip non-date characters and retry
+                        cleaned = re.sub(r'[^0-9A-Za-z:/\\ -]', ' ', date_str)
+                        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+                        for dayfirst_flag in (True, False):
+                            try:
+                                dt = dateutil_parser.parse(
+                                    cleaned,
+                                    dayfirst=dayfirst_flag,
+                                    fuzzy=True,
+                                )
+                                return dt.strftime('%Y-%m-%d')
+                            except Exception:
+                                continue
+
                         # If all strategies failed, return empty
                         return ''
                     except Exception as e:
                         # Log error for debugging (but don't break the import)
                         print(f"[DATE_PARSE_ERROR] Failed to parse date '{date_str}': {str(e)}")
                         return ''
+                    finally:
+                        pass
                 
                 # Show progress
                 progress_bar = st.progress(0)
@@ -1304,6 +1779,8 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                                 asset_type = 'mutual_fund'
                             else:
                                 asset_type = 'stock'
+                        else:
+                            asset_type = str(asset_type)
                         
                         # For PMS, AIF, Bonds - ignore CSV ticker, use stock_name as placeholder
                         # AI will fetch proper ticker/code later
@@ -1373,11 +1850,11 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                             'sector': 'bond' if asset_type == 'bond' else str(safe_value(row.get('sector', 'Unknown'), 'Unknown')),
                             'filename': uploaded_file.name
                         }
-                    
+
                         result = db.add_transaction(transaction_data)
                         if result.get('success'):
                             imported += 1
-                            
+
                             # Add small delay every 50 transactions to avoid overwhelming database
                             if imported % 50 == 0:
                                 import time
@@ -1387,10 +1864,9 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                             error_msg = result.get('error', 'Unknown error')
                             if 'duplicate' in error_msg.lower():
                                 skipped += 1  # Count duplicates as skipped
-                                pass  # Silent for duplicates
                             elif '502' in error_msg or 'bad gateway' in error_msg.lower():
                                 # 502 error - Supabase server issue
-                                st.warning(f"   ⚠️ Database server error (502). Retrying in 2 seconds...")
+                                st.warning("   ⚠️ Database server error (502). Retrying in 2 seconds...")
                                 import time
                                 time.sleep(2)
                                 # Retry once
@@ -1510,6 +1986,14 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                                     # Use AI to get verified tickers and sectors
                                     batch_resolved = ai_resolve_tickers_from_names(batch)
                                     if batch_resolved:
+                                        for original_key, info in batch.items():
+                                            resolved_entry = batch_resolved.get(original_key)
+                                            if not resolved_entry:
+                                                continue
+                                            resolved_entry.setdefault('name', info.get('name'))
+                                            resolved_entry['asset_type'] = info.get('asset_type', resolved_entry.get('asset_type', 'stock'))
+                                            batch_resolved[original_key] = refine_resolved_identifier_with_ai(original_key, resolved_entry)
+                                    if batch_resolved:
                                         all_resolved.update(batch_resolved)
                             
                             # Process PMS/AIF/BONDS one by one (need more careful verification)
@@ -1521,6 +2005,12 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                                     
                                     # Use AI to get verified ticker
                                     single_resolved = ai_resolve_tickers_from_names(single_pair)
+                                    if single_resolved:
+                                        resolved_entry = single_resolved.get(ticker)
+                                        if resolved_entry:
+                                            resolved_entry.setdefault('name', info.get('name'))
+                                            resolved_entry['asset_type'] = info.get('asset_type', resolved_entry.get('asset_type'))
+                                            single_resolved[ticker] = refine_resolved_identifier_with_ai(ticker, resolved_entry)
                                     if single_resolved:
                                         all_resolved.update(single_resolved)
                             
@@ -1555,6 +2045,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                                 # Proceed with updates (duplicates are valid merges!)
                                 updated_count = 0
                                 for original_ticker, resolved_data in resolved_tickers.items():
+                                    resolved_data = refine_resolved_identifier_with_ai(original_ticker, resolved_data)
                                     verified_ticker = resolved_data.get('ticker')
                                     sector = resolved_data.get('sector', 'Unknown')
                                     source = resolved_data.get('source', 'ai')
@@ -1605,8 +2096,9 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                                             else:
                                                 # Create new stock_master record with verified ticker
                                                 # Get asset_type from original groups
-                                                asset_type = stocks_to_resolve.get(original_ticker, {}).get('asset_type') or \
-                                                            others_to_resolve.get(original_ticker, {}).get('asset_type', 'stock')
+                                                asset_type = resolved_data.get('asset_type') or \
+                                                    stocks_to_resolve.get(original_ticker, {}).get('asset_type') or \
+                                                    others_to_resolve.get(original_ticker, {}).get('asset_type', 'stock')
                                                 
                                                 # For bonds, always set sector to "bond"
                                                 if asset_type == 'bond':
@@ -1623,9 +2115,10 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                                                 updated_count += 1
                                         else:
                                             # Just update sector if ticker is same
-                                            db.supabase.table('stock_master').update({
-                                                'sector': sector
-                                            }).eq('ticker', verified_ticker).execute()
+                                            update_payload = {'sector': sector}
+                                            if resolved_data.get('asset_type'):
+                                                update_payload['asset_type'] = resolved_data['asset_type']
+                                            db.supabase.table('stock_master').update(update_payload).eq('ticker', verified_ticker).execute()
                                             updated_count += 1
                                 
                                 if updated_count > 0:
@@ -1642,61 +2135,120 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     
                     if mf_transactions:
                         mf_updated = 0
+                        amfi_dataset = get_amfi_dataset()
+                        code_lookup = amfi_dataset.get('code_lookup', {})
                         for trans in mf_transactions:
-                            scheme_name = trans.get('stock_name', '')
-                            current_ticker = trans.get('ticker', '')
-                            
-                            # Skip if already has numeric AMFI code
-                            if current_ticker.isdigit() and len(current_ticker) == 6:
-                                continue
-                            
-                            # Search mftool for AMFI code
-                            result = search_mftool_for_amfi_code(scheme_name)
-                            
-                            if result:
-                                amfi_code = result['ticker']
-                                matched_name = result['name']
-                                confidence = result.get('match_confidence', 0)
-                                
-                                # Check if target ticker already exists in stock_master
-                                existing_stock = db.supabase.table('stock_master').select('id').eq(
-                                    'ticker', amfi_code
-                                ).execute()
-                                
-                                # Get the old stock_master record
-                                old_stock = db.supabase.table('stock_master').select('id').eq(
-                                    'ticker', current_ticker
-                                ).execute()
-                                
-                                if existing_stock.data:
-                                    # Target AMFI code already exists, point transactions to it
-                                    target_stock_id = existing_stock.data[0]['id']
-                                    
-                                    if old_stock.data:
-                                        old_stock_id = old_stock.data[0]['id']
-                                        
-                                        # Update all transactions to point to existing stock
-                                        db.supabase.table('user_transactions').update({
-                                            'stock_id': target_stock_id
-                                        }).eq('stock_id', old_stock_id).execute()
-                                        
-                                        # Delete old stock_master record
-                                        db.supabase.table('stock_master').delete().eq('id', old_stock_id).execute()
-                                        
-                                        st.caption(f"      ✓ MF: {scheme_name[:40]} → {amfi_code} (merged)")
-                                        mf_updated += 1
+                            scheme_name = trans.get('stock_name', '') or ''
+                            current_ticker = str(trans.get('ticker', '') or '').strip()
+
+                            final_code = None
+                            final_name = None
+                            final_source = None
+                            ai_confidence = None
+
+                            resolution = resolve_mutual_fund_with_amfi(scheme_name, current_ticker, amfi_dataset)
+                            status = resolution.get('status')
+                            direct_scheme = resolution.get('direct_scheme')
+                            matches = resolution.get('matches', [])
+
+                            if status == 'direct' and direct_scheme:
+                                final_code = direct_scheme['code']
+                                final_name = direct_scheme['name']
+                                final_source = 'amfi_direct'
+                            elif status in {'direct_mismatch', 'name_matches'}:
+                                top_match = matches[0] if matches else None
+                                if top_match and top_match.get('score', 0) >= 0.92:
+                                    final_code = top_match['code']
+                                    final_name = top_match['name']
+                                    final_source = 'amfi_name_match'
                                 else:
-                                    # Target doesn't exist, safe to update
-                                    if old_stock.data:
-                                        db.supabase.table('stock_master').update({
-                                            'ticker': amfi_code,
-                                            'stock_name': matched_name,
-                                            'sector': 'Mutual Fund'
-                                        }).eq('id', old_stock.data[0]['id']).execute()
-                                        
-                                        st.caption(f"      ✓ MF: {scheme_name[:40]} → {amfi_code} ({confidence:.0%} match)")
-                                        mf_updated += 1
-                        
+                                    ai_choice = ai_select_amfi_code(scheme_name, current_ticker, matches)
+                                    if ai_choice and ai_choice.get('code'):
+                                        candidate_code = str(ai_choice['code']).strip()
+                                        scheme = code_lookup.get(candidate_code)
+                                        if scheme:
+                                            final_code = candidate_code
+                                            final_name = scheme['name']
+                                            final_source = 'ai_amfi'
+                                            ai_confidence = ai_choice.get('confidence')
+                                    elif status == 'direct_mismatch' and direct_scheme:
+                                        final_code = direct_scheme['code']
+                                        final_name = direct_scheme['name']
+                                        final_source = 'amfi_direct_mismatch'
+                            else:
+                                if matches:
+                                    ai_choice = ai_select_amfi_code(scheme_name, current_ticker, matches)
+                                    if ai_choice and ai_choice.get('code'):
+                                        candidate_code = str(ai_choice['code']).strip()
+                                        scheme = code_lookup.get(candidate_code)
+                                        if scheme:
+                                            final_code = candidate_code
+                                            final_name = scheme['name']
+                                            final_source = 'ai_amfi'
+                                            ai_confidence = ai_choice.get('confidence')
+
+                            if not final_code:
+                                result = search_mftool_for_amfi_code(scheme_name)
+                                if result:
+                                    final_code = result['ticker']
+                                    final_name = result['name']
+                                    final_source = 'mftool'
+                                    ai_confidence = result.get('match_confidence')
+
+                            if not final_code:
+                                continue
+
+                            if final_code == current_ticker and final_source != 'amfi_direct_mismatch':
+                                continue
+
+                            old_stock = db.supabase.table('stock_master').select('id').eq(
+                                'ticker', current_ticker
+                            ).execute()
+
+                            confidence_note = ""
+                            if isinstance(ai_confidence, (int, float)):
+                                confidence_note = f" ({ai_confidence:.0%})"
+
+                            if final_code == current_ticker:
+                                if old_stock.data and final_name:
+                                    db.supabase.table('stock_master').update({
+                                        'stock_name': final_name,
+                                        'sector': 'Mutual Fund'
+                                    }).eq('id', old_stock.data[0]['id']).execute()
+                                    st.caption(
+                                        f"      ✓ MF: {scheme_name[:40]} name harmonized [{final_source or 'amfi'}{confidence_note}]"
+                                    )
+                                    mf_updated += 1
+                                continue
+
+                            existing_stock = db.supabase.table('stock_master').select('id').eq(
+                                'ticker', final_code
+                            ).execute()
+
+                            if existing_stock.data:
+                                target_stock_id = existing_stock.data[0]['id']
+                                if old_stock.data:
+                                    old_stock_id = old_stock.data[0]['id']
+                                    db.supabase.table('user_transactions').update({
+                                        'stock_id': target_stock_id
+                                    }).eq('stock_id', old_stock_id).execute()
+                                    db.supabase.table('stock_master').delete().eq('id', old_stock_id).execute()
+                                    st.caption(
+                                        f"      ✓ MF: {scheme_name[:40]} → {final_code} [{final_source or 'amfi'}{confidence_note}] (merged)"
+                                    )
+                                    mf_updated += 1
+                            else:
+                                if old_stock.data:
+                                    db.supabase.table('stock_master').update({
+                                        'ticker': final_code,
+                                        'stock_name': final_name or scheme_name,
+                                        'sector': 'Mutual Fund'
+                                    }).eq('id', old_stock.data[0]['id']).execute()
+                                    st.caption(
+                                        f"      ✓ MF: {scheme_name[:40]} → {final_code} [{final_source or 'amfi'}{confidence_note}]"
+                                    )
+                                    mf_updated += 1
+
                         if mf_updated > 0:
                             st.caption(f"   ✅ Updated {mf_updated} mutual fund AMFI codes")
                     
@@ -1911,12 +2463,13 @@ def main_dashboard():
     
     # Navigation
     navigation_options = [
-            "🏠 Portfolio Overview",
-            "📊 P&L Analysis",
+        "🏠 Portfolio Overview",
+        "📊 P&L Analysis",
+        "📡 Channel Analytics",
         "📈 Charts & Analytics",
         "🤖 AI Assistant",
-            "📁 Upload More Files"
-        ]
+        "📁 Upload More Files"
+    ]
     
     # Add AI Insights page if agents are available
     if AI_AGENTS_AVAILABLE:
@@ -1953,6 +2506,8 @@ def main_dashboard():
         portfolio_overview_page()
     elif page == "📊 P&L Analysis":
         pnl_analysis_page()
+    elif page == "📡 Channel Analytics":
+        channel_analytics_page()
     elif page == "📈 Charts & Analytics":
         charts_page()
     elif page == "🤖 AI Assistant":
@@ -2165,7 +2720,7 @@ def portfolio_overview_page():
             # Add to stale_prices if stale (for ALL asset types)
             if is_stale:
                 stale_prices.append(h)
-        
+    
         # Show "Refresh All Prices" button if there are stale prices
         if stale_prices:
             if st.button(f"🔄 Refresh {len(stale_prices)} Price(s)", help=f"Refresh prices for holdings with missing or stale prices"):
@@ -2202,11 +2757,11 @@ def portfolio_overview_page():
                         st.success(f"✅ Updated {updated}/{len(bonds_to_update)} bond price(s)!")
                         st.rerun()
                     else:
-                        st.warning(f"⚠️ No bond prices updated (AI may be unavailable)")
+                        st.warning("⚠️ No bond prices updated (AI may be unavailable)")
                         # Don't rerun if update failed - prevent infinite loop
-        
-        # Show general "Refresh All Prices" button
-        with col3:
+    
+    # Show general "Refresh All Prices" button
+    with col3:
             if st.button("🔄 Refresh All Prices", help="Refresh current prices for all holdings"):
                 with st.spinner("Refreshing all prices (this may take a minute)..."):
                     holdings = get_cached_holdings(user['id'])
@@ -3683,8 +4238,15 @@ def charts_page():
                             response = openai.chat.completions.create(
                                 model="gpt-5",  # Upgraded to GPT-5 for better results
                                 messages=[
-                                    {"role": "system", "content": "You are a professional technical analyst. Provide a brief technical analysis summary based on the indicators provided. Focus on key signals and trading implications. Use emojis and be concise."},
-                                    {"role": "user", "content": tech_summary}
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "You are a professional technical analyst. Provide a brief technical analysis "
+                                            "summary based on the indicators provided. Focus on key signals and trading "
+                                            "implications. Use emojis and be concise."
+                                        )
+                                    },
+                                    {"role": "user", "content": tech_summary},
                                 ]
                                 # Note: GPT-5 only supports default temperature (1)
                                 # Removed max_completion_tokens to allow full response
@@ -3692,13 +4254,13 @@ def charts_page():
                             
                             if response and response.choices and len(response.choices) > 0:
                                 ai_tech_analysis = response.choices[0].message.content
-                                if ai_tech_analysis and ai_tech_analysis.strip():
-                                    st.markdown(f'<div class="ai-response-box"><strong>🤖 Technical Analysis:</strong><br><br>{ai_tech_analysis}</div>', unsafe_allow_html=True)
-                                else:
-                                    # Show fallback if AI response is empty
-                                    st.info("📊 **Technical Indicators Summary:**\n\n" + tech_summary.replace("\n", "\n- "))
+                            if ai_tech_analysis and ai_tech_analysis.strip():
+                                st.markdown(
+                                    f'<div class="ai-response-box"><strong>🤖 Technical Analysis:</strong><br><br>{ai_tech_analysis}</div>',
+                                    unsafe_allow_html=True,
+                                )
                             else:
-                                st.warning("⚠️ Empty response from AI. Showing technical indicators summary instead.")
+                                # Show fallback if AI response is empty
                                 st.info("📊 **Technical Indicators Summary:**\n\n" + tech_summary.replace("\n", "\n- "))
                             
                         except Exception as e:
@@ -4514,6 +5076,161 @@ def charts_page():
             else:
                 st.info("No holdings match the selected filters")
 
+def channel_analytics_page():
+    """Dedicated channel analytics dashboard"""
+    st.header("📡 Channel Analytics")
+
+    user = st.session_state.user
+    holdings = get_cached_holdings(user['id'])
+
+    if not holdings:
+        st.info("No holdings available. Upload transactions to view channel analytics.")
+        return
+
+    df = pd.DataFrame(holdings)
+    if df.empty:
+        st.info("Channel analytics unavailable because holdings data could not be processed.")
+        return
+
+    for col in ['channel', 'total_quantity', 'average_price', 'current_price', 'investment', 'current_value', 'pnl']:
+        if col not in df.columns:
+            df[col] = 0
+
+    df['channel'] = df['channel'].fillna('Unknown').replace('', 'Unknown').astype(str)
+    df['total_quantity'] = pd.to_numeric(df['total_quantity'], errors='coerce').fillna(0.0)
+    df['average_price'] = pd.to_numeric(df['average_price'], errors='coerce').fillna(0.0)
+    df['current_price'] = pd.to_numeric(df['current_price'], errors='coerce').fillna(0.0)
+    df['investment'] = pd.to_numeric(df['investment'], errors='coerce').fillna(0.0)
+    df['current_value'] = pd.to_numeric(df['current_value'], errors='coerce').fillna(0.0)
+    df['pnl'] = pd.to_numeric(df['pnl'], errors='coerce').fillna(0.0)
+
+    df['effective_current_price'] = df['current_price'].where(df['current_price'] > 0, df['average_price'])
+    df.loc[df['investment'] == 0, 'investment'] = df['total_quantity'] * df['average_price']
+    df.loc[df['current_value'] == 0, 'current_value'] = df['total_quantity'] * df['effective_current_price']
+    df.loc[df['pnl'] == 0, 'pnl'] = df['current_value'] - df['investment']
+
+    df['pnl_pct'] = df.apply(
+        lambda row: (row['pnl'] / row['investment'] * 100) if row['investment'] > 0 else 0.0,
+        axis=1
+    )
+
+    channel_summary = df.groupby('channel').agg(
+        total_positions=('ticker', 'count') if 'ticker' in df.columns else ('channel', 'count'),
+        unique_assets=('ticker', 'nunique') if 'ticker' in df.columns else ('channel', 'count'),
+        total_investment=('investment', 'sum'),
+        current_value=('current_value', 'sum'),
+        total_pnl=('pnl', 'sum')
+    ).reset_index()
+
+    channel_summary['pnl_pct'] = channel_summary.apply(
+        lambda row: (row['total_pnl'] / row['total_investment'] * 100) if row['total_investment'] > 0 else 0.0,
+        axis=1
+    )
+    total_current_value = channel_summary['current_value'].sum()
+    if total_current_value > 0:
+        channel_summary['allocation_pct'] = channel_summary['current_value'] / total_current_value * 100
+    else:
+        channel_summary['allocation_pct'] = 0.0
+
+    total_channels = channel_summary.shape[0]
+    total_value = channel_summary['current_value'].sum()
+    total_investment = channel_summary['total_investment'].sum()
+    total_pnl = channel_summary['total_pnl'].sum()
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Channels", total_channels)
+    col2.metric("Total Investment", f"₹{total_investment:,.0f}")
+    col3.metric("Current Value", f"₹{total_value:,.0f}")
+    col4.metric("Aggregate P&L", f"₹{total_pnl:,.0f}")
+
+    if total_investment > 0:
+        st.metric("Portfolio P&L %", f"{(total_pnl / total_investment) * 100:,.2f}%")
+
+    st.markdown("### Channel Performance Overview")
+    st.dataframe(
+        channel_summary.assign(
+            total_investment=lambda df_: df_['total_investment'].map(lambda v: f"₹{v:,.0f}"),
+            current_value=lambda df_: df_['current_value'].map(lambda v: f"₹{v:,.0f}"),
+            total_pnl=lambda df_: df_['total_pnl'].map(lambda v: f"₹{v:,.0f}"),
+            pnl_pct=lambda df_: df_['pnl_pct'].map(lambda v: f"{v:+.2f}%"),
+            allocation_pct=lambda df_: df_['allocation_pct'].map(lambda v: f"{v:.1f}%")
+        ),
+        use_container_width=True
+    )
+
+    st.markdown("### Allocation by Channel")
+    try:
+        fig_allocation = px.pie(
+            channel_summary,
+            values='current_value',
+            names='channel',
+            title="Current Value Distribution by Channel"
+        )
+        st.plotly_chart(fig_allocation, use_container_width=True)
+    except Exception as exc:
+        st.warning(f"Could not render allocation chart: {exc}")
+
+    st.markdown("### Channel P&L % Comparison")
+    try:
+        fig_pnl = px.bar(
+            channel_summary.sort_values('pnl_pct', ascending=False),
+            x='channel',
+            y='pnl_pct',
+            text=channel_summary['pnl_pct'].map(lambda v: f"{v:+.2f}%"),
+            title="Channel Performance (P&L %)"
+        )
+        fig_pnl.update_traces(textposition='outside')
+        fig_pnl.update_layout(yaxis_title="P&L %")
+        st.plotly_chart(fig_pnl, use_container_width=True)
+    except Exception as exc:
+        st.warning(f"Could not render performance chart: {exc}")
+
+    st.markdown("### Channel Details")
+    for _, row in channel_summary.sort_values('current_value', ascending=False).iterrows():
+        channel_name = row['channel']
+        with st.expander(f"{channel_name} • Current Value ₹{row['current_value']:,.0f}", expanded=False):
+            channel_df = df[df['channel'] == channel_name].copy()
+            channel_df_display = channel_df[
+                [col for col in ['ticker', 'stock_name', 'asset_type', 'total_quantity', 'investment', 'current_value', 'pnl', 'pnl_pct']
+                 if col in channel_df.columns]
+            ].copy()
+
+            numeric_columns = ['total_quantity', 'investment', 'current_value', 'pnl', 'pnl_pct']
+            for col in numeric_columns:
+                if col in channel_df_display.columns:
+                    if col == 'pnl_pct':
+                        channel_df_display[col] = channel_df_display[col].map(lambda v: f"{v:+.2f}%")
+                    elif col == 'total_quantity':
+                        channel_df_display[col] = channel_df_display[col].map(lambda v: f"{v:,.2f}")
+                    else:
+                        channel_df_display[col] = channel_df_display[col].map(lambda v: f"₹{v:,.2f}")
+
+            st.dataframe(channel_df_display, use_container_width=True)
+
+            asset_breakdown = channel_df.groupby('asset_type').agg(
+                current_value=('current_value', 'sum'),
+                investment=('investment', 'sum')
+            ).reset_index()
+            if not asset_breakdown.empty:
+                total_channel_value = asset_breakdown['current_value'].sum()
+                if total_channel_value > 0:
+                    asset_breakdown['allocation_pct'] = asset_breakdown['current_value'] / total_channel_value * 100
+                else:
+                    asset_breakdown['allocation_pct'] = 0.0
+                st.markdown("**Asset Allocation within Channel**")
+                st.dataframe(
+                    asset_breakdown.assign(
+                        current_value=lambda df_: df_['current_value'].map(lambda v: f"₹{v:,.0f}"),
+                        investment=lambda df_: df_['investment'].map(lambda v: f"₹{v:,.0f}"),
+                        allocation_pct=lambda df_: df_['allocation_pct'].map(lambda v: f"{v:.1f}%")
+                    ),
+                    use_container_width=True
+                )
+
+    st.markdown("---")
+    st.caption("Tip: Keep channel metadata (e.g., broker/platform names) consistent while uploading transactions to unlock richer analytics.")
+
+
 def ai_assistant_page():
     """Dedicated AI Assistant page"""
     st.header("🤖 AI Assistant")
@@ -4797,7 +5514,7 @@ def ai_assistant_page():
                                     news_query += f" ({company_name})"
                                 if sector:
                                     news_query += f" in {sector} sector"
-                                
+
                                 # Note: This uses AI's training knowledge, not real-time web access
                                 # For true real-time news, you'd need a news API like NewsAPI, Alpha Vantage, etc.
                                 ai_news_response = openai.chat.completions.create(
@@ -4812,13 +5529,13 @@ def ai_assistant_page():
                                 if ai_news_response.choices:
                                     ai_news_text = ai_news_response.choices[0].message.content
                                     # Parse AI response into structured format
-                                    news_articles.append({
-                                        "title": "AI-Generated Market Update",
-                                        "content": ai_news_text,
+                                news_articles.append({
+                                    "title": "AI-Generated Market Update",
+                                    "content": ai_news_text,
                                         "source": "AI Analysis (Training Data)",
-                                        "date": datetime.now().strftime("%Y-%m-%d"),
+                                    "date": datetime.now().strftime("%Y-%m-%d"),
                                         "note": "Based on AI training data - may not include very recent news"
-                                    })
+                                })
                             except Exception as e:
                                 pass
                         
@@ -5561,23 +6278,20 @@ def ai_insights_page():
     
     # Create tabs for different AI insights
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "🎯 Smart Recommendations", 
-        "📊 Portfolio Analysis", 
+        "🎯 Smart Recommendations",
+        "📊 Portfolio Analysis",
         "🔍 Market Insights",
         "🔮 Scenario Analysis",
         "💡 Investment Recommendations",
         "⚙️ Agent Status"
     ])
-    
-    # Run AI analysis ONCE and cache it (all tabs will use the same result)
-    # This prevents running 5 separate analyses (one per tab)
+
     analysis_cache_key = f"ai_analysis_{user['id']}_{len(holdings)}_{len(all_transactions)}"
-    
-    if analysis_cache_key not in st.session_state or not st.session_state.get('ai_analysis_complete', False):
-        # Run analysis once for all tabs
+    analysis_result = st.session_state.get(analysis_cache_key)
+
+    if analysis_result is None or not st.session_state.get('ai_analysis_complete', False):
         with st.spinner("🤖 AI agents analyzing your portfolio (this may take 30-60 seconds)..."):
             try:
-                # Get user profile from database
                 user_profile_data = db.get_user_profile(user['id'])
                 user_profile = {
                     "user_id": user['id'],
@@ -5588,170 +6302,136 @@ def ai_insights_page():
                     "esg_investing": user_profile_data.get('esg_investing', False),
                     "international_exposure": user_profile_data.get('international_exposure', 20)
                 }
-                
-                # Run comprehensive AI analysis with all context data (agents run in parallel)
+
                 from ai_agents.agent_manager import run_ai_analysis
-                analysis_result = run_ai_analysis(holdings, user_profile, pdf_context, all_transactions, historical_prices, stock_master)
-                
-                # Cache the result
+                analysis_result = run_ai_analysis(
+                    holdings,
+                    user_profile,
+                    pdf_context,
+                    all_transactions,
+                    historical_prices,
+                    stock_master
+                )
                 st.session_state[analysis_cache_key] = analysis_result
                 st.session_state['ai_analysis_complete'] = True
             except Exception as e:
                 st.error(f"Error running AI analysis: {str(e)}")
-                st.session_state[analysis_cache_key] = {"error": str(e)}
+                analysis_result = {"error": str(e)}
+                st.session_state[analysis_cache_key] = analysis_result
     else:
-        # Use cached result
         analysis_result = st.session_state[analysis_cache_key]
-    
+
     with tab1:
         st.subheader("🎯 Smart Recommendations")
-        
         try:
-            # Use cached analysis result
             if not analysis_result or "error" in analysis_result:
-                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+                st.error(analysis_result.get('error', 'No analysis result') if analysis_result else "No analysis result")
             else:
-                # Get recommendations from analysis result
                 recommendations = analysis_result.get("investment_recommendations", [])
-                
-                # If no recommendations in result, try getting from agent manager cache
                 if not recommendations:
                     try:
                         from ai_agents.agent_manager import get_ai_recommendations
                         recommendations = get_ai_recommendations(5)
-                    except:
+                    except Exception:
                         recommendations = []
-                
+
                 if recommendations:
                     st.success(f"✅ Found {len(recommendations)} AI recommendations")
-                    
-                    for i, rec in enumerate(recommendations, 1):
-                        severity_color = {
-                            "high": "🔴",
-                            "medium": "🟡", 
-                            "low": "🟢"
-                        }.get(rec.get("severity", "low"), "🟢")
-                        
-                        with st.expander(f"{severity_color} {rec.get('title', 'Recommendation')}", expanded=(rec.get("severity") == "high")):
+                    severity_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+                    for rec in recommendations:
+                        icon = severity_icons.get(rec.get("severity", "low"), "🟢")
+                        with st.expander(f"{icon} {rec.get('title', 'Recommendation')}", expanded=rec.get("severity") == "high"):
                             st.markdown(f"**Description:** {rec.get('description', 'No description')}")
                             st.markdown(f"**Recommendation:** {rec.get('recommendation', 'No recommendation')}")
-                            
                             if rec.get("data"):
                                 st.json(rec["data"])
                 else:
                     st.info("🎉 No urgent recommendations found. Your portfolio looks well-balanced!")
         except Exception as e:
             st.error(f"Error displaying recommendations: {str(e)}")
-    
+
     with tab2:
         st.subheader("📊 Portfolio Analysis")
-        
         try:
-            # Use cached analysis result (no need to run again)
             if not analysis_result or "error" in analysis_result:
-                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+                st.error(analysis_result.get('error', 'No analysis result') if analysis_result else "No analysis result")
             else:
-                if "portfolio_insights" in analysis_result:
-                    # Get portfolio insights directly
-                    portfolio_insights = analysis_result["portfolio_insights"]
-                    
-                    if portfolio_insights:
-                        st.success(f"📈 Portfolio analysis complete - {len(portfolio_insights)} insights found")
-                        
-                        for insight in portfolio_insights:
-                            with st.expander(f"💡 {insight.get('title', 'Insight')}", expanded=False):
-                                st.markdown(insight.get('description', 'No description'))
-                                if insight.get('data'):
-                                    st.json(insight['data'])
-                    else:
-                        st.info("No portfolio insights available yet.")
+                insights = analysis_result.get("portfolio_insights", [])
+                if insights:
+                    st.success(f"📈 Portfolio analysis complete - {len(insights)} insights found")
+                    for insight in insights:
+                        with st.expander(f"💡 {insight.get('title', 'Insight')}", expanded=False):
+                            st.markdown(insight.get('description', 'No description'))
+                            if insight.get('data'):
+                                st.json(insight['data'])
                 else:
-                    st.info("Portfolio insights are being generated...")
+                    st.info("No portfolio insights available yet.")
         except Exception as e:
             st.error(f"Error displaying portfolio analysis: {str(e)}")
-    
+
     with tab3:
         st.subheader("🔍 Market Insights")
-        
         try:
             if not analysis_result or "error" in analysis_result:
-                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+                st.error(analysis_result.get('error', 'No analysis result') if analysis_result else "No analysis result")
             else:
-                if "market_insights" in analysis_result:
-                    market_insights = analysis_result["market_insights"]
-                    
-                    if market_insights:
-                        st.success(f"🌍 Market analysis complete - {len(market_insights)} insights found")
-                        
-                        for insight in market_insights:
-                            with st.expander(f"📊 {insight.get('title', 'Market Insight')}", expanded=False):
-                                st.markdown(insight.get('description', 'No description'))
-                                if insight.get('data'):
-                                    st.json(insight['data'])
-                    else:
-                        st.info("No market insights available yet.")
+                market_insights = analysis_result.get("market_insights", [])
+                if market_insights:
+                    st.success(f"🌍 Market analysis complete - {len(market_insights)} insights found")
+                    for insight in market_insights:
+                        with st.expander(f"📊 {insight.get('title', 'Market Insight')}", expanded=False):
+                            st.markdown(insight.get('description', 'No description'))
+                            if insight.get('data'):
+                                st.json(insight['data'])
                 else:
-                    st.info("Market insights are being generated...")
+                    st.info("No market insights available yet.")
         except Exception as e:
             st.error(f"Error displaying market insights: {str(e)}")
-    
+
     with tab4:
         st.subheader("🔮 Scenario Analysis")
-        
         try:
             if not analysis_result or "error" in analysis_result:
-                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+                st.error(analysis_result.get('error', 'No analysis result') if analysis_result else "No analysis result")
             else:
-                if "scenario_insights" in analysis_result:
-                    scenario_insights = analysis_result["scenario_insights"]
-                    
-                    if scenario_insights:
-                        st.success(f"🔮 Scenario analysis complete - {len(scenario_insights)} scenarios analyzed")
-                        
-                        for scenario in scenario_insights:
-                            with st.expander(f"🎯 {scenario.get('title', 'Scenario')}", expanded=False):
-                                st.markdown(scenario.get('description', 'No description'))
-                                if scenario.get('data'):
-                                    st.json(scenario['data'])
-                    else:
-                        st.info("No scenario insights available yet.")
+                scenario_insights = analysis_result.get("scenario_insights", [])
+                if scenario_insights:
+                    st.success(f"🔮 Scenario analysis complete - {len(scenario_insights)} scenarios analyzed")
+                    for scenario in scenario_insights:
+                        with st.expander(f"🎯 {scenario.get('title', 'Scenario')}", expanded=False):
+                            st.markdown(scenario.get('description', 'No description'))
+                            if scenario.get('data'):
+                                st.json(scenario['data'])
                 else:
-                    st.info("Scenario insights are being generated...")
+                    st.info("No scenario insights available yet.")
         except Exception as e:
             st.error(f"Error displaying scenario analysis: {str(e)}")
-    
+
     with tab5:
         st.subheader("💡 Investment Recommendations")
-        
         try:
             if not analysis_result or "error" in analysis_result:
-                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+                st.error(analysis_result.get('error', 'No analysis result') if analysis_result else "No analysis result")
             else:
-                if "investment_recommendations" in analysis_result:
-                    recommendations = analysis_result["investment_recommendations"]
-                    
-                    if recommendations:
-                        st.success(f"💡 Investment recommendations complete - {len(recommendations)} recommendations found")
-                        
-                        for rec in recommendations:
-                            with st.expander(f"💼 {rec.get('title', 'Recommendation')}", expanded=False):
-                                st.markdown(rec.get('description', 'No description'))
-                                st.markdown(f"**Action:** {rec.get('recommendation', 'No specific action')}")
-                                if rec.get('data'):
-                                    st.json(rec['data'])
-                    else:
-                        st.info("No investment recommendations available yet.")
+                recommendations = analysis_result.get("investment_recommendations", [])
+                if recommendations:
+                    st.success(f"💡 Investment recommendations complete - {len(recommendations)} recommendations found")
+                    for rec in recommendations:
+                        with st.expander(f"💼 {rec.get('title', 'Recommendation')}", expanded=False):
+                            st.markdown(rec.get('description', 'No description'))
+                            st.markdown(f"**Action:** {rec.get('recommendation', 'No specific action')}")
+                            if rec.get('data'):
+                                st.json(rec['data'])
                 else:
-                    st.info("Investment recommendations are being generated...")
+                    st.info("No investment recommendations available yet.")
         except Exception as e:
             st.error(f"Error displaying investment recommendations: {str(e)}")
-    
+
     with tab6:
         st.subheader("⚙️ Agent Status")
-        
         try:
             if not analysis_result or "error" in analysis_result:
-                st.error(f"Analysis error: {analysis_result.get('error', 'Unknown error') if analysis_result else 'No analysis result'}")
+                st.error(analysis_result.get('error', 'No analysis result') if analysis_result else "No analysis result")
             else:
                 st.info("✅ All AI agents have completed their analysis")
                 st.json(analysis_result)
@@ -5889,7 +6569,7 @@ def ai_insights_page():
                         with st.expander(f"📄 {uploaded_pdf.name} - Analysis", expanded=(idx == 0)):
                             st.markdown("### 🤖 AI Analysis")
                             st.markdown(ai_analysis)
-                            st.info(f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, found {len(tables_found)} tables")
+                        st.info(f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, found {len(tables_found)} tables")
                         
                         # Store in chat history (session state)
                         st.session_state.chat_history.append({
@@ -6919,7 +7599,7 @@ def upload_files_page():
             key="ai_file_uploader",
             help="Upload transaction files in any format - AI will extract the data automatically. Supports images too!"
         )
-    
+        
     # Process AI-extracted files if any were uploaded
     if uploaded_files_ai:
             for uploaded_file in uploaded_files_ai:
