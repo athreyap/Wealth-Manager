@@ -1257,6 +1257,124 @@ class SharedDatabaseManager:
             print(f"[CHANNEL_52W] Error computing weekly performance: {exc}")
             return None
 
+    def get_sector_weekly_performance(self, user_id: str) -> Optional[pd.DataFrame]:
+        """
+        Calculate P&L % for each sector using the most recent 52 weeks of historical prices.
+        Returns a DataFrame with columns: sector, investment_52w, current_value_52w, pnl_pct_52w.
+        """
+        try:
+            holdings = self.get_user_holdings(user_id)
+            if not holdings:
+                return None
+
+            sector_data: Dict[str, Dict[str, float]] = {}
+            today = datetime.now().date()
+
+            for holding in holdings:
+                raw_sector = str(holding.get('sector') or '').strip()
+                asset_type_value = str(holding.get('asset_type') or '').strip().lower()
+                if raw_sector:
+                    sector = raw_sector
+                else:
+                    if asset_type_value in ['mutual_fund']:
+                        sector = 'Mutual Fund'
+                    elif asset_type_value in ['etf']:
+                        sector = 'ETF'    
+                    elif asset_type_value in ['pms', 'pms equity']:
+                        sector = 'PMS'
+                    elif asset_type_value in ['aif', 'aif cat iii', 'aif equity']:
+                        sector = 'AIF'
+                    elif asset_type_value in ['bond', 'gold bond', 'sgb']:
+                        sector = 'Bond'
+                    elif asset_type_value == 'stock':
+                        sector = 'Stock'
+                    else:
+                        sector = 'Unknown'
+                sector = sector or 'Unknown'
+                total_qty = float(holding.get('total_quantity') or 0)
+                if total_qty <= 0:
+                    continue
+
+                stock_id = holding.get('stock_id')
+                ticker = holding.get('ticker')
+                if not stock_id or not ticker:
+                    continue
+
+                hist_response = (
+                    self.supabase.table('historical_prices')
+                    .select('price_date, price')
+                    .eq('stock_id', stock_id)
+                    .order('price_date', desc=True)
+                    .limit(60)
+                    .execute()
+                )
+                history = hist_response.data or []
+                if not history:
+                    continue
+
+                history_sorted = sorted(history, key=lambda row: row['price_date'])
+                latest_entry = history_sorted[-1]
+                latest_price = float(latest_entry.get('price') or 0)
+                if latest_price <= 0:
+                    continue
+
+                baseline_price = None
+                for row in history_sorted:
+                    price_date_str = row.get('price_date')
+                    if not price_date_str:
+                        continue
+                    try:
+                        price_date = datetime.strptime(price_date_str, '%Y-%m-%d').date()
+                    except ValueError:
+                        continue
+
+                    if (today - price_date).days >= 365:
+                        baseline_price = float(row.get('price') or 0)
+                    else:
+                        break
+
+                if not baseline_price or baseline_price <= 0:
+                    baseline_price = float(history_sorted[0].get('price') or 0)
+
+                if baseline_price <= 0:
+                    continue
+
+                baseline_value = baseline_price * total_qty
+                latest_value = latest_price * total_qty
+
+                sector_entry = sector_data.setdefault(
+                    sector,
+                    {'investment': 0.0, 'current': 0.0}
+                )
+                sector_entry['investment'] += baseline_value
+                sector_entry['current'] += latest_value
+
+            rows = []
+            for sector, values in sector_data.items():
+                investment = values['investment']
+                current_val = values['current']
+                if investment > 0:
+                    pnl_pct = (current_val - investment) / investment * 100
+                elif current_val > 0:
+                    pnl_pct = 100.0
+                else:
+                    pnl_pct = 0.0
+                rows.append({
+                    'sector': sector,
+                    'investment_52w': investment,
+                    'current_value_52w': current_val,
+                    'pnl_pct_52w': pnl_pct,
+                })
+
+            if not rows:
+                return None
+
+            result = pd.DataFrame(rows)
+            return result.sort_values('sector').reset_index(drop=True)
+        except Exception as exc:
+            print(f"[SECTOR_52W] Error computing weekly performance: {exc}")
+            return None
+
     def get_channel_weekly_history(self, user_id: str) -> List[Dict[str, Any]]:
         """
         Build weekly P&L history per channel for the last ~52 weeks.
@@ -1323,6 +1441,91 @@ class SharedDatabaseManager:
             return history_entries
         except Exception as exc:
             print(f"[CHANNEL_52W] Error building weekly history: {exc}")
+            return []
+
+    def get_sector_weekly_history(self, user_id: str) -> List[Dict[str, Any]]:
+        """
+        Build weekly P&L history per sector for the last ~52 weeks.
+        Returns list of {sector, date, pnl_pct, investment, current_value}
+        """
+        try:
+            holdings = self.get_user_holdings(user_id)
+            if not holdings:
+                return []
+
+            sector_investments: Dict[str, float] = defaultdict(float)
+            sector_values: Dict[str, Dict[datetime.date, float]] = defaultdict(lambda: defaultdict(float))
+
+            for holding in holdings:
+                raw_sector = str(holding.get('sector') or '').strip()
+                asset_type_value = str(holding.get('asset_type') or '').strip().lower()
+                if raw_sector:
+                    sector = raw_sector
+                else:
+                    if asset_type_value in ['mutual_fund', 'etf']:
+                        sector = 'Mutual Fund'
+                    elif asset_type_value in ['pms', 'pms equity']:
+                        sector = 'PMS'
+                    elif asset_type_value in ['aif', 'aif cat iii', 'aif equity']:
+                        sector = 'AIF'
+                    elif asset_type_value in ['bond', 'gold bond', 'sgb']:
+                        sector = 'Bond'
+                    elif asset_type_value == 'stock':
+                        sector = 'Stock'
+                    else:
+                        sector = 'Unknown'
+
+                quantity = float(holding.get('total_quantity') or 0)
+                avg_price = float(holding.get('average_price') or 0)
+                stock_id = holding.get('stock_id')
+
+                if quantity <= 0 or not stock_id:
+                    continue
+
+                sector_investments[sector] += max(quantity * avg_price, 0.0)
+
+                hist_resp = (
+                    self.supabase.table('historical_prices')
+                    .select('price_date, price')
+                    .eq('stock_id', stock_id)
+                    .order('price_date', desc=True)
+                    .limit(65)
+                    .execute()
+                )
+                rows = hist_resp.data or []
+                for row in rows:
+                    price_date = row.get('price_date')
+                    price = row.get('price')
+                    if not price_date or price is None:
+                        continue
+                    try:
+                        dt = datetime.strptime(price_date, '%Y-%m-%d').date()
+                    except ValueError:
+                        continue
+                    sector_values[sector][dt] += float(price) * quantity
+
+            history_entries: List[Dict[str, Any]] = []
+            for sector, date_map in sector_values.items():
+                sorted_dates = sorted(date_map.keys())
+                if len(sorted_dates) > 52:
+                    sorted_dates = sorted_dates[-52:]
+
+                for dt in sorted_dates:
+                    current_value = date_map[dt]
+                    investment = sector_investments.get(sector, 0.0)
+                    pnl_pct = ((current_value - investment) / investment * 100) if investment > 0 else 0.0
+                    history_entries.append({
+                        'sector': sector,
+                        'date': dt.strftime('%Y-%m-%d'),
+                        'pnl_pct': pnl_pct,
+                        'investment': investment,
+                        'current_value': current_value,
+                    })
+
+            history_entries.sort(key=lambda entry: (entry['sector'], entry['date']))
+            return history_entries
+        except Exception as exc:
+            print(f"[SECTOR_52W] Error building weekly history: {exc}")
             return []
     
     def bulk_process_new_stocks_with_comprehensive_data(

@@ -2540,6 +2540,7 @@ def main_dashboard():
         "🏠 Portfolio Overview",
         "📊 P&L Analysis",
         "📡 Channel Analytics",
+        "🏭 Sector Analytics",
         "📈 Charts & Analytics",
         "🤖 AI Assistant",
         "📁 Upload More Files"
@@ -2582,6 +2583,8 @@ def main_dashboard():
         pnl_analysis_page()
     elif page == "📡 Channel Analytics":
         channel_analytics_page()
+    elif page == "🏭 Sector Analytics":
+        sector_analytics_page()
     elif page == "📈 Charts & Analytics":
         charts_page()
     elif page == "🤖 AI Assistant":
@@ -5369,6 +5372,200 @@ def channel_analytics_page():
     st.markdown("---")
     st.caption("Tip: Keep channel metadata (e.g., broker/platform names) consistent while uploading transactions to unlock richer analytics.")
 
+
+def sector_analytics_page():
+    """Dedicated sector analytics dashboard"""
+    st.header("🏭 Sector Analytics")
+
+    user = st.session_state.user
+    holdings = get_cached_holdings(user['id'])
+
+    if not holdings:
+        st.info("No holdings available. Upload transactions to view sector analytics.")
+        return
+
+    df = pd.DataFrame(holdings)
+    if df.empty:
+        st.info("Sector analytics unavailable because holdings data could not be processed.")
+        return
+
+    for col in ['sector', 'total_quantity', 'average_price', 'current_price', 'investment', 'current_value', 'pnl']:
+        if col not in df.columns:
+            df[col] = 0
+
+    df['sector'] = df['sector'].fillna('Unknown').replace('', 'Unknown').astype(str)
+    df['total_quantity'] = pd.to_numeric(df['total_quantity'], errors='coerce').fillna(0.0)
+    df['average_price'] = pd.to_numeric(df['average_price'], errors='coerce').fillna(0.0)
+    df['current_price'] = pd.to_numeric(df['current_price'], errors='coerce').fillna(0.0)
+    df['investment'] = pd.to_numeric(df['investment'], errors='coerce').fillna(0.0)
+    df['current_value'] = pd.to_numeric(df['current_value'], errors='coerce').fillna(0.0)
+    df['pnl'] = pd.to_numeric(df['pnl'], errors='coerce').fillna(0.0)
+
+    df['effective_current_price'] = df['current_price'].where(df['current_price'] > 0, df['average_price'])
+    df.loc[df['investment'] == 0, 'investment'] = df['total_quantity'] * df['average_price']
+    df.loc[df['current_value'] == 0, 'current_value'] = df['total_quantity'] * df['effective_current_price']
+    df.loc[df['pnl'] == 0, 'pnl'] = df['current_value'] - df['investment']
+
+    df['pnl_pct'] = df.apply(
+        lambda row: (row['pnl'] / row['investment'] * 100) if row['investment'] > 0 else 0.0,
+        axis=1
+    )
+
+    sector_summary = df.groupby('sector').agg(
+        total_positions=('ticker', 'count') if 'ticker' in df.columns else ('sector', 'count'),
+        unique_assets=('ticker', 'nunique') if 'ticker' in df.columns else ('sector', 'count'),
+        total_investment=('investment', 'sum'),
+        current_value=('current_value', 'sum'),
+        total_pnl=('pnl', 'sum')
+    ).reset_index()
+
+    sector_summary['pnl_pct'] = sector_summary.apply(
+        lambda row: (row['total_pnl'] / row['total_investment'] * 100) if row['total_investment'] > 0 else 0.0,
+        axis=1
+    )
+    total_current_value = sector_summary['current_value'].sum()
+    if total_current_value > 0:
+        sector_summary['allocation_pct'] = sector_summary['current_value'] / total_current_value * 100
+    else:
+        sector_summary['allocation_pct'] = 0.0
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Sectors", sector_summary.shape[0])
+    col2.metric("Total Investment", f"₹{sector_summary['total_investment'].sum():,.0f}")
+    col3.metric("Current Value", f"₹{sector_summary['current_value'].sum():,.0f}")
+    col4.metric("Aggregate P&L", f"₹{sector_summary['total_pnl'].sum():,.0f}")
+
+    total_investment = sector_summary['total_investment'].sum()
+    if total_investment > 0:
+        st.metric("Portfolio P&L %", f"{(sector_summary['total_pnl'].sum() / total_investment) * 100:,.2f}%")
+
+    st.markdown("### Sector Performance Overview")
+    st.dataframe(
+        sector_summary.assign(
+            total_investment=lambda df_: df_['total_investment'].map(lambda v: f"₹{v:,.0f}"),
+            current_value=lambda df_: df_['current_value'].map(lambda v: f"₹{v:,.0f}"),
+            total_pnl=lambda df_: df_['total_pnl'].map(lambda v: f"₹{v:,.0f}"),
+            pnl_pct=lambda df_: df_['pnl_pct'].map(lambda v: f"{v:+.2f}%"),
+            allocation_pct=lambda df_: df_['allocation_pct'].map(lambda v: f"{v:.1f}%")
+        ),
+        use_container_width=True
+    )
+
+    st.markdown("### Allocation by Sector")
+    try:
+        fig_allocation = px.pie(
+            sector_summary,
+            values='current_value',
+            names='sector',
+            title="Current Value Distribution by Sector"
+        )
+        st.plotly_chart(fig_allocation, use_container_width=True)
+    except Exception as exc:
+        st.warning(f"Could not render allocation chart: {exc}")
+
+    st.markdown("### Sector P&L % Comparison")
+    try:
+        sector_summary_sorted = sector_summary.sort_values('pnl_pct', ascending=False).reset_index(drop=True)
+        fig_pnl = px.bar(
+            sector_summary_sorted,
+            x='sector',
+            y='pnl_pct',
+            text=sector_summary_sorted['pnl_pct'].map(lambda v: f"{v:+.2f}%"),
+            title="Sector Performance (Total P&L %)",
+        )
+        fig_pnl.update_traces(textposition='outside', texttemplate='%{text}')
+        fig_pnl.update_layout(
+            yaxis_title="Total P&L %",
+            yaxis=dict(zeroline=True, zerolinecolor='rgba(128,128,128,0.5)'),
+        )
+        st.plotly_chart(fig_pnl, use_container_width=True)
+    except Exception as exc:
+        st.warning(f"Could not render total performance chart: {exc}")
+
+    try:
+        weekly_history = db.get_sector_weekly_history(user['id'])
+        if weekly_history:
+            tab_weeks = st.tabs(["All Sectors"] + sorted(list({entry['sector'] for entry in weekly_history})))
+
+            with tab_weeks[0]:
+                all_df = pd.DataFrame([entry for entry in weekly_history])
+                fig_all = px.line(
+                    all_df,
+                    x='date',
+                    y='pnl_pct',
+                    color='sector',
+                    title="Sector Performance (Last 52 Weeks)",
+                )
+                fig_all.update_layout(
+                    yaxis_title="Weekly P&L %",
+                    xaxis_title="Date",
+                    hovermode='x unified',
+                )
+                st.plotly_chart(fig_all, use_container_width=True)
+
+            sectors = sorted(list({entry['sector'] for entry in weekly_history}))
+            for idx, sector_name in enumerate(sectors, start=1):
+                with tab_weeks[idx]:
+                    sector_df = pd.DataFrame(
+                        [entry for entry in weekly_history if entry['sector'] == sector_name]
+                    )
+                    if not sector_df.empty:
+                        st.write(f"**{sector_name}** — 52-Week Trend (Select weeks as needed)")
+                        sector_df['date'] = pd.to_datetime(sector_df['date'])
+                        sector_df = sector_df.sort_values('date')
+                        fig_sector = px.line(
+                            sector_df,
+                            x='date',
+                            y='pnl_pct',
+                            markers=True,
+                            title=f"{sector_name} — Weekly P&L %",
+                        )
+                        fig_sector.update_layout(
+                            yaxis_title="Weekly P&L %",
+                            xaxis_title="Date",
+                            hovermode='x unified',
+                        )
+                        st.plotly_chart(fig_sector, use_container_width=True)
+                        st.dataframe(
+                            sector_df[['date', 'pnl_pct', 'investment', 'current_value']].assign(
+                                date=lambda df_: df_['date'].dt.strftime('%Y-%m-%d'),
+                                pnl_pct=lambda df_: df_['pnl_pct'].map(lambda v: f"{v:+.2f}%"),
+                                investment=lambda df_: df_['investment'].map(lambda v: f"₹{v:,.0f}"),
+                                current_value=lambda df_: df_['current_value'].map(lambda v: f"₹{v:,.0f}"),
+                            ),
+                            use_container_width=True,
+                        )
+                    else:
+                        st.info(f"No weekly history available for {sector_name}.")
+        else:
+            st.info("52-week sector performance not available yet—weekly NAV history is still being gathered.")
+    except Exception as exc:
+        st.warning(f"Could not render 52-week performance chart: {exc}")
+
+    st.markdown("### Sector Details")
+    for _, row in sector_summary.sort_values('current_value', ascending=False).iterrows():
+        sector_name = row['sector']
+        with st.expander(f"{sector_name} • Current Value ₹{row['current_value']:,.0f}", expanded=False):
+            sector_df = df[df['sector'] == sector_name].copy()
+            sector_df_display = sector_df[
+                [col for col in ['ticker', 'stock_name', 'asset_type', 'total_quantity', 'investment', 'current_value', 'pnl', 'pnl_pct']
+                 if col in sector_df.columns]
+            ].copy()
+
+            numeric_columns = ['total_quantity', 'investment', 'current_value', 'pnl', 'pnl_pct']
+            for col in numeric_columns:
+                if col in sector_df_display.columns:
+                    if col == 'pnl_pct':
+                        sector_df_display[col] = sector_df_display[col].map(lambda v: f"{v:+.2f}%")
+                    elif col == 'total_quantity':
+                        sector_df_display[col] = sector_df_display[col].map(lambda v: f"{v:,.2f}")
+                    else:
+                        sector_df_display[col] = sector_df_display[col].map(lambda v: f"₹{v:,.2f}")
+
+            st.dataframe(sector_df_display, use_container_width=True)
+
+    st.markdown("---")
+    st.caption("Tip: Keep sector metadata consistent across uploads to unlock richer sector analytics.")
 
 def ai_assistant_page():
     """Dedicated AI Assistant page"""
