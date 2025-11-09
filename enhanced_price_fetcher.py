@@ -26,6 +26,7 @@ class EnhancedPriceFetcher:
         self.price_cache = {}
         self.cache_timeout = 300  # 5 minutes
         self._amfi_cache: Optional[Dict[str, Any]] = None
+        self._stock_alias_cache: Dict[str, List[str]] = {}
         
         # Initialize OpenAI for AI fallback
         self.ai_available = False
@@ -72,7 +73,7 @@ class EnhancedPriceFetcher:
         source = 'unknown'
         
         if asset_type == 'stock':
-            price, source = self._get_stock_price_with_fallback(ticker)
+            price, source = self._get_stock_price_with_fallback(ticker, fund_name)
         elif asset_type == 'mutual_fund':
             price, source = self._get_mf_price_with_fallback(ticker, fund_name)
         elif asset_type in ['pms', 'aif']:
@@ -126,8 +127,8 @@ class EnhancedPriceFetcher:
                 source = None
                 
                 if asset_type == 'stock':
-                    # Fetching stock price (silent)
-                    current_price, source = self._get_stock_price_with_fallback(ticker)
+                    stock_name = holding.get('stock_name')
+                    current_price, source = self._get_stock_price_with_fallback(ticker, stock_name)
                     resolved_ticker = getattr(self, "_last_resolved_ticker", ticker)
                     if current_price:
                         if resolved_ticker != ticker:
@@ -206,7 +207,113 @@ class EnhancedPriceFetcher:
         # Summary
         print(f"[PRICE_UPDATE] Complete: {success_count} succeeded, {failed_count} failed")
     
-    def _get_stock_price_with_fallback(self, ticker: str) -> tuple:
+    def _generate_stock_aliases(self, ticker: str, context_name: Optional[str] = None) -> List[str]:
+        """Generate normalized ticker aliases for stock lookups."""
+        raw = (ticker or "").strip()
+        if not raw:
+            return []
+
+        candidates: List[str] = []
+
+        def _add(value: str) -> None:
+            val = value.strip()
+            if val and val not in candidates:
+                candidates.append(val)
+
+        _add(raw)
+        _add(raw.upper())
+
+        # Convert float-like numeric strings to integers (e.g., "500285.0" -> "500285")
+        for item in list(candidates):
+            try:
+                normalized = item.replace(',', '')
+                numeric_value = float(normalized)
+                if numeric_value.is_integer():
+                    _add(str(int(numeric_value)))
+            except ValueError:
+                continue
+
+        # Ask AI for better aliases if heuristics are insufficient
+        if self.ai_available:
+            minimal_set = len([c for c in candidates if c.isdigit() or c.endswith(('.NS', '.BO'))])
+            if minimal_set == 0:
+                ai_suggestions = self._ai_suggest_stock_aliases(raw, context_name)
+                for suggestion in ai_suggestions:
+                    _add(suggestion)
+
+        return candidates
+
+    def _expand_symbol_variants(self, base_symbols: List[str]) -> List[str]:
+        """Expand base symbols with exchange suffix variants."""
+        variants: List[str] = []
+
+        def _add(symbol: str) -> None:
+            sym = symbol.strip()
+            if sym and sym not in variants:
+                variants.append(sym)
+
+        for symbol in base_symbols:
+            upper = symbol.upper()
+            if upper.endswith('.NS'):
+                _add(upper)
+                _add(upper.replace('.NS', '.BO'))
+                _add(upper.replace('.NS', ''))
+            elif upper.endswith('.BO'):
+                _add(upper)
+                _add(upper.replace('.BO', '.NS'))
+                _add(upper.replace('.BO', ''))
+            else:
+                _add(upper)
+                _add(f"{upper}.NS")
+                _add(f"{upper}.BO")
+
+        return variants
+
+    def _ai_suggest_stock_aliases(self, ticker: str, context_name: Optional[str]) -> List[str]:
+        """Use AI to suggest usable market identifiers for a stock ticker."""
+        cache_key = ticker.strip().upper()
+        if cache_key in self._stock_alias_cache:
+            return self._stock_alias_cache[cache_key]
+
+        if not self.ai_available:
+            return []
+
+        prompt = (
+            "Suggest up to three exchange symbols that resolve on Yahoo Finance for this Indian instrument.\n"
+            "Return ONLY a JSON array of strings (e.g. [\"XYZ.NS\", \"XYZ.BO\"]).\n"
+            "Prioritize NSE (.NS) or BSE (.BO) formats that yfinance understands.\n"
+            f"Instrument Ticker: {ticker}\n"
+            f"Instrument Name: {context_name or ''}\n"
+        )
+
+        try:
+            response = self.openai_client.chat.completions.create(
+                model="gpt-5-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_completion_tokens=150,
+                timeout=20,
+            )
+            ai_text = response.choices[0].message.content.strip()
+            suggestions: List[str] = []
+            import json
+
+            try:
+                parsed = json.loads(ai_text)
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if isinstance(item, str):
+                            cleaned = item.strip().upper()
+                            if cleaned:
+                                suggestions.append(cleaned)
+            except json.JSONDecodeError:
+                pass
+
+            self._stock_alias_cache[cache_key] = suggestions
+            return suggestions
+        except Exception:
+            return []
+
+    def _get_stock_price_with_fallback(self, ticker: str, context_name: Optional[str] = None) -> tuple:
         """
         Stock price fetching with complete fallback:
         1. yfinance NSE (.NS)
@@ -216,62 +323,70 @@ class EnhancedPriceFetcher:
         5. AI (OpenAI)
         """
         # Fetching with fallback chain (silent)
-        self._last_resolved_ticker = ticker
-        
+        stock_name_hint = context_name or self._get_stock_name_from_cache(ticker)
+        base_candidates = self._generate_stock_aliases(ticker, stock_name_hint)
+        symbol_variants = self._expand_symbol_variants(base_candidates or [str(ticker or "").strip().upper()])
+
+        self._last_resolved_ticker = base_candidates[0] if base_candidates else ticker
+
         # Method 1: Try NSE
         # Trying yfinance NSE (silent)
         try:
-            nse_ticker = f"{ticker}.NS" if not ticker.endswith(('.NS', '.BO')) else ticker
-            stock = yf.Ticker(nse_ticker)
-            hist = stock.history(period='1d')
-            
-            if not hist.empty:
-                price = float(hist['Close'].iloc[-1])
-                if price > 0:
-                    # Found on NSE (silent)
-                    self._last_resolved_ticker = nse_ticker
-                    return price, 'yfinance_nse'
-        except Exception as e:
+            for formatted in symbol_variants:
+                if not formatted.endswith('.NS'):
+                    continue
+                stock = yf.Ticker(formatted)
+                hist = stock.history(period='1d')
+
+                if not hist.empty:
+                    price = float(hist['Close'].iloc[-1])
+                    if price > 0:
+                        # Found on NSE (silent)
+                        self._last_resolved_ticker = formatted
+                        return price, 'yfinance_nse'
+        except Exception:
             pass
-            # NSE failed (silent)
-        
+        # NSE failed (silent)
+
         # Method 2: Try BSE
         # Trying yfinance BSE (silent)
         try:
-            bse_ticker = f"{ticker}.BO" if not ticker.endswith(('.NS', '.BO')) else ticker.replace('.NS', '.BO')
-            stock = yf.Ticker(bse_ticker)
-            hist = stock.history(period='1d')
-            
-            if not hist.empty:
-                price = float(hist['Close'].iloc[-1])
-                if price > 0:
-                    # Found on BSE
-                    self._last_resolved_ticker = bse_ticker
-                    return price, 'yfinance_bse'
-        except Exception as e:
+            for formatted in symbol_variants:
+                if not formatted.endswith('.BO'):
+                    continue
+                stock = yf.Ticker(formatted)
+                hist = stock.history(period='1d')
+
+                if not hist.empty:
+                    price = float(hist['Close'].iloc[-1])
+                    if price > 0:
+                        # Found on BSE
+                        self._last_resolved_ticker = formatted
+                        return price, 'yfinance_bse'
+        except Exception:
             pass
 # BSE failed
         
         # Method 3: Try without suffix
         # Trying yfinance without suffix
-        if ticker.endswith(('.NS', '.BO')):
+        for formatted in symbol_variants:
+            if formatted.endswith(('.NS', '.BO')):
+                clean_ticker = formatted.replace('.NS', '').replace('.BO', '')
+            else:
+                clean_ticker = formatted
             try:
-                clean_ticker = ticker.replace('.NS', '').replace('.BO', '')
                 stock = yf.Ticker(clean_ticker)
                 hist = stock.history(period='1d')
-                
+
                 if not hist.empty:
                     price = float(hist['Close'].iloc[-1])
                     if price > 0:
                         # Found without suffix
                         self._last_resolved_ticker = clean_ticker
                         return price, 'yfinance_raw'
-            except Exception as e:
-                pass
+            except Exception:
+                continue
 # Raw ticker failed
-        else:
-            pass
-# Skipped (no suffix to remove)
         
         # Method 4: Try mftool (in case it's a mutual fund)
         ##st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")
@@ -280,7 +395,8 @@ class EnhancedPriceFetcher:
             mf = Mftool()
             
             # Try ticker as scheme code
-            clean_ticker = ticker.replace('.NS', '').replace('.BO', '').replace('MF_', '')
+            primary_candidate = base_candidates[0] if base_candidates else str(ticker or '').strip()
+            clean_ticker = primary_candidate.replace('.NS', '').replace('.BO', '').replace('MF_', '')
             quote = mf.get_scheme_quote(clean_ticker)
             
             if quote and 'nav' in quote:
@@ -297,7 +413,7 @@ class EnhancedPriceFetcher:
         if self.ai_available:
             try:
                 # Get stock name from cache or database if available
-                stock_name = self._get_stock_name_from_cache(ticker)
+                stock_name = context_name or self._get_stock_name_from_cache(ticker)
                 price = self._get_price_from_ai(ticker, 'stock', asset_name=stock_name)
                 if price:
                     # AI found price
@@ -326,6 +442,25 @@ class EnhancedPriceFetcher:
         resolved_code = self._resolve_amfi_code(ticker, fund_name)
         scheme_code = resolved_code or ticker
         self._last_resolved_ticker = scheme_code
+
+        normalized_code = (scheme_code or "").strip()
+        upper_code = normalized_code.upper()
+
+        # Certain wrappers (ETF/InvIT) behave like stocks even if tagged as mutual funds
+        if normalized_code and not normalized_code.isdigit():
+            stock_like_keywords = ('ETF', 'INVIT', 'TRUST')
+            if (
+                normalized_code.endswith(('.NS', '.BO'))
+                or any(keyword in upper_code for keyword in stock_like_keywords)
+            ):
+                stock_price, stock_source = self._get_stock_price_with_fallback(normalized_code, context_name=fund_name)
+                if stock_price:
+                    return stock_price, stock_source
+                # Fall back to trying original ticker as stock if normalized changed the identifier
+                if normalized_code != ticker:
+                    stock_price, stock_source = self._get_stock_price_with_fallback(ticker, context_name=fund_name)
+                    if stock_price:
+                        return stock_price, stock_source
 
         # Method 1: Try mftool
         # Trying mftool (AMFI API)
@@ -504,17 +639,49 @@ class EnhancedPriceFetcher:
             ("- regular plan growth", ""),
             ("regular plan - growth", ""),
             ("regular plan growth", ""),
-            ("- growth", ""),
-            ("growth", ""),
             (" plan", ""),
             (" (regular)", ""),
-            (" direct plan", ""),
-            (" direct growth", ""),
         ]
         for old, new in replacements:
             cleaned = cleaned.replace(old, new)
+        cleaned = ' '.join(cleaned.split())
         cleaned = ''.join(ch for ch in cleaned if ch.isalnum())
         return cleaned
+
+    @staticmethod
+    def _score_scheme_match(scheme_name: str, target_name: str, base_score: float) -> float:
+        weight = base_score
+        scheme_upper = scheme_name.upper()
+        target_upper = (target_name or "").upper()
+
+        def tweak(keyword: str, bonus: float) -> None:
+            nonlocal weight
+            if keyword in target_upper:
+                if keyword in scheme_upper:
+                    weight += bonus
+                else:
+                    weight -= bonus
+            else:
+                if keyword in scheme_upper:
+                    weight -= bonus / 2
+
+        tweak("DIRECT", 0.15)
+        tweak("REGULAR", 0.1)
+        tweak("GROWTH", 0.08)
+        tweak("DIVIDEND", 0.08)
+        tweak("IDCW", 0.08)
+
+        return max(0.0, min(weight, 1.5))
+
+    def _select_best_scheme(self, schemes: List[Dict[str, str]], target_name: str, base_score: float = 1.0) -> Optional[Dict[str, str]]:
+        best_scheme = None
+        best_score = -1.0
+        for scheme in schemes:
+            current_score = self._score_scheme_match(scheme.get("name", ""), target_name, base_score)
+            if current_score > best_score:
+                best_score = current_score
+                best_scheme = scheme
+        return best_scheme
 
     def _get_amfi_dataset(self) -> Dict[str, Any]:
         if self._amfi_cache is not None:
@@ -583,13 +750,25 @@ class EnhancedPriceFetcher:
             return None
 
         if normalized in name_lookup:
-            return name_lookup[normalized][0]["code"]
+            schemes = name_lookup[normalized]
+            best_scheme = self._select_best_scheme(schemes, search_name)
+            if best_scheme:
+                return best_scheme["code"]
 
-        candidates = difflib.get_close_matches(normalized, name_lookup.keys(), n=3, cutoff=0.72)
+        candidates = difflib.get_close_matches(normalized, name_lookup.keys(), n=6, cutoff=0.6)
+        scored_schemes: List[Tuple[Dict[str, str], float]] = []
         for candidate in candidates:
             schemes = name_lookup.get(candidate, [])
-            if schemes:
-                return schemes[0]["code"]
+            if not schemes:
+                continue
+            base_score = difflib.SequenceMatcher(a=normalized, b=candidate).ratio()
+            best_scheme = self._select_best_scheme(schemes, search_name, base_score)
+            if best_scheme:
+                scored_schemes.append((best_scheme, self._score_scheme_match(best_scheme.get("name", ""), search_name, base_score)))
+
+        if scored_schemes:
+            scored_schemes.sort(key=lambda item: item[1], reverse=True)
+            return scored_schemes[0][0]["code"]
 
         return None
     def _get_fund_name_from_context(self, ticker: str) -> Optional[str]:
@@ -1205,19 +1384,15 @@ If not found, return: NOT_FOUND"""
         
         try:
             if asset_type == 'stock':
-                # Try yfinance with multiple suffixes and date ranges
-                suffixes = ['.NS', '.BO', '']
-                for idx, suffix in enumerate(suffixes, 1):
-                    suffix_name = 'NSE' if suffix == '.NS' else 'BSE' if suffix == '.BO' else 'raw'
-                    # Trying yfinance
-                    
+                base_candidates = self._generate_stock_aliases(ticker, fund_name)
+                symbol_variants = self._expand_symbol_variants(base_candidates or [str(ticker or '').strip()])
+
+                for variant in symbol_variants:
                     try:
-                        test_ticker = f"{ticker}{suffix}" if suffix else ticker
-                        stock = yf.Ticker(test_ticker)
-                        
-                        # Try exact date range first
+                        stock = yf.Ticker(variant)
+
                         hist = stock.history(start=start_date, end=end_date)
-                        
+
                         if not hist.empty:
                             prices = []
                             for date, row in hist.iterrows():
@@ -1228,48 +1403,39 @@ If not found, return: NOT_FOUND"""
                                     'price_date': date.strftime('%Y-%m-%d'),
                                     'volume': int(row['Volume'])
                                 })
-                            #st.caption(f"      ✅ Found {len(prices)} historical prices on {suffix_name}")
                             return prices
                         else:
-                            # Try broader date range (±7 days) to find closest date
-                            #st.caption(f"      🔄 {suffix_name}: No exact date, trying ±7 days...")
                             from datetime import datetime, timedelta
                             import pytz
-                            
-                            # Handle timezone-aware datetime comparison
+
                             start_dt = datetime.strptime(start_date, '%Y-%m-%d')
                             end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-                            
-                            # Make timezone-aware
+
                             start_dt = pytz.UTC.localize(start_dt)
                             end_dt = pytz.UTC.localize(end_dt)
-                            
-                            # Expand range by 7 days before and after
+
                             expanded_start = (start_dt - timedelta(days=7)).strftime('%Y-%m-%d')
                             expanded_end = (end_dt + timedelta(days=7)).strftime('%Y-%m-%d')
-                            
+
                             hist_expanded = stock.history(start=expanded_start, end=expanded_end)
-                            
+
                             if not hist_expanded.empty:
-                                # Find closest date to target
                                 target_dt = start_dt
                                 closest_date = None
                                 min_diff = float('inf')
-                                
+
                                 for date, row in hist_expanded.iterrows():
-                                    # Make date timezone-aware for comparison
                                     if date.tzinfo is None:
                                         date = pytz.UTC.localize(date)
-                                    
+
                                     date_diff = abs((date - target_dt).days)
                                     if date_diff < min_diff:
                                         min_diff = date_diff
                                         closest_date = date
-                                
+
                                 if closest_date:
                                     closest_price = float(hist_expanded.loc[closest_date, 'Close'])
-                                    #st.caption(f"      ✅ {suffix_name}: Found closest price on {closest_date.strftime('%Y-%m-%d')} (±{min_diff} days): ₹{closest_price:,.2f}")
-                                    
+
                                     return [{
                                         'asset_symbol': ticker,
                                         'asset_type': 'stock',
@@ -1277,34 +1443,25 @@ If not found, return: NOT_FOUND"""
                                         'price_date': closest_date.strftime('%Y-%m-%d'),
                                         'volume': int(hist_expanded.loc[closest_date, 'Volume'])
                                     }]
-                                else:
-                                    pass
-# No data in expanded range
-                            else:
-                                pass
-# No data found
-                    except Exception as e:
-                        pass
-# Suffix failed
-                
-                # Try mftool (in case it's a mutual fund)
-                ##st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")
+                    except Exception:
+                        continue
+
                 try:
                     from mftool import Mftool
                     mf = Mftool()
-                    
-                    clean_ticker = ticker.replace('.NS', '').replace('.BO', '').replace('MF_', '')
+
+                    primary_candidate = base_candidates[0] if base_candidates else str(ticker or '').strip()
+                    clean_ticker = primary_candidate.replace('.NS', '').replace('.BO', '').replace('MF_', '')
                     hist_data = mf.get_scheme_historical_nav(clean_ticker, as_Dataframe=True)
-                    
+
                     if hist_data is not None and not hist_data.empty:
                         hist_data['date'] = pd.to_datetime(hist_data.index, format='%d-%m-%Y', dayfirst=True)
-                        
-                        # Filter by date range
+
                         start_dt = pd.to_datetime(start_date)
                         end_dt = pd.to_datetime(end_date)
-                        
+
                         filtered = hist_data[(hist_data['date'] >= start_dt) & (hist_data['date'] <= end_dt)]
-                        
+
                         if not filtered.empty:
                             prices = []
                             for idx, row in filtered.iterrows():
@@ -1315,17 +1472,9 @@ If not found, return: NOT_FOUND"""
                                     'price_date': row['date'].strftime('%Y-%m-%d'),
                                     'volume': None
                                 })
-                            #st.caption(f"      ✅ Found {len(prices)} historical NAVs on mftool")
                             return prices
-                        else:
-                            pass
-##st.caption(f"      ❌ mftool: No data in date range")
-                    else:
-                        pass
-##st.caption(f"      ❌ mftool: No historical data")
-                except Exception as e:
+                except Exception:
                     pass
-# mftool failed
             
             elif asset_type == 'mutual_fund':
                 # Try mftool
@@ -1334,7 +1483,8 @@ If not found, return: NOT_FOUND"""
                     from mftool import Mftool
                     mf = Mftool()
                     
-                    scheme_code = ticker.replace('MF_', '') if ticker.startswith('MF_') else ticker
+                    normalized_code = self._resolve_amfi_code(ticker, fund_name) or ticker
+                    scheme_code = normalized_code.replace('MF_', '') if normalized_code.startswith('MF_') else normalized_code
                     hist_data = mf.get_scheme_historical_nav(scheme_code, as_Dataframe=True)
                     
                     if hist_data is not None and not hist_data.empty:

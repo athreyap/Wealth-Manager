@@ -9,10 +9,12 @@ import streamlit as st
 from supabase import create_client, Client
 from typing import Optional, Dict, List, Any, Tuple
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 from dateutil import parser as dateutil_parser
 import re
+from collections import defaultdict
+from pms_aif_calculator import PMS_AIF_Calculator
 
 class SharedDatabaseManager:
     """Manages database with shared historical data architecture"""
@@ -853,9 +855,21 @@ class SharedDatabaseManager:
             response = query.execute()
             holdings = response.data
             
-            # Get channel information from transactions for each holding
+            # Normalize live price information before channel lookup
             for holding in holdings:
                 stock_id = holding['stock_id']
+
+                try:
+                    live_price = float(holding.get('live_price') or 0)
+                except (TypeError, ValueError):
+                    live_price = 0.0
+                try:
+                    current_price_val = float(holding.get('current_price') or 0)
+                except (TypeError, ValueError):
+                    current_price_val = 0.0
+                if live_price > 0 and current_price_val == 0:
+                    holding['current_price'] = live_price
+
                 # Get the most recent channel for this stock
                 channel_response = self.supabase.table('user_transactions').select('channel').eq(
                     'user_id', user_id
@@ -883,9 +897,21 @@ class SharedDatabaseManager:
             response = query.execute()
             holdings = response.data
             
-            # Get channel information from transactions for each holding
+            # Normalize live price information before channel lookup
             for holding in holdings:
                 stock_id = holding['stock_id']
+
+                try:
+                    live_price = float(holding.get('live_price') or 0)
+                except (TypeError, ValueError):
+                    live_price = 0.0
+                try:
+                    current_price_val = float(holding.get('current_price') or 0)
+                except (TypeError, ValueError):
+                    current_price_val = 0.0
+                if live_price > 0 and current_price_val == 0:
+                    holding['current_price'] = live_price
+
                 # Get the most recent channel for this stock
                 channel_response = self.supabase.table('user_transactions').select('channel').eq(
                     'user_id', user_id
@@ -1059,6 +1085,244 @@ class SharedDatabaseManager:
             st.error(f"❌ Error getting missing weeks: {str(e)}")
             import traceback
             st.code(traceback.format_exc())
+            return []
+    
+    def fetch_and_store_missing_weekly_prices(
+        self,
+        user_id: str,
+        missing_weeks: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch and store weekly historical prices for missing combinations.
+        Returns list of entries that could not be fetched.
+        """
+        if not missing_weeks:
+            return []
+
+        try:
+            stock_ids = {entry.get('stock_id') for entry in missing_weeks if entry.get('stock_id')}
+            if not stock_ids:
+                return missing_weeks
+
+            stock_details: Dict[str, Dict[str, Any]] = {}
+            response = self.supabase.table('stock_master').select(
+                'id, ticker, stock_name, asset_type'
+            ).in_('id', list(stock_ids)).execute()
+            for row in response.data or []:
+                stock_details[row['id']] = row
+
+            remaining: List[Dict[str, Any]] = []
+
+            for stock_id in stock_ids:
+                stock_info = stock_details.get(stock_id)
+                if not stock_info:
+                    remaining.extend([entry for entry in missing_weeks if entry.get('stock_id') == stock_id])
+                    continue
+
+                ticker = stock_info.get('ticker')
+                asset_type = stock_info.get('asset_type') or 'stock'
+                stock_name = stock_info.get('stock_name')
+
+                if not ticker:
+                    remaining.extend([entry for entry in missing_weeks if entry.get('stock_id') == stock_id])
+                    continue
+
+                stock_missing = [
+                    entry for entry in missing_weeks if entry.get('stock_id') == stock_id
+                ]
+                if not stock_missing:
+                    continue
+
+                try:
+                    leftovers = self._store_weekly_prices_bulk(
+                        ticker,
+                        {},
+                        asset_type,
+                        stock_name,
+                        target_weeks=stock_missing,
+                        user_id=user_id,
+                    )
+                    if leftovers:
+                        leftover_set = {(int(year), int(week)) for year, week in leftovers}
+                        for entry in stock_missing:
+                            pair = (int(entry.get('year')), int(entry.get('week')))
+                            if pair in leftover_set:
+                                remaining.append(entry)
+                except Exception as exc:
+                    print(f"[WEEKLY_FETCH] Failed for {ticker}: {exc}")
+                    remaining.extend([entry for entry in missing_weeks if entry.get('stock_id') == stock_id])
+
+            return remaining
+        except Exception as exc:
+            print(f"[WEEKLY_FETCH] Error while fetching weekly prices: {exc}")
+            return missing_weeks
+
+    def get_channel_weekly_performance(self, user_id: str) -> Optional[pd.DataFrame]:
+        """
+        Calculate P&L % for each channel using the most recent 52 weeks of historical prices.
+        Returns a DataFrame with columns: channel, investment_52w, current_value_52w, pnl_pct_52w.
+        """
+        try:
+            holdings = self.get_user_holdings(user_id)
+            if not holdings:
+                return None
+
+            channel_data: Dict[str, Dict[str, float]] = {}
+            today = datetime.now().date()
+
+            for holding in holdings:
+                channel = holding.get('channel') or 'Unknown'
+                channel = str(channel).strip() or 'Unknown'
+                total_qty = float(holding.get('total_quantity') or 0)
+                if total_qty <= 0:
+                    continue
+
+                stock_id = holding.get('stock_id')
+                ticker = holding.get('ticker')
+                if not stock_id or not ticker:
+                    continue
+
+                hist_response = (
+                    self.supabase.table('historical_prices')
+                    .select('price_date, price')
+                    .eq('stock_id', stock_id)
+                    .order('price_date', desc=True)
+                    .limit(60)
+                    .execute()
+                )
+                history = hist_response.data or []
+                if not history:
+                    continue
+
+                history_sorted = sorted(history, key=lambda row: row['price_date'])
+                latest_entry = history_sorted[-1]
+                latest_price = float(latest_entry.get('price') or 0)
+                if latest_price <= 0:
+                    continue
+
+                baseline_price = None
+                for row in history_sorted:
+                    price_date_str = row.get('price_date')
+                    if not price_date_str:
+                        continue
+                    try:
+                        price_date = datetime.strptime(price_date_str, '%Y-%m-%d').date()
+                    except ValueError:
+                        continue
+
+                    if (today - price_date).days >= 365:
+                        baseline_price = float(row.get('price') or 0)
+                    else:
+                        break
+
+                if not baseline_price or baseline_price <= 0:
+                    baseline_price = float(history_sorted[0].get('price') or 0)
+
+                if baseline_price <= 0:
+                    continue
+
+                baseline_value = baseline_price * total_qty
+                latest_value = latest_price * total_qty
+
+                channel_entry = channel_data.setdefault(
+                    channel,
+                    {'investment': 0.0, 'current': 0.0}
+                )
+                channel_entry['investment'] += baseline_value
+                channel_entry['current'] += latest_value
+
+            rows = []
+            for channel, values in channel_data.items():
+                investment = values['investment']
+                current_val = values['current']
+                if investment > 0:
+                    pnl_pct = (current_val - investment) / investment * 100
+                elif current_val > 0:
+                    pnl_pct = 100.0
+                else:
+                    pnl_pct = 0.0
+                rows.append({
+                    'channel': channel,
+                    'investment_52w': investment,
+                    'current_value_52w': current_val,
+                    'pnl_pct_52w': pnl_pct,
+                })
+
+            if not rows:
+                return None
+
+            result = pd.DataFrame(rows)
+            return result.sort_values('channel').reset_index(drop=True)
+        except Exception as exc:
+            print(f"[CHANNEL_52W] Error computing weekly performance: {exc}")
+            return None
+
+    def get_channel_weekly_history(self, user_id: str) -> List[Dict[str, Any]]:
+        """
+        Build weekly P&L history per channel for the last ~52 weeks.
+        Returns list of {channel, date, pnl_pct, investment, current_value}
+        """
+        try:
+            holdings = self.get_user_holdings(user_id)
+            if not holdings:
+                return []
+
+            channel_investments: Dict[str, float] = defaultdict(float)
+            channel_values: Dict[str, Dict[datetime.date, float]] = defaultdict(lambda: defaultdict(float))
+
+            for holding in holdings:
+                channel = str(holding.get('channel') or 'Unknown').strip() or 'Unknown'
+                quantity = float(holding.get('total_quantity') or 0)
+                avg_price = float(holding.get('average_price') or 0)
+                stock_id = holding.get('stock_id')
+
+                if quantity <= 0 or not stock_id:
+                    continue
+
+                channel_investments[channel] += max(quantity * avg_price, 0.0)
+
+                hist_resp = (
+                    self.supabase.table('historical_prices')
+                    .select('price_date, price')
+                    .eq('stock_id', stock_id)
+                    .order('price_date', desc=True)
+                    .limit(65)
+                    .execute()
+                )
+                rows = hist_resp.data or []
+                for row in rows:
+                    price_date = row.get('price_date')
+                    price = row.get('price')
+                    if not price_date or price is None:
+                        continue
+                    try:
+                        dt = datetime.strptime(price_date, '%Y-%m-%d').date()
+                    except ValueError:
+                        continue
+                    channel_values[channel][dt] += float(price) * quantity
+
+            history_entries: List[Dict[str, Any]] = []
+            for channel, date_map in channel_values.items():
+                sorted_dates = sorted(date_map.keys())
+                if len(sorted_dates) > 52:
+                    sorted_dates = sorted_dates[-52:]
+
+                for dt in sorted_dates:
+                    current_value = date_map[dt]
+                    investment = channel_investments.get(channel, 0.0)
+                    pnl_pct = ((current_value - investment) / investment * 100) if investment > 0 else 0.0
+                    history_entries.append({
+                        'channel': channel,
+                        'date': dt.strftime('%Y-%m-%d'),
+                        'pnl_pct': pnl_pct,
+                        'investment': investment,
+                        'current_value': current_value,
+                    })
+
+            history_entries.sort(key=lambda entry: (entry['channel'], entry['date']))
+            return history_entries
+        except Exception as exc:
+            print(f"[CHANNEL_52W] Error building weekly history: {exc}")
             return []
     
     def bulk_process_new_stocks_with_comprehensive_data(
@@ -1276,21 +1540,36 @@ class SharedDatabaseManager:
                 try:
                     from mftool import Mftool
                     mf = Mftool()
+
+                    # Attempt to resolve AMFI code using enhanced fetcher logic
+                    resolved_code = None
+                    try:
+                        from enhanced_price_fetcher import EnhancedPriceFetcher
+                        resolver = EnhancedPriceFetcher()
+                        resolved_code = resolver._resolve_amfi_code(ticker, stock_name)
+                    except Exception:
+                        resolved_code = None
                     
-                    # Try ticker as scheme code
-                    quote = mf.get_scheme_quote(ticker)
-                    if quote and quote.get('nav'):
-                            return float(quote.get('nav')), ticker, 'mftool'
+                    possible_codes = []
+                    if resolved_code:
+                        possible_codes.append(resolved_code)
+                    possible_codes.append(ticker)
                     
+                    for code_candidate in possible_codes:
+                        if not code_candidate:
+                            continue
+                        quote = mf.get_scheme_quote(code_candidate)
+                        if quote and quote.get('nav'):
+                            return float(quote.get('nav')), code_candidate, 'mftool'
+
                     # Try searching by name if ticker fails
                     if stock_name:
                         search = mf.search_by_scheme_name(stock_name)
                         if search:
-                            # Get first result
-                            scheme_code = list(search.keys())[0]
-                            quote = mf.get_scheme_quote(scheme_code)
-                            if quote and quote.get('nav'):
-                                return float(quote.get('nav')), scheme_code, 'mftool'
+                            for scheme_code in search.keys():
+                                quote = mf.get_scheme_quote(scheme_code)
+                                if quote and quote.get('nav'):
+                                    return float(quote.get('nav')), scheme_code, 'mftool'
                 except:
                     pass
             
@@ -1340,7 +1619,15 @@ class SharedDatabaseManager:
             print(f"[PRICE] ERROR: {e}")
             pass
     
-    def _store_weekly_prices_bulk(self, ticker: str, weekly_prices: Dict[str, Any], asset_type: str = 'stock', stock_name: str = None):
+    def _store_weekly_prices_bulk(
+        self,
+        ticker: str,
+        weekly_prices: Dict[str, Any],
+        asset_type: str = 'stock',
+        stock_name: str = None,
+        target_weeks: Optional[List[Dict[str, int]]] = None,
+        user_id: Optional[str] = None,
+    ) -> List[Tuple[int, int]]:
         """
         Store weekly historical prices for a ticker
         Multi-source: yfinance → mftool → enhanced_price_fetcher
@@ -1348,28 +1635,41 @@ class SharedDatabaseManager:
         try:
             from datetime import datetime, timedelta
             import yfinance as yf
+            from enhanced_price_fetcher import EnhancedPriceFetcher
             
-            print(f"\n[HIST] Fetching 52-week data for {ticker} ({stock_name})")
+            print(f"\n[HIST] Fetching weekly data for {ticker} ({stock_name})")
             
             # Get stock_id and stock info
             stock_response = self.supabase.table('stock_master').select('id, stock_name').eq('ticker', ticker).execute()
             if not stock_response.data:
                 print(f"[HIST] ERROR Stock not found in stock_master: {ticker}")
-                return
+                return []
             
             stock_id = stock_response.data[0]['id']
             db_stock_name = stock_response.data[0].get('stock_name') or stock_name
             print(f"[HIST] Stock ID: {stock_id}")
             
             # Check if we already have historical data (shared across users)
-            existing_hist = self.supabase.table('historical_prices').select('id').eq('stock_id', stock_id).execute()
+            existing_hist = self.supabase.table('historical_prices').select('id, iso_year, iso_week').eq('stock_id', stock_id).execute()
+            existing_pairs = {(row['iso_year'], row['iso_week']) for row in existing_hist.data or []}
             existing_count = len(existing_hist.data) if existing_hist.data else 0
             print(f"[HIST] Existing historical records: {existing_count}")
             
-            if existing_hist.data and len(existing_hist.data) >= 40:
+            required_pairs: Optional[set] = None
+            if target_weeks:
+                required_pairs = {
+                    (int(entry.get('year')), int(entry.get('week')))
+                    for entry in target_weeks
+                    if entry.get('year') is not None and entry.get('week') is not None
+                }
+                required_pairs -= existing_pairs
+                if not required_pairs:
+                    print("[HIST] All requested weeks already cached")
+                    return []
+            elif existing_count >= 40:
                 # Already has substantial data, skip to avoid duplicates
                 print(f"[HIST] SKIP: Already has {existing_count} records (>=40)")
-                return
+                return []
             
             prices_to_insert = []
             
@@ -1382,18 +1682,94 @@ class SharedDatabaseManager:
             
             corrected_ticker = ticker_corrections.get(ticker, ticker)
             print(f"[HIST] Using ticker: {corrected_ticker} (original: {ticker})")
-            
+
+            fetcher = EnhancedPriceFetcher()
+            alias_candidates = fetcher._generate_stock_aliases(corrected_ticker)
+            if str(ticker).strip() not in alias_candidates:
+                alias_candidates.append(str(ticker).strip())
+            ticker_formats = fetcher._expand_symbol_variants(alias_candidates or [corrected_ticker])
+
+            # SOURCE 0: Mutual fund NAV history via AMFI/mftool
+            if asset_type in ['mutual_fund', 'etf']:
+                try:
+                    from mftool import Mftool
+                    mf = Mftool()
+                    scheme_code = fetcher._resolve_amfi_code(ticker, stock_name) or ticker
+                    nav_history = mf.get_scheme_historical_nav(scheme_code, as_Dataframe=True)
+
+                    if nav_history is not None and not nav_history.empty:
+                        df_nav = nav_history.copy()
+                        df_nav.index.name = 'date'
+                        df_nav.reset_index(inplace=True)
+                        df_nav['date'] = pd.to_datetime(df_nav['date'], format='%d-%m-%Y', errors='coerce')
+                        df_nav = df_nav.dropna(subset=['date'])
+                        df_nav['iso_year'] = df_nav['date'].dt.isocalendar().year.astype(int)
+                        df_nav['iso_week'] = df_nav['date'].dt.isocalendar().week.astype(int)
+                        df_nav['nav'] = pd.to_numeric(df_nav['nav'], errors='coerce')
+                        df_nav = df_nav.dropna(subset=['nav'])
+                        df_nav = df_nav.sort_values('date')
+
+                        if required_pairs:
+                            required_df = df_nav[df_nav.apply(
+                                lambda row: (int(row['iso_year']), int(row['iso_week'])) in required_pairs, axis=1)]
+                        else:
+                            cutoff_date = datetime.now() - timedelta(weeks=60)
+                            required_df = df_nav[df_nav['date'] >= cutoff_date]
+
+                        if not required_df.empty:
+                            df_weekly = required_df.groupby(['iso_year', 'iso_week']).tail(1)
+                            for _, row in df_weekly.iterrows():
+                                iso_pair = (int(row['iso_year']), int(row['iso_week']))
+                                if required_pairs is not None and iso_pair not in required_pairs:
+                                    continue
+
+                                prices_to_insert.append({
+                                    'stock_id': stock_id,
+                                    'price_date': row['date'].strftime('%Y-%m-%d'),
+                                    'price': float(row['nav']),
+                                    'source': 'amfi_nav',
+                                    'iso_year': int(row['iso_year']),
+                                    'iso_week': int(row['iso_week']),
+                                })
+                                if required_pairs is not None and iso_pair in required_pairs:
+                                    required_pairs.discard(iso_pair)
+
+                            if prices_to_insert:
+                                print(f"[HIST] AMFI: Storing {len(prices_to_insert)} NAV rows for {ticker}")
+                                self.save_historical_prices_bulk(prices_to_insert)
+                                if required_pairs is None or not required_pairs:
+                                    return []
+                                prices_to_insert = []
+                    else:
+                        print(f"[HIST] AMFI: No NAV history for {ticker}")
+                except Exception as e:
+                    print(f"[HIST] AMFI NAV fetch failed for {ticker}: {e}")
+
             # SOURCE 1: Try yfinance first
             print(f"[HIST] SOURCE 1: Trying yfinance...")
             try:
-                ticker_formats = [corrected_ticker, ticker, f"{ticker}.NS", f"{ticker}.BO"]
                 hist_data = None
+                range_start = None
+                range_end = None
+                if required_pairs:
+                    earliest_year, earliest_week = min(required_pairs)
+                    latest_year, latest_week = max(required_pairs)
+                    range_start = datetime.fromisocalendar(earliest_year, earliest_week, 1) - timedelta(days=3)
+                    range_end = datetime.fromisocalendar(latest_year, latest_week, 7) + timedelta(days=3)
+                    print(f"[HIST] Targeted ISO span: {earliest_year}-W{earliest_week:02d} → {latest_year}-W{latest_week:02d}")
                 
                 for tf in ticker_formats:
                     try:
                         print(f"[HIST]   Trying format: {tf}")
                         stock = yf.Ticker(tf)
-                        hist_data = stock.history(period="1y", interval="1wk")
+                        if range_start and range_end:
+                            hist_data = stock.history(
+                                start=range_start.strftime('%Y-%m-%d'),
+                                end=range_end.strftime('%Y-%m-%d'),
+                                interval="1wk",
+                            )
+                        else:
+                            hist_data = stock.history(period="1y", interval="1wk")
                         if not hist_data.empty:
                             print(f"[HIST]   SUCCESS with {tf}: {len(hist_data)} weeks")
                             break
@@ -1411,6 +1787,10 @@ class SharedDatabaseManager:
                             
                             date_obj = date_index.to_pydatetime()
                             iso_calendar = date_obj.isocalendar()
+                            iso_pair = (iso_calendar[0], iso_calendar[1])
+                            
+                            if required_pairs is not None and iso_pair not in required_pairs:
+                                continue
                             
                             prices_to_insert.append({
                                 'stock_id': stock_id,
@@ -1420,6 +1800,9 @@ class SharedDatabaseManager:
                                 'iso_year': iso_calendar[0],
                                 'iso_week': iso_calendar[1]
                             })
+                            
+                            if required_pairs is not None and iso_pair in required_pairs:
+                                required_pairs.discard(iso_pair)
                         except:
                             continue
                     
@@ -1427,7 +1810,9 @@ class SharedDatabaseManager:
                         print(f"[HIST] Storing {len(prices_to_insert)} records to database...")
                         self.save_historical_prices_bulk(prices_to_insert)
                         print(f"[HIST] SUCCESS: Stored {len(prices_to_insert)} historical prices for {ticker}")
-                        return
+                        if required_pairs is None or not required_pairs:
+                            return []
+                        prices_to_insert = []
                     else:
                         print(f"[HIST] ERROR: No valid prices to insert")
                 else:
@@ -1435,6 +1820,74 @@ class SharedDatabaseManager:
             except Exception as e:
                 print(f"[HIST] ERROR yfinance: {e}")
                 pass
+
+            # PMS/AIF weekly values using CAGR-based calculator
+            if asset_type in ['pms', 'aif'] and user_id:
+                try:
+                    txn_resp = (
+                        self.supabase.table('user_transactions')
+                        .select('transaction_date', 'transaction_type', 'quantity', 'price')
+                        .eq('user_id', user_id)
+                        .eq('stock_id', stock_id)
+                        .order('transaction_date', desc=False)
+                        .execute()
+                    )
+
+                    transactions = txn_resp.data or []
+                    buy_transactions = [
+                        txn for txn in transactions
+                        if str(txn.get('transaction_type', '')).lower() == 'buy'
+                    ] or transactions
+
+                    if buy_transactions:
+                        first_txn = buy_transactions[0]
+                        quantity = float(first_txn.get('quantity') or 0)
+                        unit_price = float(first_txn.get('price') or 0)
+                        investment_date = first_txn.get('transaction_date')
+                        if quantity > 0 and unit_price > 0 and investment_date:
+                            investment_amount = quantity * unit_price
+                            calc = PMS_AIF_Calculator()
+                            calc_result = calc.calculate_pms_aif_value(
+                                ticker,
+                                investment_date,
+                                investment_amount,
+                                is_aif=(asset_type == 'aif')
+                            )
+                            weekly_values = calc_result.get('weekly_values') or []
+                            for entry in weekly_values:
+                                price_date = entry.get('price_date')
+                                total_value = entry.get('price')
+                                if not price_date or total_value is None:
+                                    continue
+                                try:
+                                    price_dt = datetime.strptime(price_date, '%Y-%m-%d')
+                                except ValueError:
+                                    continue
+                                iso_calendar = price_dt.isocalendar()
+                                iso_pair = (iso_calendar[0], iso_calendar[1])
+                                if required_pairs is not None and iso_pair not in required_pairs:
+                                    continue
+                                nav_per_unit = float(total_value) / quantity if quantity > 0 else float(total_value)
+                                prices_to_insert.append({
+                                    'stock_id': stock_id,
+                                    'price_date': price_date,
+                                    'price': nav_per_unit,
+                                    'source': 'pms_cagr',
+                                    'iso_year': iso_calendar[0],
+                                    'iso_week': iso_calendar[1],
+                                })
+                                if required_pairs is not None and iso_pair in required_pairs:
+                                    required_pairs.discard(iso_pair)
+
+                            if prices_to_insert:
+                                print(f"[HIST] PMS/AIF: Stored {len(prices_to_insert)} CAGR rows for {ticker}")
+                                self.save_historical_prices_bulk(prices_to_insert)
+                                if required_pairs is None or not required_pairs:
+                                    return []
+                                prices_to_insert = []
+                except Exception as exc:
+                    print(f"[HIST] PMS/AIF weekly generation failed for {ticker}: {exc}")
+                    pass
             
             # SOURCE 2: Try MFTool for mutual funds/ETFs
             if asset_type in ['mutual_fund', 'etf'] and db_stock_name:
@@ -1451,15 +1904,79 @@ class SharedDatabaseManager:
                     pass
             
             # SOURCE 3: Try enhanced_price_fetcher
+            if asset_type == 'bond':
+                uppercase_ticker = str(ticker or '').upper()
+                if uppercase_ticker.startswith('SGB'):
+                    try:
+                        if required_pairs and required_pairs:
+                            earliest_year, earliest_week = min(required_pairs)
+                            latest_year, latest_week = max(required_pairs)
+                            gold_start = datetime.fromisocalendar(earliest_year, earliest_week, 1)
+                            gold_end = datetime.fromisocalendar(latest_year, latest_week, 7)
+                        else:
+                            gold_end = datetime.now()
+                            gold_start = gold_end - timedelta(weeks=60)
+
+                        gold_hist = yf.Ticker("XAUUSD=X").history(
+                            start=(gold_start - timedelta(days=3)).strftime('%Y-%m-%d'),
+                            end=(gold_end + timedelta(days=3)).strftime('%Y-%m-%d'),
+                            interval="1wk",
+                        )
+                        fx_hist = yf.Ticker("USDINR=X").history(
+                            start=(gold_start - timedelta(days=3)).strftime('%Y-%m-%d'),
+                            end=(gold_end + timedelta(days=3)).strftime('%Y-%m-%d'),
+                            interval="1wk",
+                        )
+                        if not gold_hist.empty and not fx_hist.empty:
+                            merged = pd.DataFrame({
+                                'gold': gold_hist['Close'],
+                                'usdinr': fx_hist['Close'],
+                            }).dropna()
+                            for price_date, row in merged.iterrows():
+                                price_dt = price_date.to_pydatetime()
+                                iso_calendar = price_dt.isocalendar()
+                                iso_pair = (iso_calendar[0], iso_calendar[1])
+                                if required_pairs is not None and iso_pair not in required_pairs:
+                                    continue
+                                usd_price = float(row['gold'])
+                                usd_inr = float(row['usdinr'])
+                                if usd_price <= 0 or usd_inr <= 0:
+                                    continue
+                                price_inr_per_gram = (usd_price * usd_inr) / 31.1035
+                                price_with_premium = price_inr_per_gram * 1.04
+                                prices_to_insert.append({
+                                    'stock_id': stock_id,
+                                    'price_date': price_dt.strftime('%Y-%m-%d'),
+                                    'price': price_with_premium,
+                                    'source': 'gold_reference',
+                                    'iso_year': iso_calendar[0],
+                                    'iso_week': iso_calendar[1],
+                                })
+                                if required_pairs is not None and iso_pair in required_pairs:
+                                    required_pairs.discard(iso_pair)
+
+                            if prices_to_insert:
+                                print(f"[HIST] GOLD: Stored {len(prices_to_insert)} inferred SGB prices for {ticker}")
+                                self.save_historical_prices_bulk(prices_to_insert)
+                                if required_pairs is None or not required_pairs:
+                                    return []
+                                prices_to_insert = []
+                    except Exception as exc:
+                        print(f"[HIST] Gold history fallback failed for {ticker}: {exc}")
+
+            # SOURCE 3: Try enhanced_price_fetcher
             try:
-                from enhanced_price_fetcher import EnhancedPriceFetcher
                 from datetime import timedelta
                 
-                fetcher = EnhancedPriceFetcher()
-                
                 # Calculate date range (52 weeks back from today)
-                end_date = datetime.now()
-                start_date = end_date - timedelta(weeks=52)
+                if required_pairs:
+                    earliest_year, earliest_week = min(required_pairs)
+                    latest_year, latest_week = max(required_pairs)
+                    start_date = datetime.fromisocalendar(earliest_year, earliest_week, 1)
+                    end_date = datetime.fromisocalendar(latest_year, latest_week, 7)
+                else:
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(weeks=52)
                 
                 # Fetch historical prices
                 historical_data = fetcher.get_historical_prices(
@@ -1480,6 +1997,9 @@ class SharedDatabaseManager:
                             if date_str and price:
                                 price_date_obj = datetime.strptime(date_str, '%Y-%m-%d')
                                 iso_calendar = price_date_obj.isocalendar()
+                                iso_pair = (iso_calendar[0], iso_calendar[1])
+                                if required_pairs is not None and iso_pair not in required_pairs:
+                                    continue
                                 
                                 prices_to_insert.append({
                                     'stock_id': stock_id,
@@ -1489,16 +2009,25 @@ class SharedDatabaseManager:
                                     'iso_year': iso_calendar[0],
                                     'iso_week': iso_calendar[1]
                                 })
+                                
+                                if required_pairs is not None and iso_pair in required_pairs:
+                                    required_pairs.discard(iso_pair)
                         except:
                             continue
                     
                     if prices_to_insert:
                         self.save_historical_prices_bulk(prices_to_insert)
-                        return
+                        if required_pairs is None or not required_pairs:
+                            return []
+                        prices_to_insert = []
             except:
                 pass
-                
+            
+            if required_pairs:
+                return list(required_pairs)
+            return []
+
         except Exception as e:
             # Silent failure - non-critical
-            pass
+            return list(required_pairs) if target_weeks and required_pairs else []
 

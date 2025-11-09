@@ -228,10 +228,24 @@ class AIChannelAnalyticsAgent(BaseAgent):
             if "channel" not in df_txn.columns:
                 df_txn["channel"] = "Unknown"
             df_txn["channel"].fillna("Unknown", inplace=True)
-            df_txn["date"] = pd.to_datetime(df_txn.get("date"), errors="coerce")
+
+            # Normalise transaction dates
+            if "date" in df_txn.columns:
+                date_series = pd.to_datetime(df_txn["date"], errors="coerce")
+            elif "transaction_date" in df_txn.columns:
+                date_series = pd.to_datetime(df_txn["transaction_date"], errors="coerce")
+            elif "timestamp" in df_txn.columns:
+                date_series = pd.to_datetime(df_txn["timestamp"], errors="coerce")
+            else:
+                date_series = pd.Series(pd.NaT, index=df_txn.index)
+            df_txn["date"] = date_series
 
             txn_group = df_txn.groupby("channel")
             for channel, group in txn_group:
+                clean_dates = group["date"].dropna() if "date" in group.columns else pd.Series([], dtype="datetime64[ns]")
+                first_date = clean_dates.min() if not clean_dates.empty else None
+                last_date = clean_dates.max() if not clean_dates.empty else None
+
                 channel_trades[channel] = {
                     "transaction_count": int(len(group)),
                     "buy_count": int(group[group.get("transaction_type") == "buy"].shape[0])
@@ -240,8 +254,8 @@ class AIChannelAnalyticsAgent(BaseAgent):
                     "sell_count": int(group[group.get("transaction_type") == "sell"].shape[0])
                     if "transaction_type" in group.columns
                     else None,
-                    "first_transaction": group["date"].min().strftime("%Y-%m-%d") if "date" in group else None,
-                    "last_transaction": group["date"].max().strftime("%Y-%m-%d") if "date" in group else None,
+                    "first_transaction": first_date.strftime("%Y-%m-%d") if first_date is not None and not pd.isna(first_date) else None,
+                    "last_transaction": last_date.strftime("%Y-%m-%d") if last_date is not None and not pd.isna(last_date) else None,
                     "avg_ticket_size": float(
                         pd.to_numeric(group["price"], errors="coerce").dropna().mean()
                     )

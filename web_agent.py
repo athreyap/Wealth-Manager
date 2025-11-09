@@ -22,7 +22,7 @@ import importlib
 import difflib
 import json
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import sys
 import os
 
@@ -274,56 +274,83 @@ def detect_corporate_actions(user_id, db):
     Returns list of stocks with likely corporate actions
     """
     try:
-        from enhanced_price_fetcher import EnhancedPriceFetcher
-        price_fetcher = EnhancedPriceFetcher()
-        
+        import yfinance as yf
+
         holdings = db.get_user_holdings(user_id)
-        corporate_actions = []
-        
+        corporate_actions: List[Dict[str, Any]] = []
+
+        @functools.lru_cache(maxsize=128)
+        def _latest_split_info(symbol: str) -> Optional[Tuple[str, float]]:
+            try:
+                split_series = yf.Ticker(symbol).splits
+                if split_series is not None and not split_series.empty:
+                    last_ratio = float(split_series.iloc[-1])
+                    if last_ratio > 0:
+                        # yfinance reports 0.25 for 4:1 split etc.
+                        resolved_ratio = round(1.0 / last_ratio)
+                        return split_series.index[-1], resolved_ratio
+            except Exception:
+                pass
+            return None
+
+        def _find_split_confirmation(ticker_code: str) -> Optional[Tuple[str, float]]:
+            candidates = []
+            if ticker_code.endswith(('.NS', '.BO')):
+                candidates.append(ticker_code)
+            elif ticker_code.isdigit():
+                candidates.append(f"{ticker_code}.BO")
+            else:
+                candidates.extend([f"{ticker_code}.NS", f"{ticker_code}.BO", ticker_code])
+
+            for candidate in candidates:
+                info = _latest_split_info(candidate)
+                if info:
+                    return info
+            return None
+
         for holding in holdings:
-            asset_type = holding.get('asset_type')
-            
-            # Only check stocks (not MF, bonds, etc.)
-            if asset_type != 'stock':
+            if holding.get('asset_type') != 'stock':
                 continue
-            
-            ticker = holding.get('ticker')
-            avg_price = holding.get('average_price', 0)
+
+            ticker = str(holding.get('ticker') or '').strip()
+            avg_price = float(holding.get('average_price') or 0)
             current_price = holding.get('current_price')
             quantity = holding.get('total_quantity', 0)
-            
-            # Skip if current_price is None or 0 (can't calculate ratio)
-            if avg_price == 0 or current_price is None or current_price == 0:
+
+            if avg_price == 0 or not current_price:
                 continue
-            
-            # Convert to float to handle any type issues
-            avg_price = float(avg_price)
+
             current_price = float(current_price)
-            
-            # Calculate ratio
-            ratio = avg_price / current_price
-            
-            # If ratio >= 1.5, likely a corporate action
-            # (stock split, bonus shares, or reverse split)
-            if ratio >= 1.5:
-                split_ratio = round(ratio)
-                
-                corporate_actions.append({
-                    'ticker': ticker,
-                    'stock_name': holding.get('stock_name'),
-                    'stock_id': holding.get('stock_id'),
-                    'avg_price': avg_price,
-                    'current_price': current_price,
-                    'quantity': quantity,
-                    'ratio': ratio,
-                    'split_ratio': split_ratio,
-                    'action_type': 'split' if ratio > 1 else 'reverse_split'
-                })
+            price_ratio = avg_price / current_price if current_price else 0
+
+            if price_ratio < 1.5:
+                continue
+
+            confirmation = _find_split_confirmation(ticker)
+            if not confirmation:
+                continue
+
+            split_date, confirmed_ratio = confirmation
+            if confirmed_ratio <= 1:
+                continue
+
+            corporate_actions.append({
+                'ticker': ticker,
+                'stock_name': holding.get('stock_name'),
+                'stock_id': holding.get('stock_id'),
+                'avg_price': avg_price,
+                'current_price': current_price,
+                'quantity': quantity,
+                'ratio': price_ratio,
+                'split_ratio': confirmed_ratio,
+                'split_date': str(split_date),
+                'action_type': 'split',
+            })
         
         if corporate_actions:
             print(f"[CORPORATE_ACTIONS] Detected {len(corporate_actions)} stocks with splits/bonus")
             for action in corporate_actions:
-                print(f"  - {action['ticker']}: 1:{action['split_ratio']} {action['action_type']}")
+                print(f"  - {action['ticker']}: 1:{action['split_ratio']} {action['action_type']} on {action.get('split_date')}")
         
         return corporate_actions
 
@@ -515,7 +542,7 @@ def login_page():
                 except:
                     pass  # Silent failure
                 
-                # Fetch current prices for all holdings on login (only if not updated today OR if prices are stale)
+        # Fetch current prices for all holdings on login (only if not updated today OR if prices are stale)
                 try:
                     holdings = db.get_user_holdings(user['id'])
                     if holdings and 'price_fetcher' in st.session_state:
@@ -548,6 +575,20 @@ def login_page():
                     import traceback
                     traceback.print_exc()
                     pass  # Silent failure - don't break login
+
+                # Fetch weekly historical prices on login if missing
+                if holdings:
+                    try:
+                        missing_weeks = db.get_missing_weeks_for_user(user['id'])
+                        if missing_weeks:
+                            st.caption("📅 Fetching weekly historical prices in background...")
+                            remaining = db.fetch_and_store_missing_weekly_prices(user['id'], missing_weeks)
+                            fetched_count = len(missing_weeks) - len(remaining)
+                            if fetched_count > 0:
+                                st.caption(f"✅ Cached {fetched_count} weekly price records")
+                    except Exception as exc:
+                        print(f"[LOGIN] ⚠️ Weekly price fetch failed: {exc}")
+                        pass
                 
                 # Detect corporate actions (splits/bonus) on login
                 try:
@@ -725,8 +766,9 @@ def match_scheme_by_name(
     if not normalized or not name_lookup:
         return []
 
+    matches: List[Dict[str, Any]] = []
     if normalized in name_lookup:
-        return [
+        matches = [
             {
                 "code": scheme["code"],
                 "name": scheme["name"],
@@ -734,31 +776,63 @@ def match_scheme_by_name(
                 "date": scheme["date"],
                 "score": 1.0,
             }
-            for scheme in name_lookup[normalized][:max_matches]
+            for scheme in name_lookup[normalized]
         ]
+    else:
+        candidates = difflib.get_close_matches(
+            normalized,
+            name_lookup.keys(),
+            n=max_matches * 5,
+            cutoff=0.6,
+        )
 
-    candidates = difflib.get_close_matches(
-        normalized,
-        name_lookup.keys(),
-        n=max_matches * 5,
-        cutoff=0.6,
+        for candidate in candidates:
+            base_score = difflib.SequenceMatcher(a=normalized, b=candidate).ratio()
+            for scheme in name_lookup.get(candidate, []):
+                matches.append(
+                    {
+                        "code": scheme["code"],
+                        "name": scheme["name"],
+                        "nav": scheme["nav"],
+                        "date": scheme["date"],
+                        "score": base_score,
+                    }
+                )
+
+    if not matches:
+        return []
+
+    target_upper = (scheme_name or "").upper()
+
+    def adjusted_score(entry: Dict[str, Any]) -> float:
+        weight = entry.get("score", 0.0)
+        name_upper = entry.get("name", "").upper()
+
+        def tweak(keyword: str, bonus: float) -> None:
+            nonlocal weight
+            if keyword in target_upper:
+                if keyword in name_upper:
+                    weight += bonus
+                else:
+                    weight -= bonus
+
+        tweak("DIRECT", 0.08)
+        tweak("REGULAR", 0.05)
+        tweak("GROWTH", 0.04)
+        tweak("DIVIDEND", 0.04)
+        tweak("IDCW", 0.04)
+
+        # Keep score within a sensible band
+        return max(0.0, min(weight, 1.2))
+
+    for entry in matches:
+        entry["adjusted_score"] = adjusted_score(entry)
+
+    matches.sort(
+        key=lambda item: (item.get("adjusted_score", 0.0), item.get("score", 0.0)),
+        reverse=True,
     )
 
-    matches: List[Dict[str, Any]] = []
-    for candidate in candidates:
-        score = difflib.SequenceMatcher(a=normalized, b=candidate).ratio()
-        for scheme in name_lookup.get(candidate, []):
-            matches.append(
-                {
-                    "code": scheme["code"],
-                    "name": scheme["name"],
-                    "nav": scheme["nav"],
-                    "date": scheme["date"],
-                    "score": score,
-                }
-            )
-
-    matches.sort(key=lambda item: item["score"], reverse=True)
     return matches[:max_matches]
 
 
@@ -3575,8 +3649,10 @@ def charts_page():
                 df_navs = pd.DataFrame(prices)
                 df_navs['date'] = pd.to_datetime(df_navs['price_date'])
                 df_navs = df_navs.sort_values('date')
+
+                if len(df_navs) > 52:
+                    df_navs = df_navs.tail(52)
                 
-                # NAV Chart
                 fig_nav = px.line(
                     df_navs, 
                     x='date', 
@@ -3586,12 +3662,11 @@ def charts_page():
                 fig_nav.update_layout(xaxis_title="Date", yaxis_title="NAV (₹)")
                 st.plotly_chart(fig_nav, use_container_width=True)
                 
-                # NAV Table
                 st.subheader(f"{selected_ticker_nav} - NAV History")
                 df_display = df_navs[['date', 'price', 'iso_week', 'iso_year']].copy()
                 df_display['date'] = df_display['date'].dt.strftime('%Y-%m-%d')
                 df_display.columns = ['Date', 'NAV', 'Week', 'Year']
-                st.dataframe(df_display.tail(20), use_container_width=True)  # Show last 20 entries
+                st.dataframe(df_display.tail(20), use_container_width=True)
             else:
                 st.info(f"No NAV data available for {selected_ticker_nav}")
     
@@ -5172,18 +5247,82 @@ def channel_analytics_page():
 
     st.markdown("### Channel P&L % Comparison")
     try:
+        channel_summary_sorted = channel_summary.sort_values('pnl_pct', ascending=False).reset_index(drop=True)
         fig_pnl = px.bar(
-            channel_summary.sort_values('pnl_pct', ascending=False),
+            channel_summary_sorted,
             x='channel',
             y='pnl_pct',
-            text=channel_summary['pnl_pct'].map(lambda v: f"{v:+.2f}%"),
-            title="Channel Performance (P&L %)"
+            text=channel_summary_sorted['pnl_pct'].map(lambda v: f"{v:+.2f}%"),
+            title="Channel Performance (Total P&L %)",
         )
-        fig_pnl.update_traces(textposition='outside')
-        fig_pnl.update_layout(yaxis_title="P&L %")
+        fig_pnl.update_traces(textposition='outside', texttemplate='%{text}')
+        fig_pnl.update_layout(
+            yaxis_title="Total P&L %",
+            yaxis=dict(zeroline=True, zerolinecolor='rgba(128,128,128,0.5)'),
+        )
         st.plotly_chart(fig_pnl, use_container_width=True)
     except Exception as exc:
-        st.warning(f"Could not render performance chart: {exc}")
+        st.warning(f"Could not render total performance chart: {exc}")
+
+    try:
+        weekly_history = db.get_channel_weekly_history(user['id'])
+        if weekly_history:
+            tab_weeks = st.tabs(["All Channels"] + sorted(list({entry['channel'] for entry in weekly_history})))
+
+            with tab_weeks[0]:
+                all_df = pd.DataFrame([entry for entry in weekly_history])
+                fig_all = px.line(
+                    all_df,
+                    x='date',
+                    y='pnl_pct',
+                    color='channel',
+                    title="Channel Performance (Last 52 Weeks)",
+                )
+                fig_all.update_layout(
+                    yaxis_title="Weekly P&L %",
+                    xaxis_title="Date",
+                    hovermode='x unified',
+                )
+                st.plotly_chart(fig_all, use_container_width=True)
+
+            channels = sorted(list({entry['channel'] for entry in weekly_history}))
+            for idx, channel_name in enumerate(channels, start=1):
+                with tab_weeks[idx]:
+                    channel_df = pd.DataFrame(
+                        [entry for entry in weekly_history if entry['channel'] == channel_name]
+                    )
+                    if not channel_df.empty:
+                        st.write(f"**{channel_name}** — 52-Week Trend (Select weeks as needed)")
+                        channel_df['date'] = pd.to_datetime(channel_df['date'])
+                        channel_df = channel_df.sort_values('date')
+                        fig_channel = px.line(
+                            channel_df,
+                            x='date',
+                            y='pnl_pct',
+                            markers=True,
+                            title=f"{channel_name} — Weekly P&L %",
+                        )
+                        fig_channel.update_layout(
+                            yaxis_title="Weekly P&L %",
+                            xaxis_title="Date",
+                            hovermode='x unified',
+                        )
+                        st.plotly_chart(fig_channel, use_container_width=True)
+                        st.dataframe(
+                            channel_df[['date', 'pnl_pct', 'investment', 'current_value']].assign(
+                                date=lambda df_: df_['date'].dt.strftime('%Y-%m-%d'),
+                                pnl_pct=lambda df_: df_['pnl_pct'].map(lambda v: f"{v:+.2f}%"),
+                                investment=lambda df_: df_['investment'].map(lambda v: f"₹{v:,.0f}"),
+                                current_value=lambda df_: df_['current_value'].map(lambda v: f"₹{v:,.0f}"),
+                            ),
+                            use_container_width=True,
+                        )
+                    else:
+                        st.info(f"No weekly history available for {channel_name}.")
+        else:
+            st.info("52-week channel performance not available yet—weekly NAV history is still being gathered.")
+    except Exception as exc:
+        st.warning(f"Could not render 52-week performance chart: {exc}")
 
     st.markdown("### Channel Details")
     for _, row in channel_summary.sort_values('current_value', ascending=False).iterrows():

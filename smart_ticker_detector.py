@@ -18,6 +18,14 @@ def detect_ticker_type(ticker: str) -> str:
         'stock', 'mutual_fund', 'pms', 'aif', or 'unknown'
     """
     ticker_str = str(ticker).strip().upper()
+
+    # Convert float-like numeric codes (e.g., "500285.0") to integer strings
+    try:
+        numeric_value = float(ticker_str.replace(',', ''))
+        if numeric_value.is_integer():
+            ticker_str = str(int(numeric_value))
+    except ValueError:
+        pass
     
     # PMS detection
     if (ticker_str.startswith('INP') or 
