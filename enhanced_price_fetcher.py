@@ -27,6 +27,16 @@ class EnhancedPriceFetcher:
         self.cache_timeout = 300  # 5 minutes
         self._amfi_cache: Optional[Dict[str, Any]] = None
         self._stock_alias_cache: Dict[str, List[str]] = {}
+        self._manual_alias_map: Dict[str, List[str]] = {
+            # Seed known corporate action aliases; will grow automatically via metadata lookup.
+            "IDFC": ["IDFCFIRSTB.NS", "IDFCFIRSTB.BO"],
+            "IDFC LIMITED": ["IDFCFIRSTB.NS", "IDFCFIRSTB.BO"],
+            "IRB INVIT FUND": ["IRBINVIT.NS", "IRBINVIT.BO"],
+            "IRB INFRASTRUCTURE INVESTMENT TRUST": ["IRBINVIT.NS", "IRBINVIT.BO"],
+            "101206": ["IRBINVIT.NS", "IRBINVIT.BO"],
+            "500285": ["SPICEJET.BO", "SPICEJET.NS"],
+            "SPICEJET": ["SPICEJET.BO", "SPICEJET.NS"],
+        }
         
         # Initialize OpenAI for AI fallback
         self.ai_available = False
@@ -208,7 +218,7 @@ class EnhancedPriceFetcher:
         print(f"[PRICE_UPDATE] Complete: {success_count} succeeded, {failed_count} failed")
     
     def _generate_stock_aliases(self, ticker: str, context_name: Optional[str] = None) -> List[str]:
-        """Generate normalized ticker aliases for stock lookups."""
+        """Generate normalized ticker aliases for stock lookups with name-aware enrichment."""
         raw = (ticker or "").strip()
         if not raw:
             return []
@@ -216,12 +226,20 @@ class EnhancedPriceFetcher:
         candidates: List[str] = []
 
         def _add(value: str) -> None:
-            val = value.strip()
-            if val and val not in candidates:
-                candidates.append(val)
+            val = (value or "").strip()
+            if val and val.upper() not in candidates:
+                candidates.append(val.upper())
 
         _add(raw)
-        _add(raw.upper())
+
+        manual_keys = {raw.upper()}
+        if context_name:
+            manual_keys.add(context_name.upper())
+
+        for key in manual_keys:
+            if key in self._manual_alias_map:
+                for override in self._manual_alias_map[key]:
+                    _add(override)
 
         # Convert float-like numeric strings to integers (e.g., "500285.0" -> "500285")
         for item in list(candidates):
@@ -233,15 +251,133 @@ class EnhancedPriceFetcher:
             except ValueError:
                 continue
 
-        # Ask AI for better aliases if heuristics are insufficient
-        if self.ai_available:
-            minimal_set = len([c for c in candidates if c.isdigit() or c.endswith(('.NS', '.BO'))])
-            if minimal_set == 0:
-                ai_suggestions = self._ai_suggest_stock_aliases(raw, context_name)
-                for suggestion in ai_suggestions:
-                    _add(suggestion)
+        # Always fold in exchange suffix variants for obvious tickers
+        base_snapshot = list(candidates)
+        for symbol in base_snapshot:
+            if symbol.endswith('.NS') or symbol.endswith('.BO'):
+                continue
+            if symbol.isdigit():
+                _add(f"{symbol}.BO")
+            else:
+                _add(f"{symbol}.NS")
+                _add(f"{symbol}.BO")
+
+        # Deterministic lookup using Yahoo Finance search by name
+        if context_name:
+            for suggestion in self._lookup_symbols_by_name(context_name):
+                _add(suggestion)
+
+        # Enrich using yfinance metadata-derived names (helps with corporate actions)
+        for derived_name in self._extract_names_from_metadata(raw):
+            for suggestion in self._lookup_symbols_by_name(derived_name):
+                _add(suggestion)
+
+        # For pure numeric or otherwise weak identifiers, force enrichment
+        needs_ai = self.ai_available and (
+            raw.isdigit()
+            or (context_name and len(candidates) < 10)
+            or not any(sym.endswith(('.NS', '.BO')) for sym in candidates)
+        )
+
+        if needs_ai:
+            for suggestion in self._ai_suggest_stock_aliases(raw, context_name):
+                _add(suggestion)
 
         return candidates
+
+    def _extract_names_from_metadata(self, ticker: str) -> List[str]:
+        """Pull potential successor names via yfinance metadata for delisted symbols."""
+        names: List[str] = []
+        variants = {ticker.upper()}
+        variants.add(f"{ticker.upper()}.NS")
+        variants.add(f"{ticker.upper()}.BO")
+
+        for symbol in variants:
+            try:
+                stock = yf.Ticker(symbol)
+                info = getattr(stock, "info", None) or {}
+                if not isinstance(info, dict) or not info:
+                    continue
+
+                for key in ("shortName", "longName", "displayName", "underlyingSymbol"):
+                    value = info.get(key)
+                    if isinstance(value, str) and value.strip():
+                        cleaned = value.strip()
+                        if cleaned.upper() not in [n.upper() for n in names]:
+                            names.append(cleaned)
+
+                # Some delisted tickers expose a "symbol" different from request
+                canonical_symbol = info.get("symbol")
+                if isinstance(canonical_symbol, str):
+                    names.append(canonical_symbol.strip())
+            except Exception:
+                continue
+
+        return names
+
+    def _lookup_symbols_by_name(self, name: str) -> List[str]:
+        """Query Yahoo Finance search API for likely NSE/BSE tickers."""
+        if not name:
+            return []
+
+        try:
+            from urllib.parse import quote_plus
+        except ImportError:
+            return []
+
+        encoded = quote_plus(name.strip())
+        if not encoded:
+            return []
+
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={encoded}&lang=en-US&region=IN"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json",
+        }
+
+        suggestions: List[str] = []
+
+        try:
+            response = requests.get(url, headers=headers, timeout=8)
+            if response.status_code != 200:
+                return []
+
+            payload = response.json()
+            quotes = payload.get("quotes", []) if isinstance(payload, dict) else []
+
+            for quote in quotes:
+                if not isinstance(quote, dict):
+                    continue
+                symbol = (quote.get("symbol") or "").strip().upper()
+                exchange = (quote.get("exchange") or "").upper()
+
+                if not symbol:
+                    continue
+
+                if symbol.endswith((".NS", ".BO")):
+                    suggestions.append(symbol)
+                    continue
+
+                if exchange in {"NSI", "NSE", "NSEI"}:
+                    suggestions.append(f"{symbol}.NS")
+                    continue
+
+                if exchange in {"BOM", "BSE"}:
+                    suggestions.append(f"{symbol}.BO")
+                    continue
+
+        except Exception:
+            return []
+
+        # Preserve order while removing duplicates
+        seen: set[str] = set()
+        unique_suggestions: List[str] = []
+        for symbol in suggestions:
+            if symbol not in seen:
+                unique_suggestions.append(symbol)
+                seen.add(symbol)
+
+        return unique_suggestions
 
     def _expand_symbol_variants(self, base_symbols: List[str]) -> List[str]:
         """Expand base symbols with exchange suffix variants."""
@@ -278,13 +414,15 @@ class EnhancedPriceFetcher:
         if not self.ai_available:
             return []
 
-        prompt = (
-            "Suggest up to three exchange symbols that resolve on Yahoo Finance for this Indian instrument.\n"
-            "Return ONLY a JSON array of strings (e.g. [\"XYZ.NS\", \"XYZ.BO\"]).\n"
-            "Prioritize NSE (.NS) or BSE (.BO) formats that yfinance understands.\n"
-            f"Instrument Ticker: {ticker}\n"
-            f"Instrument Name: {context_name or ''}\n"
-        )
+        prompt_lines = [
+            "Suggest up to five Yahoo Finance exchange tickers for this Indian instrument.",
+            "Return ONLY a JSON array of strings (e.g. [\"XYZ.NS\", \"XYZ.BO\"]).",
+            "Always resolve numeric BSE codes to their tradable symbol (e.g. 500325 → RELIANCE.BO).",
+            "Prioritize NSE (.NS) when available, else BSE (.BO).",
+            f"Instrument Identifier Provided: {ticker}",
+            f"Instrument Name: {context_name or 'Unknown'}",
+        ]
+        prompt = "\n".join(prompt_lines)
 
         try:
             response = self.openai_client.chat.completions.create(

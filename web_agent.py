@@ -25,6 +25,8 @@ import re
 from typing import Dict, List, Any, Optional, Tuple
 import sys
 import os
+from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from dateutil import parser as dateutil_parser
@@ -42,7 +44,7 @@ if cwd not in sys.path:
 
 # Import AI agents for insights and recommendations
 AI_AGENTS_AVAILABLE = False
-AI_FILE_EXTRACTION_ENABLED = False  # DISABLED to avoid API quota issues - use direct CSV/Excel processing
+AI_FILE_EXTRACTION_ENABLED = True  # Unified uploader (Python-first with AI fallback)
 AI_TICKER_RESOLUTION_ENABLED = True  # ENABLED - uses Gemini fallback (free/cheap)
 
 AMFI_NAV_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
@@ -221,6 +223,1034 @@ def get_cached_portfolio_summary(holdings: List[Dict]) -> str:
         portfolio_summary += f"\n   Channel: {holding['channel']} | Sector: {holding['sector']} | P&L: {holding['pnl_pct']:+.1f}% | Value: ₹{holding['current_value']:,.0f}"
     
     return portfolio_summary
+
+
+def _format_dataframe_preview(df: pd.DataFrame, max_rows: int = 15, max_cols: int = 20) -> str:
+    """Return a readable string preview of a DataFrame with row/column limits."""
+    if df is None or df.empty:
+        return "No data available in this sheet."
+    preview = df.copy()
+    if max_cols and preview.shape[1] > max_cols:
+        # Keep first max_cols columns
+        remaining = preview.shape[1] - max_cols
+        preview = preview.iloc[:, :max_cols]
+        preview[f"... (+{remaining} more columns)"] = ""
+    if max_rows and preview.shape[0] > max_rows:
+        preview = preview.head(max_rows)
+    with pd.option_context('display.max_rows', max_rows, 'display.max_columns', max_cols):
+        return preview.to_string(index=False)
+
+
+def _build_document_payload_from_file(uploaded_file) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Convert an uploaded file (PDF/CSV/Excel) into a document payload for AI analysis.
+    Returns (payload, error_message).
+    """
+    if not uploaded_file:
+        return None, "No file provided."
+
+    filename = uploaded_file.name
+    extension = Path(filename).suffix.lower()
+    metadata: Dict[str, Any] = {
+        'extension': extension,
+        'original_filename': filename,
+    }
+
+    try:
+        if extension == '.pdf':
+            try:
+                import pdfplumber  # type: ignore
+                import PyPDF2  # type: ignore
+            except ImportError as exc:  # pragma: no cover - runtime dependency
+                return None, f"PDF processing libraries missing: {exc}"
+
+            uploaded_file.seek(0)
+            pdf_text = ""
+            tables_found: List[Dict[str, Any]] = []
+            page_count = 0
+
+            with pdfplumber.open(uploaded_file) as pdf:
+                for page_num, page in enumerate(pdf.pages, 1):
+                    page_count += 1
+                    page_text = page.extract_text()
+                    if page_text:
+                        pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+
+                    tables = page.extract_tables()
+                    if tables:
+                        for table_idx, table in enumerate(tables, 1):
+                            tables_found.append(
+                                {
+                                    'page': page_num,
+                                    'table': table_idx,
+                                    'rows': len(table),
+                                }
+                            )
+
+            if not pdf_text.strip():
+                # Fallback to PyPDF2 if pdfplumber couldn't extract text
+                uploaded_file.seek(0)
+                reader = PyPDF2.PdfReader(uploaded_file)
+                page_count = len(reader.pages)
+                extracted_pages = []
+                for page in reader.pages:
+                    page_content = page.extract_text()
+                    if page_content:
+                        extracted_pages.append(page_content)
+                pdf_text = "\n\n".join(extracted_pages)
+
+            if not pdf_text.strip():
+                return None, f"Could not extract readable text from '{filename}'."
+
+            metadata['pages'] = page_count
+            metadata['tables_found'] = len(tables_found)
+            metadata['info_lines'] = [
+                "- Type: PDF Document",
+                f"- Pages: {page_count or 'Unknown'}",
+                f"- Tables detected: {len(tables_found)}",
+            ]
+            metadata['info_message'] = (
+                f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, "
+                f"found {len(tables_found)} tables"
+            )
+
+            tables_summary = ""
+            if tables_found:
+                sample = tables_found[:3]
+                tables_summary = "Sample tables detected:\n"
+                for table in sample:
+                    tables_summary += f"• Page {table['page']} – Table {table['table']} ({table['rows']} rows)\n"
+            metadata['tables_summary'] = tables_summary.strip()
+
+            return {
+                'name': filename,
+                'display_name': filename,
+                'text': pdf_text.strip(),
+                'type_label': 'PDF Document',
+                'metadata': metadata,
+            }, None
+
+        if extension in ('.csv', '.tsv'):
+            uploaded_file.seek(0)
+            read_kwargs = {}
+            if extension == '.tsv':
+                read_kwargs['sep'] = '\t'
+            try:
+                df = pd.read_csv(uploaded_file, **read_kwargs)
+            except UnicodeDecodeError:
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, encoding='latin-1', **read_kwargs)
+
+            rows, cols = df.shape
+            preview_rows = min(rows, 20) if rows else 0
+            preview_text = _format_dataframe_preview(df, max_rows=preview_rows)
+            stats_text = ""
+            try:
+                stats = df.describe(include='all').transpose()
+                stats_text = stats.to_string()
+            except Exception:
+                stats_text = "Summary statistics unavailable."
+
+            doc_text = (
+                f"CSV Datasheet: {filename}\n"
+                f"Rows: {rows}, Columns: {cols}\n\n"
+                f"Column Names: {', '.join(map(str, df.columns))}\n\n"
+                f"Preview (first {preview_rows} rows):\n{preview_text}\n\n"
+                f"Summary Statistics:\n{stats_text}\n"
+            )
+
+            metadata['rows'] = rows
+            metadata['columns'] = cols
+            metadata['info_lines'] = [
+                "- Type: CSV Datasheet",
+                f"- Rows: {rows}",
+                f"- Columns: {cols}",
+            ]
+            metadata['info_message'] = (
+                f"✅ Parsed CSV with {rows} rows × {cols} columns "
+                f"(showing first {preview_rows or 0} rows)"
+            )
+
+            return {
+                'name': filename,
+                'display_name': filename,
+                'text': doc_text.strip(),
+                'type_label': 'CSV Datasheet',
+                'metadata': metadata,
+            }, None
+
+        if extension in ('.xlsx', '.xls'):
+            uploaded_file.seek(0)
+            try:
+                sheets = pd.read_excel(uploaded_file, sheet_name=None)
+            except ValueError as exc:
+                return None, f"Failed to read Excel file '{filename}': {exc}"
+
+            if not sheets:
+                return None, f"No sheets found in Excel file '{filename}'."
+
+            sheet_count = len(sheets)
+            total_rows = 0
+            sheet_texts = [
+                f"Excel Datasheet: {filename}",
+                f"Sheets: {sheet_count}",
+            ]
+
+            for sheet_name, sheet_df in sheets.items():
+                rows, cols = sheet_df.shape
+                total_rows += rows
+                preview = _format_dataframe_preview(sheet_df, max_rows=15)
+                sheet_texts.append(
+                    f"\n--- Sheet: {sheet_name} ({rows} rows × {cols} columns) ---\n{preview}\n"
+                )
+
+            doc_text = "\n".join(sheet_texts)
+
+            metadata['sheets'] = sheet_count
+            metadata['total_rows'] = total_rows
+            metadata['info_lines'] = [
+                "- Type: Excel Datasheet",
+                f"- Sheets: {sheet_count}",
+                f"- Approx. rows: {total_rows}",
+            ]
+            metadata['info_message'] = (
+                f"✅ Parsed Excel workbook with {sheet_count} sheet(s) "
+                f"and approximately {total_rows} rows"
+            )
+
+            return {
+                'name': filename,
+                'display_name': filename,
+                'text': doc_text.strip(),
+                'type_label': 'Excel Datasheet',
+                'metadata': metadata,
+            }, None
+
+        return None, f"Unsupported file type '{extension or 'unknown'}' for '{filename}'."
+
+    except Exception as exc:
+        return None, f"Error reading '{filename}': {exc}"
+
+
+def _build_document_payload_from_url(url: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Fetch a news/article URL and convert it into a document payload.
+    Returns (payload, error_message).
+    """
+    if not url or not url.strip():
+        return None, "Please provide a news article URL."
+
+    cleaned_url = url.strip()
+
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+    except ImportError:  # pragma: no cover - runtime dependency
+        return None, "BeautifulSoup (bs4) is required to process article URLs."
+
+    try:
+        headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+        }
+        response = requests.get(cleaned_url, headers=headers, timeout=12)
+        response.raise_for_status()
+    except Exception as exc:
+        return None, f"Failed to fetch article: {exc}"
+
+    soup = BeautifulSoup(response.content, 'html.parser')
+
+    for tag in soup(['script', 'style', 'noscript', 'iframe', 'header', 'footer']):
+        tag.extract()
+
+    title = soup.title.string.strip() if soup.title and soup.title.string else cleaned_url
+    text_chunks = [
+        line.strip()
+        for line in soup.get_text(separator='\n').splitlines()
+        if line and line.strip()
+    ]
+    article_body = "\n".join(text_chunks)
+
+    if not article_body.strip():
+        return None, "Could not extract readable content from the article."
+
+    published_at = None
+    potential_date_fields = [
+        ('meta', {'property': 'article:published_time'}),
+        ('meta', {'property': 'og:published_time'}),
+        ('meta', {'name': 'pubdate'}),
+        ('meta', {'name': 'date'}),
+        ('meta', {'itemprop': 'datePublished'}),
+    ]
+    for tag_name, attrs in potential_date_fields:
+        tag = soup.find(tag_name, attrs=attrs)
+        if tag and tag.get('content'):
+            try:
+                published_at = dateutil_parser.parse(tag['content'])
+                break
+            except Exception:
+                continue
+
+    if not published_at:
+        time_tag = soup.find('time')
+        if time_tag:
+            candidate = time_tag.get('datetime') or time_tag.text
+            if candidate:
+                try:
+                    published_at = dateutil_parser.parse(candidate)
+                except Exception:
+                    published_at = None
+
+    domain = urlparse(cleaned_url).netloc or "unknown"
+    published_display = published_at.strftime('%Y-%m-%d %H:%M') if published_at else "Unknown"
+
+    filename_base = re.sub(r'[^A-Za-z0-9 _\-]+', '', title).strip()
+    if not filename_base:
+        filename_base = re.sub(r'[^A-Za-z0-9]+', '', domain) or "news-article"
+    filename = f"News - {filename_base[:80]}.txt"
+
+    doc_text = (
+        f"News Article: {title}\n"
+        f"Source: {domain}\n"
+        f"URL: {cleaned_url}\n"
+        f"Published: {published_display}\n\n"
+        f"{article_body}"
+    )
+
+    metadata: Dict[str, Any] = {
+        'type': 'news_article',
+        'source': domain,
+        'url': cleaned_url,
+        'published_at': published_at.isoformat() if published_at else None,
+        'info_lines': [
+            "- Type: News Article",
+            f"- Source: {domain}",
+            f"- Published: {published_display}",
+        ],
+        'info_message': f"✅ Fetched news article from {domain} ({len(article_body)} characters)",
+    }
+
+    return {
+        'name': filename,
+        'display_name': title,
+        'text': doc_text.strip(),
+        'type_label': 'News Article',
+        'metadata': metadata,
+    }, None
+
+
+def _run_document_analysis(
+    document_payloads: List[Dict[str, Any]],
+    user: Dict[str, Any],
+    holdings: List[Dict[str, Any]],
+    db,
+    section_key: str,
+) -> Tuple[int, int]:
+    """
+    Run AI analysis for provided document payloads.
+    Returns (success_count, failure_count).
+    """
+    if not document_payloads:
+        return 0, 0
+
+    try:
+        import openai  # type: ignore
+    except ImportError as exc:  # pragma: no cover - runtime dependency
+        st.error(f"❌ OpenAI package not installed: {exc}")
+        return 0, len(document_payloads)
+
+    try:
+        openai.api_key = st.secrets["api_keys"]["open_ai"]
+    except Exception as exc:
+        st.error(f"❌ OpenAI API key missing: {exc}")
+        return 0, len(document_payloads)
+
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+
+    portfolio_summary = get_cached_portfolio_summary(holdings)
+
+    progress_placeholder = st.empty()
+    status_placeholder = st.empty()
+    progress_bar = None
+    if len(document_payloads) > 1:
+        progress_bar = progress_placeholder.progress(0)
+
+    success_count = 0
+    failure_count = 0
+
+    for idx, doc in enumerate(document_payloads, 1):
+        if progress_bar:
+            progress_bar.progress(idx / len(document_payloads))
+        status_placeholder.text(f"📄 Processing {idx}/{len(document_payloads)}: {doc.get('display_name', doc.get('name'))}")
+
+        try:
+            doc_text = doc.get('text', '').strip()
+            if not doc_text:
+                failure_count += 1
+                st.warning(f"⚠️ Skipping {doc.get('name')}: No readable content extracted.")
+                continue
+
+            metadata = doc.get('metadata', {})
+            info_lines = metadata.get('info_lines') or []
+            info_block = "\n".join(info_lines) if info_lines else "- No additional metadata"
+            tables_summary = metadata.get('tables_summary', '')
+            if tables_summary:
+                info_block += f"\n{tables_summary}"
+
+            preview_limit = 10000
+            doc_preview = doc_text[:preview_limit]
+            if len(doc_text) > preview_limit:
+                doc_preview += "\n...[truncated for AI analysis]..."
+
+            doc_type = doc.get('type_label', 'Document')
+            display_name = doc.get('display_name', doc.get('name'))
+
+            analysis_prompt = (
+                f"Analyze this {doc_type} for portfolio management insights.\n\n"
+                f"📄 DOCUMENT INFO:\n{info_block}\n\n"
+                f"💼 USER'S PORTFOLIO:\n{portfolio_summary}\n\n"
+                f"📝 DOCUMENT CONTENT (preview):\n{doc_preview}\n\n"
+                "Provide a structured analysis with these sections:\n\n"
+                "📋 DOCUMENT SUMMARY\n"
+                "📊 KEY METRICS & DATA\n"
+                "📈 INSIGHTS FROM DATA/TABLES\n"
+                "💡 MAIN FINDINGS\n"
+                "🎯 PORTFOLIO RELEVANCE\n"
+                "⚡ RECOMMENDED ACTIONS\n\n"
+                "Be specific, reference concrete numbers where possible, and tailor the insights to the portfolio context."
+            )
+
+            response = openai.chat.completions.create(
+                model="gpt-5",
+                messages=[{"role": "user", "content": analysis_prompt}],
+                max_completion_tokens=1000,
+            )
+
+            ai_analysis = response.choices[0].message.content
+
+            with st.expander(f"📄 {display_name} - Analysis", expanded=(idx == 1)):
+                st.markdown("### 🤖 AI Analysis")
+                st.markdown(ai_analysis)
+
+            info_message = metadata.get('info_message')
+            if info_message:
+                st.info(info_message)
+
+            st.session_state.chat_history.append({
+                "q": f"Analyze {doc_type}: {display_name}",
+                "a": ai_analysis,
+            })
+            if hasattr(db, 'save_chat_history'):
+                try:
+                    db.save_chat_history(user['id'], f"Analyze {doc_type}: {display_name}", ai_analysis)
+                except Exception:
+                    pass
+
+            save_result = db.save_pdf(
+                user_id=user['id'],
+                filename=doc.get('name', display_name),
+                pdf_text=doc_text,
+                ai_summary=ai_analysis,
+            )
+            if not save_result.get('success'):
+                failure_count += 1
+                st.error(f"❌ Failed to save '{display_name}': {save_result.get('error', 'Unknown error')}")
+            else:
+                success_count += 1
+
+        except Exception as exc:
+            failure_count += 1
+            st.error(f"❌ Error processing '{doc.get('name', 'document')}': {str(exc)[:120]}")
+
+    if len(document_payloads) > 1:
+        progress_placeholder.empty()
+        status_placeholder.empty()
+
+    if success_count > 0:
+        try:
+            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+        except Exception:
+            pass
+
+    return success_count, failure_count
+
+
+def _render_document_upload_section(
+    section_key: str,
+    user: Dict[str, Any],
+    holdings: List[Dict[str, Any]],
+    db,
+    header_text: str = "**📤 Upload Documents for AI Analysis**",
+) -> None:
+    """Render shared document upload UI section for AI assistant."""
+    st.markdown("---")
+    st.markdown(header_text)
+    st.caption("💡 Upload PDFs, CSVs, or Excel files together — the AI will extract insights for you.")
+
+    uploaded_files = st.file_uploader(
+        "Choose document file(s) to analyze",
+        type=['pdf', 'csv', 'tsv', 'xlsx', 'xls'],
+        accept_multiple_files=True,
+        key=f"{section_key}_file_uploader",
+        help="Supported formats: PDF, CSV/TSV, Excel (XLSX/XLS).",
+    )
+
+    document_payloads: List[Dict[str, Any]] = []
+    extraction_errors: List[str] = []
+
+    if uploaded_files:
+        if not isinstance(uploaded_files, list):
+            uploaded_files = [uploaded_files]
+
+        for file_obj in uploaded_files:
+            payload, error = _build_document_payload_from_file(file_obj)
+            if payload:
+                document_payloads.append(payload)
+            elif error:
+                extraction_errors.append(error)
+
+    if document_payloads:
+        button_text = (
+            "🔍 Analyze 1 Document" if len(document_payloads) == 1
+            else f"🔍 Analyze & Upload {len(document_payloads)} Documents"
+        )
+        if st.button(button_text, type="primary", key=f"{section_key}_analyze_button"):
+            success_count, failure_count = _run_document_analysis(
+                document_payloads,
+                user,
+                holdings,
+                db,
+                section_key,
+            )
+            if success_count > 0 and failure_count == 0:
+                st.success(f"✅ Successfully processed {success_count} document(s)!")
+                st.info("📄 Documents saved to the shared library for future chats.")
+                st.rerun()
+            elif success_count > 0:
+                st.warning(f"⚠️ Processed {success_count} document(s), {failure_count} failed.")
+                st.info("📄 Successfully processed documents are now available in the shared library.")
+            else:
+                st.error("❌ All documents failed to process. Please check the files and try again.")
+
+    elif uploaded_files:
+        st.warning("⚠️ Could not extract any usable content from the uploaded files.")
+
+    for error_msg in extraction_errors:
+        st.error(error_msg)
+
+    st.markdown("**🔗 Analyze Financial News Article**")
+    st.caption("Paste a URL to fetch, store, and analyze the article alongside your portfolio.")
+    news_url = st.text_input(
+        "News/article URL",
+        key=f"{section_key}_news_url",
+        placeholder="https://example.com/news-article",
+    )
+    if st.button("🔍 Fetch & Analyze Article", key=f"{section_key}_news_button"):
+        article_payload, article_error = _build_document_payload_from_url(news_url)
+        if article_error:
+            st.error(article_error)
+        elif article_payload:
+            success_count, failure_count = _run_document_analysis(
+                [article_payload],
+                user,
+                holdings,
+                db,
+                f"{section_key}_news",
+            )
+            if success_count:
+                st.success("✅ Article analyzed and stored successfully!")
+                st.info("📰 Article text saved to the shared document library.")
+            else:
+                st.error("❌ Failed to analyze the article. Please try another link.")
+
+
+# ====================================================================
+# Transaction file extraction helpers (Python first, AI fallback)
+# ====================================================================
+
+_TX_COLUMN_ALIASES: Dict[str, List[str]] = {
+    'date': [
+        'date', 'transaction date', 'trade date', 'tx date', 'tran date',
+        'order date', 'purchase date', 'nav date', 'valuation date',
+        'execution date', 'deal date'
+    ],
+    'ticker': [
+        'ticker', 'symbol', 'code', 'isin', 'scrip', 'stock code',
+        'security code', 'instrument code', 'scheme code', 'amfi',
+        'amfi code', 'isin code', 'investment code'
+    ],
+    'stock_name': [
+        'stock name', 'security name', 'instrument', 'name', 'scheme name',
+        'company', 'fund name', 'description', 'asset name', 'holding',
+        'product'
+    ],
+    'scheme_name': [
+        'scheme name', 'fund scheme', 'scheme', 'schemename'
+    ],
+    'quantity': [
+        'quantity', 'qty', 'units', 'shares', 'quantity/unit',
+        'no. of units', 'no of units', 'units/qty', 'units (credit)',
+        'units (debit)'
+    ],
+    'price': [
+        'price', 'rate', 'nav', 'purchase price', 'per unit price',
+        'trade price', 'unit price', 'cost price', 'nav per unit',
+        'deal price', 'executed price'
+    ],
+    'amount': [
+        'amount', 'value', 'total value', 'consideration', 'txn amount',
+        'gross amount', 'net amount', 'investment amount', 'order value',
+        'total', 'investment', 'transaction value'
+    ],
+    'transaction_type': [
+        'transaction type', 'type', 'action', 'side', 'buy/sell',
+        'txn type', 'order type', 'direction', 'nature', 'transaction',
+        'mode'
+    ],
+    'asset_type': [
+        'asset type', 'instrument type', 'category', 'asset class',
+        'type of asset', 'class', 'instrument category'
+    ],
+    'channel': [
+        'channel', 'platform', 'broker', 'account', 'source', 'portfolio',
+        'through', 'partner', 'advisor'
+    ],
+    'sector': [
+        'sector', 'industry', 'sector name', 'segment'
+    ],
+    'notes': [
+        'notes', 'remarks', 'comment', 'description'
+    ],
+    'folio': [
+        'folio', 'folio no', 'folio number'
+    ],
+}
+
+
+def _tx_safe_str(value: Any) -> str:
+    """Convert to clean string, removing NaN/None placeholders."""
+    if value is None:
+        return ''
+    try:
+        text = str(value).strip()
+    except Exception:
+        return ''
+    lowered = text.lower()
+    if lowered in {'nan', 'none', 'null', 'nan%', 'nat', 'n/a', ''}:
+        return ''
+    return text
+
+
+def _tx_safe_float(value: Any, default: float = 0.0) -> float:
+    """Safely convert value to float, handling currency symbols and commas."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = _tx_safe_str(value)
+    if not text:
+        return default
+    if text.startswith('(') and text.endswith(')'):
+        text = '-' + text[1:-1]
+    cleaned = (
+        text.replace('₹', '')
+        .replace('INR', '')
+        .replace('Rs.', '')
+        .replace('Rs', '')
+        .replace(',', '')
+        .replace('\u20b9', '')
+        .replace('%', '')
+        .strip()
+    )
+    try:
+        return float(cleaned)
+    except Exception:
+        match = re.search(r'-?\d+(\.\d+)?', cleaned)
+        if match:
+            try:
+                return float(match.group(0))
+            except ValueError:
+                pass
+    return default
+
+
+def _tx_normalize_ticker(raw: Any) -> str:
+    """Normalize ticker values, handling numeric codes and suffixes."""
+    text = _tx_safe_str(raw)
+    if not text and isinstance(raw, (int, float)):
+        text = f"{raw}"
+    if not text:
+        return ''
+    if text.endswith('.0') and text.replace('.0', '').isdigit():
+        text = text[:-2]
+    if text.isdigit():
+        return text
+    return text.upper()
+
+
+def _tx_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename columns to canonical names based on aliases."""
+    rename_map: Dict[str, str] = {}
+    used_targets: set[str] = set()
+    for col in df.columns:
+        col_name = _tx_safe_str(col).lower()
+        target = None
+        for canonical, aliases in _TX_COLUMN_ALIASES.items():
+            for alias in aliases:
+                alias_lower = alias.lower()
+                if col_name == alias_lower or alias_lower in col_name:
+                    target = canonical
+                    break
+            if target:
+                break
+        if target and target not in used_targets:
+            rename_map[col] = target
+            used_targets.add(target)
+        else:
+            rename_map[col] = col
+    return df.rename(columns=rename_map)
+
+
+def _tx_normalize_transaction_type(
+    raw_type: Any,
+    quantity: Optional[float] = None,
+    amount: Optional[float] = None,
+) -> str:
+    """Normalize transaction type to 'buy' or 'sell'."""
+    value = _tx_safe_str(raw_type).lower()
+    if value in {'sell', 's', 'redeem', 'redemption', 'withdrawal', 'withdraw', 'exit', 'debit', 'outflow'}:
+        return 'sell'
+    if value in {'buy', 'b', 'purchase', 'invest', 'investment', 'inflow', 'credit', 'add', 'subscription'}:
+        return 'buy'
+    if quantity is not None:
+        if quantity < 0:
+            return 'sell'
+        if quantity > 0:
+            return 'buy'
+    if amount is not None:
+        if amount < 0:
+            return 'sell'
+        if amount > 0:
+            return 'buy'
+    return 'buy'
+
+
+def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> str:
+    """Infer asset type from ticker/name/hint."""
+    hint = asset_hint.lower()
+    name = stock_name.lower()
+    ticker_upper = ticker.upper()
+
+    if hint:
+        if 'mutual' in hint or 'mf' in hint or hint == 'mutual_fund':
+            return 'mutual_fund'
+        if 'pms' in hint:
+            return 'pms'
+        if 'aif' in hint:
+            return 'aif'
+        if 'bond' in hint or 'debenture' in hint:
+            return 'bond'
+        if 'stock' in hint or 'equity' in hint:
+            return 'stock'
+
+    if ticker_upper.startswith('INP') or 'pms' in name or 'portfolio management' in name:
+        return 'pms'
+    if ticker_upper.startswith('AIF') or 'aif' in name or 'alternative investment' in name:
+        return 'aif'
+    if ticker_upper.startswith('SGB') or 'bond' in name or 'debenture' in name or 'sgb' in name:
+        return 'bond'
+    if ticker_upper.isdigit() and len(ticker_upper) >= 5:
+        return 'mutual_fund'
+    if '.NS' in ticker_upper or '.BO' in ticker_upper:
+        return 'stock'
+    if 'fund' in name or 'scheme' in name or 'growth' in name:
+        return 'mutual_fund'
+    return 'stock'
+
+
+def _tx_extract_tables_from_pdf(uploaded_file) -> List[pd.DataFrame]:
+    """Extract tables from PDF as DataFrames."""
+    try:
+        import pdfplumber  # type: ignore
+    except ImportError:
+        return []
+
+    tables: List[pd.DataFrame] = []
+    try:
+        uploaded_file.seek(0)
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page_index, page in enumerate(pdf.pages, start=1):
+                try:
+                    page_tables = page.extract_tables()
+                except Exception:
+                    continue
+                for table_index, table in enumerate(page_tables or [], start=1):
+                    if not table or len(table) < 2:
+                        continue
+                    cleaned_rows = [
+                        [cell.strip() if isinstance(cell, str) else cell for cell in row]
+                        for row in table
+                        if row and any(cell not in (None, '') for cell in row)
+                    ]
+                    if len(cleaned_rows) < 2:
+                        continue
+                    header = cleaned_rows[0]
+                    body = cleaned_rows[1:]
+                    try:
+                        df = pd.DataFrame(body, columns=header)
+                        df.attrs['__tx_source'] = f"page_{page_index}_table_{table_index}"
+                        tables.append(df)
+                    except Exception:
+                        continue
+    except Exception:
+        return []
+    finally:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+    return tables
+
+
+def _tx_dataframe_to_transactions(
+    df: pd.DataFrame,
+    filename: str,
+    sheet_label: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Convert a standardized DataFrame into transaction dicts."""
+    transactions: List[Dict[str, Any]] = []
+
+    if df is None or df.empty:
+        return transactions
+
+    df = df.dropna(how='all')
+    if df.empty:
+        return transactions
+
+    df = _tx_standardize_columns(df)
+
+    for _, row in df.iterrows():
+        raw_date = row.get('date') or row.get('transaction date')
+        raw_quantity = row.get('quantity')
+        raw_amount = row.get('amount')
+        if pd.isna(raw_date) or (_tx_safe_str(raw_date) == '' and _tx_safe_str(row.get('transaction_date')) == ''):
+            continue
+
+        quantity_value = _tx_safe_float(raw_quantity)
+        amount_value = _tx_safe_float(raw_amount)
+        price_value = _tx_safe_float(row.get('price'))
+
+        transaction_type = _tx_normalize_transaction_type(
+            row.get('transaction_type'),
+            quantity=quantity_value,
+            amount=amount_value,
+        )
+
+        if quantity_value < 0:
+            quantity_value = abs(quantity_value)
+        if amount_value < 0:
+            amount_value = abs(amount_value)
+        if price_value < 0:
+            price_value = abs(price_value)
+
+        stock_name = _tx_safe_str(row.get('stock_name') or row.get('scheme_name') or row.get('name'))
+        ticker = _tx_normalize_ticker(row.get('ticker') or row.get('symbol'))
+        if not ticker:
+            ticker = _tx_normalize_ticker(stock_name)
+
+        if not ticker and not stock_name:
+            continue
+
+        asset_hint = _tx_safe_str(row.get('asset_type'))
+        asset_type = _tx_infer_asset_type(ticker, stock_name, asset_hint)
+
+        if price_value == 0 and amount_value > 0 and quantity_value > 0:
+            price_value = amount_value / quantity_value
+
+        channel = _tx_safe_str(row.get('channel'))
+        if not channel:
+            base = Path(filename).stem
+            if sheet_label:
+                channel = f"{base} - {sheet_label}"
+            else:
+                channel = base
+        sector = _tx_safe_str(row.get('sector'))
+        if not sector:
+            sector = 'Mutual Fund' if asset_type == 'mutual_fund' else 'Unknown'
+
+        scheme_name = _tx_safe_str(row.get('scheme_name')) if asset_type == 'mutual_fund' else None
+        notes = _tx_safe_str(row.get('notes'))
+
+        transaction = {
+            'date': raw_date,
+            'transaction_type': transaction_type,
+            'ticker': ticker,
+            'stock_name': stock_name or ticker,
+            'scheme_name': scheme_name,
+            'quantity': quantity_value,
+            'price': price_value,
+            'amount': amount_value,
+            'asset_type': asset_type,
+            'channel': channel,
+            'sector': sector,
+            'notes': notes,
+        }
+        transactions.append(transaction)
+
+    return transactions
+
+
+def extract_transactions_python(uploaded_file, filename: str) -> List[Dict[str, Any]]:
+    """Try to extract transactions using deterministic Python parsing."""
+    suffix = Path(filename).suffix.lower()
+    transactions: List[Dict[str, Any]] = []
+
+    try:
+        if suffix in {'.csv', '.tsv'}:
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, sep='\t' if suffix == '.tsv' else ',')
+            transactions = _tx_dataframe_to_transactions(df, filename)
+        elif suffix in {'.xlsx', '.xls'}:
+            uploaded_file.seek(0)
+            workbook = pd.read_excel(uploaded_file, sheet_name=None)
+            rows: List[Dict[str, Any]] = []
+            for sheet_name, sheet_df in (workbook or {}).items():
+                rows.extend(_tx_dataframe_to_transactions(sheet_df, filename, sheet_label=sheet_name))
+            transactions = rows
+        elif suffix == '.pdf':
+            tables = _tx_extract_tables_from_pdf(uploaded_file)
+            rows: List[Dict[str, Any]] = []
+            for table in tables:
+                label = table.attrs.get('__tx_source')
+                rows.extend(_tx_dataframe_to_transactions(table, filename, sheet_label=label))
+            transactions = rows
+        else:
+            transactions = []
+    except Exception as exc:
+        print(f"[FILE_PARSE] Python extraction failed for {filename}: {exc}")
+        transactions = []
+    finally:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+
+    return [tx for tx in transactions if tx.get('quantity') or tx.get('amount')]
+
+
+def _tx_build_db_transaction(
+    tx: Dict[str, Any],
+    fallback_channel: str,
+    filename: str,
+    user_id: str,
+    portfolio_id: str,
+    db,
+    price_fetcher,
+    price_cache: Dict[Tuple[str, str, str], Optional[float]],
+) -> Optional[Dict[str, Any]]:
+    """Normalize extracted transaction into DB-ready payload."""
+    raw_date = tx.get('transaction_date') or tx.get('date') or tx.get('Date')
+    if not raw_date:
+        return None
+
+    normalized_date = db._normalize_transaction_date(raw_date) if hasattr(db, '_normalize_transaction_date') else None
+    if not normalized_date:
+        normalized_date = db._normalize_transaction_date(_tx_safe_str(raw_date)) if hasattr(db, '_normalize_transaction_date') else None
+    if not normalized_date:
+        return None
+
+    ticker = _tx_normalize_ticker(tx.get('ticker'))
+    stock_name = _tx_safe_str(tx.get('stock_name') or tx.get('scheme_name') or '')
+    if not ticker and stock_name:
+        ticker = _tx_normalize_ticker(stock_name)
+    if not ticker:
+        return None
+    if not stock_name:
+        stock_name = ticker
+
+    quantity_value = _tx_safe_float(tx.get('quantity'))
+    if quantity_value == 0:
+        quantity_value = _tx_safe_float(tx.get('units'))
+    amount_value = _tx_safe_float(tx.get('amount'))
+
+    transaction_type = _tx_normalize_transaction_type(
+        tx.get('transaction_type'),
+        quantity=quantity_value,
+        amount=amount_value,
+    )
+    if quantity_value < 0:
+        quantity_value = abs(quantity_value)
+        transaction_type = 'sell'
+
+    if quantity_value <= 0:
+        return None
+
+    price_value = _tx_safe_float(tx.get('price'))
+    if price_value <= 0 and amount_value > 0:
+        price_value = amount_value / quantity_value
+
+    asset_hint = _tx_safe_str(tx.get('asset_type'))
+    asset_type = _tx_infer_asset_type(ticker, stock_name, asset_hint)
+
+    cache_key = (ticker, normalized_date, asset_type)
+    if price_value <= 0 and price_cache is not None and cache_key in price_cache:
+        cached = price_cache[cache_key]
+        if cached:
+            price_value = cached
+
+    if price_value <= 0 and price_fetcher:
+        fetched_price = None
+        try:
+            fetched_price = price_fetcher.get_historical_price(ticker, asset_type, normalized_date, fund_name=stock_name)
+        except Exception:
+            fetched_price = None
+        if not fetched_price:
+            try:
+                fetched_price, _ = price_fetcher.get_current_price(ticker, asset_type, fund_name=stock_name)
+            except Exception:
+                fetched_price = None
+        if fetched_price and fetched_price > 0:
+            price_value = float(fetched_price)
+            if price_cache is not None:
+                price_cache[cache_key] = price_value
+        elif price_cache is not None and cache_key not in price_cache:
+            price_cache[cache_key] = None
+
+    if price_value < 0:
+        price_value = abs(price_value)
+
+    if price_value:
+        price_value = round(price_value, 4)
+    else:
+        price_value = 0.0
+
+    channel = _tx_safe_str(tx.get('channel')) or fallback_channel or 'Direct'
+    sector = _tx_safe_str(tx.get('sector'))
+    if not sector:
+        sector = 'Mutual Fund' if asset_type == 'mutual_fund' else 'Unknown'
+    scheme_name = _tx_safe_str(tx.get('scheme_name')) if asset_type == 'mutual_fund' else None
+    notes = _tx_safe_str(tx.get('notes'))
+
+    transaction_type = transaction_type if transaction_type in {'buy', 'sell'} else 'buy'
+
+    return {
+        'user_id': user_id,
+        'portfolio_id': portfolio_id,
+        'ticker': ticker,
+        'stock_name': stock_name,
+        'scheme_name': scheme_name,
+        'quantity': quantity_value,
+        'price': price_value,
+        'transaction_date': normalized_date,
+        'transaction_type': transaction_type,
+        'asset_type': asset_type,
+        'channel': channel,
+        'sector': sector,
+        'filename': filename,
+        'notes': notes,
+    }
 
 # Import modules
 from database_shared import SharedDatabaseManager
@@ -615,20 +1645,12 @@ def login_page():
         
         # File upload during registration
         st.subheader("Upload Transaction Files (Optional)")
-        if AI_FILE_EXTRACTION_ENABLED:
-            uploaded_files = st.file_uploader(
-                "Upload transaction files (CSV, PDF, Excel, Images)",
-                type=['csv', 'pdf', 'xlsx', 'xls', 'txt', 'jpg', 'jpeg', 'png'],
-                accept_multiple_files=True,
-                help="Upload your transaction files in any format - AI will extract the data automatically"
-            )
-        else:
-            uploaded_files = st.file_uploader(
-                "Upload CSV or Excel files",
-                type=['csv', 'xlsx', 'xls'],
-                accept_multiple_files=True,
-                help="Upload CSV or Excel files with transaction data. Format: date,ticker,quantity,transaction_type,price,stock_name,sector,channel"
-            )
+        uploaded_files = st.file_uploader(
+            "Upload transaction files (CSV, Excel, PDF)",
+            type=['csv', 'tsv', 'xlsx', 'xls', 'pdf'],
+            accept_multiple_files=True,
+            help="Python will auto-map standard columns; unsupported layouts fall back to AI extraction automatically."
+        )
         
         if st.button("Register"):
             if password != confirm_password:
@@ -1514,7 +2536,7 @@ Return ONLY the JSON object, nothing else."""
         st.caption(f"   Traceback: {traceback.format_exc()[:200]}")
         return {}
 
-def process_uploaded_files(uploaded_files, user_id, portfolio_id):
+def _legacy_process_uploaded_files(uploaded_files, user_id, portfolio_id):
     """
     Process uploaded files and store to DB using AI
     Supports CSV, PDF, Excel, Images, and any file format
@@ -2423,6 +3445,168 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
             for log in processing_log:
                 st.caption(f"📄 {log['file']}: {log['imported']} imported, {log['skipped']} skipped, {log['errors']} errors")
     
+    return total_imported
+
+
+def process_uploaded_files(uploaded_files, user_id, portfolio_id):
+    """
+    Process uploaded files and store transactions in the database.
+    Uses deterministic Python parsing first, then falls back to AI extraction.
+    """
+    if not uploaded_files:
+        return 0
+
+    db = st.session_state.db
+
+    if 'upload_price_fetcher' not in st.session_state:
+        try:
+            st.session_state.upload_price_fetcher = EnhancedPriceFetcher()
+        except Exception:
+            st.session_state.upload_price_fetcher = None
+    price_fetcher = st.session_state.upload_price_fetcher
+    price_cache: Dict[Tuple[str, str, str], Optional[float]] = {}
+
+    total_imported = 0
+    processing_log: List[Dict[str, Any]] = []
+    collected_tickers: Dict[str, str] = {}
+
+    st.info(f"📊 Processing {len(uploaded_files)} file(s)...")
+
+    for file_idx, uploaded_file in enumerate(uploaded_files, 1):
+        file_name = uploaded_file.name
+        st.caption(f"📁 [{file_idx}/{len(uploaded_files)}] Processing {file_name}...")
+
+        imported = skipped = errors = 0
+        method_used = 'python'
+
+        try:
+            python_transactions = extract_transactions_python(uploaded_file, file_name)
+            transactions = python_transactions
+
+            if not transactions:
+                method_used = 'ai'
+                try:
+                    uploaded_file.seek(0)
+                except Exception:
+                    pass
+                transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
+            else:
+                try:
+                    uploaded_file.seek(0)
+                except Exception:
+                    pass
+
+            if not transactions:
+                st.error(f"   ❌ Could not extract transactions from {file_name}.")
+                processing_log.append({
+                    'file': file_name,
+                    'imported': 0,
+                    'skipped': 0,
+                    'errors': 1,
+                    'method': method_used,
+                })
+                continue
+
+            fallback_channel = (Path(file_name).stem or 'Direct').title()
+
+            for tx in transactions:
+                payload = _tx_build_db_transaction(
+                    tx,
+                    fallback_channel,
+                    file_name,
+                    user_id,
+                    portfolio_id,
+                    db,
+                    price_fetcher,
+                    price_cache,
+                )
+                if not payload:
+                    errors += 1
+                    continue
+
+                try:
+                    result = db.add_transaction(payload)
+                except Exception as exc:
+                    st.caption(f"   ⚠️ Database error: {str(exc)[:100]}")
+                    errors += 1
+                    continue
+
+                if result.get('success'):
+                    imported += 1
+                    ticker_key = payload.get('ticker')
+                    asset_type_value = payload.get('asset_type', 'stock')
+                    if ticker_key:
+                        collected_tickers[ticker_key] = asset_type_value
+                    if imported % 75 == 0:
+                        time.sleep(0.2)
+                else:
+                    error_msg = (result.get('error') or '').lower()
+                    if 'duplicate' in error_msg:
+                        skipped += 1
+                    else:
+                        errors += 1
+
+            if imported > 0:
+                mapper_label = "Python" if method_used == 'python' else "AI"
+                st.success(f"   ✅ Imported {imported} transaction(s) from {file_name} ({mapper_label} mapper)")
+                if skipped:
+                    st.info(f"   ⏭️  Skipped {skipped} duplicate transaction(s)")
+                if errors:
+                    st.warning(f"   ⚠️ Encountered {errors} row error(s)")
+            else:
+                if skipped and not errors:
+                    st.info(f"   ⏭️  All {skipped} rows were duplicates.")
+                else:
+                    st.error(f"   ❌ Failed to import transactions from {file_name}.")
+
+            processing_log.append({
+                'file': file_name,
+                'imported': imported,
+                'skipped': skipped,
+                'errors': errors,
+                'method': method_used,
+            })
+            total_imported += imported
+
+        except Exception as exc:
+            st.error(f"   ❌ Error processing {file_name}: {str(exc)[:120]}")
+            processing_log.append({
+                'file': file_name,
+                'imported': 0,
+                'skipped': 0,
+                'errors': 1,
+                'method': method_used,
+            })
+
+    if total_imported > 0:
+        st.caption("📊 Recalculating holdings...")
+        try:
+            holdings_count = db.recalculate_holdings(user_id, portfolio_id)
+            st.caption(f"   ✅ Updated {holdings_count} holding record(s)")
+        except Exception as exc:
+            st.caption(f"   ⚠️ Holdings recalculation skipped: {str(exc)[:80]}")
+
+        if collected_tickers:
+            st.caption(f"📈 Refreshing market data for {len(collected_tickers)} ticker(s)...")
+            try:
+                db.bulk_process_new_stocks_with_comprehensive_data(
+                    tickers=list(collected_tickers.keys()),
+                    asset_types=collected_tickers,
+                )
+                st.caption("   ✅ Latest prices and weekly history refreshed.")
+            except Exception as exc:
+                st.caption(f"   ⚠️ Market data refresh skipped: {str(exc)[:80]}")
+
+    if processing_log:
+        st.success(f"✅ Processing complete! Imported {total_imported} transactions from {len(uploaded_files)} file(s).")
+        with st.expander("📋 Processing Details", expanded=False):
+            for log in processing_log:
+                method_label = "Python" if log.get('method') == 'python' else "AI"
+                st.caption(
+                    f"📄 {log['file']} • {method_label} • "
+                    f"{log['imported']} imported, {log['skipped']} skipped, {log['errors']} errors"
+                )
+
     return total_imported
 
 def main_dashboard():
@@ -6283,194 +7467,12 @@ Always:
     else:
         st.caption("No PDFs uploaded yet")
     
-    # PDF Upload for AI Analysis (Multiple Files Supported)
-    st.markdown("---")
-    st.markdown("**📤 Upload PDFs for AI Analysis**")
-    st.caption("💡 You can upload multiple PDFs at once!")
-    
-    uploaded_pdfs = st.file_uploader(
-        "Choose PDF file(s) to analyze",
-        type=['pdf'],
-        accept_multiple_files=True,
-        help="Upload research reports, financial statements, or any document for AI analysis. Select multiple files to upload them all at once!"
+    _render_document_upload_section(
+        section_key="document_ai_primary",
+        user=user,
+        holdings=holdings,
+        db=db,
     )
-    
-    if uploaded_pdfs:
-        # Handle both single file and multiple files
-        if not isinstance(uploaded_pdfs, list):
-            uploaded_pdfs = [uploaded_pdfs]
-        
-        if len(uploaded_pdfs) == 1:
-            button_text = f"🔍 Analyze 1 PDF"
-        else:
-            button_text = f"🔍 Analyze & Upload {len(uploaded_pdfs)} PDFs"
-        
-        if st.button(button_text, type="primary"):
-            success_count = 0
-            failed_count = 0
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for idx, uploaded_pdf in enumerate(uploaded_pdfs):
-                try:
-                    status_text.text(f"📄 Processing {idx + 1}/{len(uploaded_pdfs)}: {uploaded_pdf.name}...")
-                    progress_bar.progress((idx + 1) / len(uploaded_pdfs))
-                    
-                    import PyPDF2
-                    import pdfplumber
-                    import openai
-                    openai.api_key = st.secrets["api_keys"]["open_ai"]
-                    
-                    # Enhanced PDF extraction with tables and structure
-                    pdf_text = ""
-                    tables_found = []
-                    page_count = 0
-                    
-                    # Try pdfplumber first (better for tables)
-                    # Reset file pointer for each file
-                    uploaded_pdf.seek(0)
-                    with pdfplumber.open(uploaded_pdf) as pdf:
-                        for page_num, page in enumerate(pdf.pages, 1):
-                            page_count += 1
-                            page_text = page.extract_text()
-                            if page_text:
-                                pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
-                            
-                            # Extract tables
-                            tables = page.extract_tables()
-                            if tables:
-                                for table_idx, table in enumerate(tables, 1):
-                                    tables_found.append({
-                                        'page': page_num,
-                                        'table': table_idx,
-                                        'data': table
-                                    })
-                    
-                    if pdf_text:
-                        # Truncate if too long (OpenAI has token limits)
-                        pdf_text_for_ai = pdf_text[:10000] + "..." if len(pdf_text) > 10000 else pdf_text
-                        
-                        # Prepare tables summary
-                        tables_summary = ""
-                        if tables_found:
-                            tables_summary = f"\n📊 Tables Found: {len(tables_found)}\n"
-                            for table in tables_found[:3]:  # Show first 3 tables
-                                tables_summary += f"• Page {table['page']}, Table {table['table']}: {len(table['data'])} rows\n"
-                        
-                        # Get portfolio context
-                        portfolio_summary = get_cached_portfolio_summary(holdings)
-                        
-                        # Enhanced analysis prompt with structured output
-                        analysis_prompt = f"""
-                        Analyze this PDF document comprehensively for portfolio management insights.
-                        
-                        📄 DOCUMENT INFO:
-                        - Filename: {uploaded_pdf.name}
-                        - Pages: {page_count}
-                        {tables_summary}
-                        
-                        💼 USER'S PORTFOLIO:
-                        {portfolio_summary}
-                        
-                        📝 PDF CONTENT:
-                        {pdf_text_for_ai}
-                        
-                        Please provide a STRUCTURED analysis using this format:
-                        
-                        📋 **DOCUMENT SUMMARY**
-                        [2-3 sentences describing what this PDF contains]
-                        
-                        📊 **KEY METRICS & DATA**
-                        [Extract specific numbers, percentages, dates, returns mentioned]
-                        • Metric: Value
-                        • Metric: Value
-                        
-                        📈 **INSIGHTS FROM CHARTS/TABLES**
-                        [Describe trends, patterns, or comparisons shown in tables/graphs]
-                        
-                        💡 **MAIN FINDINGS**
-                        [3-5 key takeaways from the document]
-                        
-                        🎯 **PORTFOLIO RELEVANCE**
-                        [How this information relates to the user's current holdings]
-                        
-                        ⚡ **RECOMMENDED ACTIONS**
-                        [Specific, actionable next steps - if applicable]
-                        
-                        Use actual numbers and be specific. Focus on actionable insights.
-                        """
-                        
-                        response = openai.chat.completions.create(
-                            model="gpt-5",  # Upgraded to GPT-5 for better PDF analysis
-                            messages=[{"role": "user", "content": analysis_prompt}],
-                            max_completion_tokens=1000,
-                            # Note: GPT-5 only supports default temperature (1)
-                        )
-                        
-                        ai_analysis = response.choices[0].message.content
-                        
-                        # Display the analysis for this PDF
-                        with st.expander(f"📄 {uploaded_pdf.name} - Analysis", expanded=(idx == 0)):
-                            st.markdown("### 🤖 AI Analysis")
-                            st.markdown(ai_analysis)
-                            st.info(f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, found {len(tables_found)} tables")
-                        
-                        # Store in chat history (session state)
-                        st.session_state.chat_history.append({
-                            "q": f"Analyze PDF: {uploaded_pdf.name}", 
-                            "a": ai_analysis
-                        })
-                        # Save to database (user-specific, persistent)
-                        if hasattr(db, 'save_chat_history'):
-                            try:
-                                db.save_chat_history(user['id'], f"Analyze PDF: {uploaded_pdf.name}", ai_analysis)
-                            except Exception:
-                                pass
-                        
-                        # Clean PDF text before saving (remove null bytes and control characters)
-                        import re
-                        cleaned_pdf_text = pdf_text.replace('\x00', ' ').replace('\u0000', ' ')
-                        cleaned_pdf_text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', ' ', cleaned_pdf_text)
-                        cleaned_pdf_text = ''.join(char if char.isprintable() or char in '\n\t\r ' else ' ' for char in cleaned_pdf_text)
-                        cleaned_pdf_text = re.sub(r'\s+', ' ', cleaned_pdf_text).strip()
-                        
-                        # Save PDF to database
-                        save_result = db.save_pdf(
-                            user_id=user['id'],
-                            filename=uploaded_pdf.name,
-                            pdf_text=cleaned_pdf_text,  # Store cleaned text
-                            ai_summary=ai_analysis
-                        )
-                        
-                        if save_result['success']:
-                            success_count += 1
-                        else:
-                            failed_count += 1
-                            st.error(f"❌ Failed to save '{uploaded_pdf.name}': {save_result.get('error', 'Unknown error')}")
-                    else:
-                        failed_count += 1
-                        st.error(f"❌ Could not extract text from '{uploaded_pdf.name}'. Please ensure the PDF contains readable text.")
-                        
-                except Exception as e:
-                    failed_count += 1
-                    st.error(f"❌ Error processing '{uploaded_pdf.name}': {str(e)[:100]}")
-            
-            # Final summary
-            progress_bar.empty()
-            status_text.empty()
-            
-            if success_count > 0:
-                st.success(f"✅ Successfully processed and saved {success_count} PDF(s) to shared library!")
-                if failed_count > 0:
-                    st.warning(f"⚠️ {failed_count} PDF(s) failed to process")
-                
-                # Refresh the page to update the PDF library count
-                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                st.info("📄 PDF content is now stored and available for all future sessions!")
-                st.rerun()
-            else:
-                st.error(f"❌ All {len(uploaded_pdfs)} PDF(s) failed to process. Please check the files and try again.")
     
     # Quick Tips Section
     st.markdown("---")
@@ -6774,194 +7776,12 @@ def ai_insights_page():
         except Exception as e:
             st.error(f"Error displaying agent status: {str(e)}")
 
-    # PDF Upload for AI Analysis (Multiple Files Supported)
-    st.markdown("---")
-    st.markdown("**📤 Upload PDFs for AI Analysis**")
-    st.caption("💡 You can upload multiple PDFs at once!")
-    
-    uploaded_pdfs = st.file_uploader(
-        "Choose PDF file(s) to analyze",
-        type=['pdf'],
-        accept_multiple_files=True,
-        help="Upload research reports, financial statements, or any document for AI analysis. Select multiple files to upload them all at once!"
+    _render_document_upload_section(
+        section_key="document_ai_secondary",
+        user=user,
+        holdings=holdings,
+        db=db,
     )
-    
-    if uploaded_pdfs:
-        # Handle both single file and multiple files
-        if not isinstance(uploaded_pdfs, list):
-            uploaded_pdfs = [uploaded_pdfs]
-        
-        if len(uploaded_pdfs) == 1:
-            button_text = f"🔍 Analyze 1 PDF"
-        else:
-            button_text = f"🔍 Analyze & Upload {len(uploaded_pdfs)} PDFs"
-        
-        if st.button(button_text, type="primary"):
-            success_count = 0
-            failed_count = 0
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for idx, uploaded_pdf in enumerate(uploaded_pdfs):
-                try:
-                    status_text.text(f"📄 Processing {idx + 1}/{len(uploaded_pdfs)}: {uploaded_pdf.name}...")
-                    progress_bar.progress((idx + 1) / len(uploaded_pdfs))
-                    
-                    import PyPDF2
-                    import pdfplumber
-                    import openai
-                    openai.api_key = st.secrets["api_keys"]["open_ai"]
-                    
-                    # Enhanced PDF extraction with tables and structure
-                    pdf_text = ""
-                    tables_found = []
-                    page_count = 0
-                    
-                    # Try pdfplumber first (better for tables)
-                    # Reset file pointer for each file
-                    uploaded_pdf.seek(0)
-                    with pdfplumber.open(uploaded_pdf) as pdf:
-                        for page_num, page in enumerate(pdf.pages, 1):
-                            page_count += 1
-                            page_text = page.extract_text()
-                            if page_text:
-                                pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
-                            
-                            # Extract tables
-                            tables = page.extract_tables()
-                            if tables:
-                                for table_idx, table in enumerate(tables, 1):
-                                    tables_found.append({
-                                        'page': page_num,
-                                        'table': table_idx,
-                                        'data': table
-                                    })
-                    
-                    if pdf_text:
-                        # Truncate if too long (OpenAI has token limits)
-                        pdf_text_for_ai = pdf_text[:10000] + "..." if len(pdf_text) > 10000 else pdf_text
-                        
-                        # Prepare tables summary
-                        tables_summary = ""
-                        if tables_found:
-                            tables_summary = f"\n📊 Tables Found: {len(tables_found)}\n"
-                            for table in tables_found[:3]:  # Show first 3 tables
-                                tables_summary += f"• Page {table['page']}, Table {table['table']}: {len(table['data'])} rows\n"
-                        
-                        # Get portfolio context
-                        portfolio_summary = get_cached_portfolio_summary(holdings)
-                        
-                        # Enhanced analysis prompt with structured output
-                        analysis_prompt = f"""
-                        Analyze this PDF document comprehensively for portfolio management insights.
-                        
-                        📄 DOCUMENT INFO:
-                        - Filename: {uploaded_pdf.name}
-                        - Pages: {page_count}
-                        {tables_summary}
-                        
-                        💼 USER'S PORTFOLIO:
-                        {portfolio_summary}
-                        
-                        📝 PDF CONTENT:
-                        {pdf_text_for_ai}
-                        
-                        Please provide a STRUCTURED analysis using this format:
-                        
-                        📋 **DOCUMENT SUMMARY**
-                        [2-3 sentences describing what this PDF contains]
-                        
-                        📊 **KEY METRICS & DATA**
-                        [Extract specific numbers, percentages, dates, returns mentioned]
-                        • Metric: Value
-                        • Metric: Value
-                        
-                        📈 **INSIGHTS FROM CHARTS/TABLES**
-                        [Describe trends, patterns, or comparisons shown in tables/graphs]
-                        
-                        💡 **MAIN FINDINGS**
-                        [3-5 key takeaways from the document]
-                        
-                        🎯 **PORTFOLIO RELEVANCE**
-                        [How this information relates to the user's current holdings]
-                        
-                        ⚡ **RECOMMENDED ACTIONS**
-                        [Specific, actionable next steps - if applicable]
-                        
-                        Use actual numbers and be specific. Focus on actionable insights.
-                        """
-                        
-                        response = openai.chat.completions.create(
-                            model="gpt-5",  # Upgraded to GPT-5 for better PDF analysis
-                            messages=[{"role": "user", "content": analysis_prompt}],
-                            max_completion_tokens=1000,
-                            # Note: GPT-5 only supports default temperature (1)
-                        )
-                        
-                        ai_analysis = response.choices[0].message.content
-                        
-                        # Display the analysis for this PDF
-                        with st.expander(f"📄 {uploaded_pdf.name} - Analysis", expanded=(idx == 0)):
-                            st.markdown("### 🤖 AI Analysis")
-                            st.markdown(ai_analysis)
-                        st.info(f"✅ Extracted {len(pdf_text)} characters from {page_count} pages, found {len(tables_found)} tables")
-                        
-                        # Store in chat history (session state)
-                        st.session_state.chat_history.append({
-                            "q": f"Analyze PDF: {uploaded_pdf.name}", 
-                            "a": ai_analysis
-                        })
-                        # Save to database (user-specific, persistent)
-                        if hasattr(db, 'save_chat_history'):
-                            try:
-                                db.save_chat_history(user['id'], f"Analyze PDF: {uploaded_pdf.name}", ai_analysis)
-                            except Exception:
-                                pass
-                        
-                        # Clean PDF text before saving (remove null bytes and control characters)
-                        import re
-                        cleaned_pdf_text = pdf_text.replace('\x00', ' ').replace('\u0000', ' ')
-                        cleaned_pdf_text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', ' ', cleaned_pdf_text)
-                        cleaned_pdf_text = ''.join(char if char.isprintable() or char in '\n\t\r ' else ' ' for char in cleaned_pdf_text)
-                        cleaned_pdf_text = re.sub(r'\s+', ' ', cleaned_pdf_text).strip()
-                        
-                        # Save PDF to database
-                        save_result = db.save_pdf(
-                            user_id=user['id'],
-                            filename=uploaded_pdf.name,
-                            pdf_text=cleaned_pdf_text,  # Store cleaned text
-                            ai_summary=ai_analysis
-                        )
-                        
-                        if save_result['success']:
-                            success_count += 1
-                        else:
-                            failed_count += 1
-                            st.error(f"❌ Failed to save '{uploaded_pdf.name}': {save_result.get('error', 'Unknown error')}")
-                    else:
-                        failed_count += 1
-                        st.error(f"❌ Could not extract text from '{uploaded_pdf.name}'. Please ensure the PDF contains readable text.")
-                        
-                except Exception as e:
-                    failed_count += 1
-                    st.error(f"❌ Error processing '{uploaded_pdf.name}': {str(e)[:100]}")
-            
-            # Final summary
-            progress_bar.empty()
-            status_text.empty()
-            
-            if success_count > 0:
-                st.success(f"✅ Successfully processed and saved {success_count} PDF(s) to shared library!")
-                if failed_count > 0:
-                    st.warning(f"⚠️ {failed_count} PDF(s) failed to process")
-                
-                # Refresh the page to update the PDF library count
-                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                st.info("📄 PDF content is now stored and available for all future sessions!")
-                st.rerun()
-            else:
-                st.error(f"❌ All {len(uploaded_pdfs)} PDF(s) failed to process. Please check the files and try again.")
     
     # Quick Tips Section
     st.markdown("---")
@@ -7817,12 +8637,20 @@ def process_file_with_ai(uploaded_file, filename, user_id):
         return None
     
     try:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
         # Initialize AI File Processor
         file_processor = AIFileProcessor()
         
         # Process file with AI
         with st.spinner(f"🤖 AI is analyzing {filename} and extracting transactions..."):
             transactions = file_processor.process_file(uploaded_file, filename)
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
         
         if not transactions:
             st.warning(f"⚠️ No transactions found in {filename}")
@@ -7913,105 +8741,13 @@ def upload_files_page():
         - `channel`: Channel/platform name (optional - will use filename if missing)
         """)
     
-    # Initialize uploaded_files_ai to None
-    uploaded_files_ai = None
-    
-    # AI-powered file extraction section
-    if AI_FILE_EXTRACTION_ENABLED:
-        st.markdown("""
-        <div class="upload-section">
-            <h3>🤖 AI-Powered Transaction Extraction</h3>
-            <p>Upload ANY file type (PDF, CSV, Excel, Images) and let AI automatically extract transaction data!</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.info("💡 **AI processes all file types**: CSV, PDF, Excel (XLSX/XLS), Text files, and Images (JPG, PNG, JPEG). Just upload and let AI handle the rest!")
-        
-        # Universal file uploader (AI extraction)
-        uploaded_files_ai = st.file_uploader(
-            "📁 Choose files to upload (CSV, PDF, Excel, Images, etc.)",
-            type=['csv', 'pdf', 'xlsx', 'xls', 'txt', 'jpg', 'jpeg', 'png'],
-            accept_multiple_files=True,
-            key="ai_file_uploader",
-            help="Upload transaction files in any format - AI will extract the data automatically. Supports images too!"
-        )
-        
-    # Process AI-extracted files if any were uploaded
-    if uploaded_files_ai:
-            for uploaded_file in uploaded_files_ai:
-                file_type = uploaded_file.name.split('.')[-1].upper()
-                st.markdown(f"**🤖 AI Processing: {uploaded_file.name}** ({file_type})")
-                
-                # Extract transactions using AI (works for ALL file types)
-                transactions = process_file_with_ai(uploaded_file, uploaded_file.name, user['id'])
-                
-                if transactions:
-                    st.success(f"✅ AI extracted {len(transactions)} transactions from {uploaded_file.name}")
-                    
-                    # Display extracted transactions
-                    with st.expander(f"View {len(transactions)} extracted transactions", expanded=True):
-                        # Create DataFrame for display
-                        df = pd.DataFrame(transactions)
-                        
-                        # Display summary
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Total Transactions", len(transactions))
-                        with col2:
-                            total_value = sum(t.get('quantity', 0) * t.get('price', 0) for t in transactions)
-                            st.metric("Total Value", f"₹{total_value:,.0f}" if total_value > 0 else "Price to be fetched")
-                        with col3:
-                            asset_types = set(t.get('asset_type', 'unknown') for t in transactions)
-                            st.metric("Asset Types", len(asset_types))
-                        with col4:
-                            channels = set(t.get('channel', 'unknown') for t in transactions)
-                            st.metric("Channels", len(channels))
-                        
-                        # Display transactions table
-                        st.dataframe(df, use_container_width=True)
-                        
-                        # Upload to database button
-                        if st.button(f"📥 Upload {len(transactions)} transactions to portfolio", key=f"upload_{uploaded_file.name}"):
-                            # Process and upload transactions
-                            success_count = 0
-                            for transaction in transactions:
-                                try:
-                                    # Convert AI extracted data to database format
-                                    transaction_data = {
-                                        'user_id': user['id'],
-                                        'portfolio_id': portfolio['id'],  # Add portfolio_id
-                                        'ticker': transaction.get('ticker'),
-                                        'stock_name': transaction.get('stock_name') or transaction.get('ticker', 'Unknown'),  # Fix null stock_name
-                                        'scheme_name': transaction.get('scheme_name'),
-                                        'quantity': transaction.get('quantity', 0),
-                                        'price': transaction.get('price', 0),  # 0 triggers auto-fetch
-                                        'transaction_date': transaction.get('date'),
-                                        'transaction_type': transaction.get('transaction_type', 'buy'),
-                                        'asset_type': transaction.get('asset_type', 'stock'),
-                                        'channel': transaction.get('channel', 'Direct'),
-                                        'sector': transaction.get('sector', 'Unknown'),  # Fix null sector
-                                        'filename': uploaded_file.name
-                                    }
-                                    result = db.add_transaction(transaction_data)
-                                    if result.get('success'):
-                                        success_count += 1
-                                except Exception as e:
-                                    st.error(f"Error uploading transaction: {e}")
-                            
-                            if success_count > 0:
-                                st.success(f"✅ Successfully uploaded {success_count} transactions to your portfolio!")
-                                st.rerun()
-                            else:
-                                st.error("❌ Failed to upload transactions")
-    else:
-        # File uploader for CSV/Excel (no AI needed)
-        uploaded_files = st.file_uploader(
-            "📁 Choose CSV or Excel files to upload",
-            type=['csv', 'xlsx', 'xls'],
-            accept_multiple_files=True,
-            help="Select CSV or Excel files with required columns: date, ticker, quantity, transaction_type, price, stock_name, sector, channel",
-            key="upload_files_main"
-        )
+    uploaded_files = st.file_uploader(
+        "📁 Choose CSV, Excel, or PDF files to upload",
+        type=['csv', 'tsv', 'xlsx', 'xls', 'pdf'],
+        accept_multiple_files=True,
+        key="upload_files_main",
+        help="Python first maps standard columns; AI fallback handles unstructured layouts automatically."
+    )
     
     # Show file preview
     if uploaded_files:
@@ -8027,30 +8763,13 @@ def upload_files_page():
                 </div>
                 """, unsafe_allow_html=True)
         
-        # Processing options
-        col1, col2, col3 = st.columns([2, 1, 1])
+        col1, col2 = st.columns([3, 1])
         
         with col1:
-            st.markdown("**⚙️ Processing Options:**")
-            auto_fetch_prices = st.checkbox(
-                "🔍 Auto-fetch missing prices", 
-                value=True, 
-                help="Automatically fetch historical prices for transactions with missing or zero prices"
-            )
-            fetch_weekly_prices = st.checkbox(
-                "📅 Fetch weekly historical prices", 
-                value=True, 
-                help="Automatically fetch 52 weeks of historical price data for all holdings"
-            )
-        
-        with col2:
             if st.button("🚀 Process Files", type="primary", use_container_width=True):
                 st.info(f"🚀 Processing {len(uploaded_files)} file(s) for portfolio: {portfolio['portfolio_name']}")
-                
-                # Show progress
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                
                 try:
                     process_uploaded_files(uploaded_files, user['id'], portfolio['id'])
                     progress_bar.progress(1.0)
@@ -8062,10 +8781,10 @@ def upload_files_page():
                     progress_bar.progress(0)
                     status_text.error(f"❌ Error processing files: {str(e)}")
         
-        with col3:
+        with col2:
             if st.button("🗑️ Clear Files", use_container_width=True):
                 st.session_state.upload_files_main = []
-        st.rerun()
+                st.rerun()
     
     # Show transactions with week info
     st.subheader("📊 Your Transactions (with Week Info)")

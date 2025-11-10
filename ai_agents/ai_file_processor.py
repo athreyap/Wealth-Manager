@@ -6,9 +6,16 @@ Handles CSV, PDF, Excel, and any other file format intelligently
 import openai
 import json
 import pandas as pd
-from typing import List, Dict, Any, Optional
+import re
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from .base_agent import BaseAgent
+
+try:
+    from enhanced_price_fetcher import EnhancedPriceFetcher
+except ImportError:  # pragma: no cover - runtime dependency
+    EnhancedPriceFetcher = None  # type: ignore[misc]
 
 
 class AIFileProcessor(BaseAgent):
@@ -43,6 +50,17 @@ class AIFileProcessor(BaseAgent):
             self.logger.error(f"Failed to initialize OpenAI client: {e}")
             self.openai_client = None
         
+        # Initialize price fetcher for automatic price backfill
+        if EnhancedPriceFetcher is not None:
+            try:
+                self.price_fetcher = EnhancedPriceFetcher()
+            except Exception as exc:  # pragma: no cover - runtime dependency
+                self.logger.error(f"Failed to initialize EnhancedPriceFetcher: {exc}")
+                self.price_fetcher = None
+        else:
+            self.price_fetcher = None
+
+        self._price_cache: Dict[Tuple[str, str, str], Optional[float]] = {}
         self.processed_transactions = []
     
     def process_file(self, file_data: Any, filename: str) -> List[Dict[str, Any]]:
@@ -75,7 +93,7 @@ class AIFileProcessor(BaseAgent):
             transactions = self._ai_extract_transactions(file_content, filename, file_type)
             
             # Validate and enhance transactions
-            validated_transactions = self._validate_and_enhance(transactions)
+            validated_transactions = self._validate_and_enhance(transactions, filename)
             
             # Cache transactions
             self.processed_transactions = validated_transactions
@@ -278,11 +296,10 @@ CRITICAL RULES:
             self.logger.error(f"JSON extraction error: {e}")
             return []
     
-    def _validate_and_enhance(self, transactions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _validate_and_enhance(self, transactions: List[Dict[str, Any]], source_filename: str) -> List[Dict[str, Any]]:
         """Validate and enhance transaction data"""
         
         validated = []
-        
         for trans in transactions:
             try:
                 # Skip if missing critical fields
@@ -299,8 +316,11 @@ CRITICAL RULES:
                     'price': self._safe_float(trans.get('price', 0)),  # 0 if missing - will be fetched
                     'transaction_type': str(trans.get('transaction_type', 'buy')).lower(),
                     'asset_type': self._detect_asset_type(trans),
-                    'sector': trans.get('sector', 'Unknown'),
-                    'channel': trans.get('channel', 'Direct')
+                    'sector': trans.get('sector') or 'Unknown',
+                    'channel': self._infer_channel_from_filename(
+                        source_filename,
+                        trans.get('channel')
+                    )
                 }
                 
                 # Validate quantity is positive
@@ -310,6 +330,11 @@ CRITICAL RULES:
                 # Ensure price is non-negative
                 if validated_trans['price'] < 0:
                     validated_trans['price'] = 0
+
+                # Backfill missing price using historical data
+                fetched_price = self._fetch_price_for_transaction(validated_trans)
+                if fetched_price and fetched_price > 0:
+                    validated_trans['price'] = round(float(fetched_price), 4)
                 
                 validated.append(validated_trans)
                 
@@ -418,6 +443,68 @@ CRITICAL RULES:
             pass
         
         return []
+
+    def _infer_channel_from_filename(self, filename: str, explicit_channel: Optional[str] = None) -> str:
+        """Infer channel/platform from explicit value or fallback to filename stem."""
+        if explicit_channel:
+            candidate = str(explicit_channel).strip()
+            if candidate:
+                return candidate
+
+        if not filename:
+            return "Direct"
+
+        stem = Path(filename).stem
+        clean = re.sub(r'[_\-\s]+', ' ', stem).strip()
+        return clean.title() if clean else "Direct"
+
+    def _fetch_price_for_transaction(self, trans: Dict[str, Any]) -> Optional[float]:
+        """Fetch historical price for transaction date when price missing/zero."""
+        if not self.price_fetcher:
+            return None
+
+        price = trans.get('price') or 0
+        if price and price > 0:
+            return price
+
+        ticker = trans.get('ticker')
+        date = trans.get('date')
+        asset_type = (trans.get('asset_type') or 'stock').lower()
+
+        if not ticker or not date:
+            return None
+
+        cache_key = (ticker, date, asset_type)
+        if cache_key in self._price_cache:
+            return self._price_cache[cache_key]
+
+        fund_name = trans.get('stock_name')
+        fetched_price = None
+
+        try:
+            fetched_price = self.price_fetcher.get_historical_price(
+                ticker,
+                asset_type,
+                date,
+                fund_name=fund_name
+            )
+
+            if not fetched_price:
+                current_price, _ = self.price_fetcher.get_current_price(
+                    ticker,
+                    asset_type,
+                    fund_name=fund_name
+                )
+                fetched_price = current_price
+
+            if fetched_price and fetched_price > 0:
+                self._price_cache[cache_key] = fetched_price
+                return fetched_price
+        except Exception as exc:
+            self.logger.warning(f"Price backfill failed for {ticker} on {date}: {exc}")
+
+        self._price_cache[cache_key] = None
+        return None
     
     def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze method required by BaseAgent"""

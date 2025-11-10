@@ -1273,7 +1273,7 @@ class SharedDatabaseManager:
             for holding in holdings:
                 raw_sector = str(holding.get('sector') or '').strip()
                 asset_type_value = str(holding.get('asset_type') or '').strip().lower()
-                if raw_sector:
+                if raw_sector and raw_sector.lower() != 'unknown':
                     sector = raw_sector
                 else:
                     if asset_type_value in ['mutual_fund']:

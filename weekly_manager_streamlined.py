@@ -271,10 +271,10 @@ class StreamlinedWeeklyManager:
             
             if asset_type == 'stock':
                     # Using stock price fetcher (silent)
-                    price = self.price_fetcher.get_current_price(ticker, asset_type)
+                    price = self.price_fetcher.get_current_price(ticker, asset_type, fund_name=name)
             elif asset_type == 'mutual_fund':
                     # Using mutual fund price fetcher (silent)
-                    price = self.price_fetcher.get_current_price(ticker, asset_type)
+                    price = self.price_fetcher.get_current_price(ticker, asset_type, fund_name=name)
             elif asset_type in ['pms', 'aif']:
                     # Calculating PMS/AIF NAV using CAGR (silent)
                     # For PMS/AIF, use CAGR calculation (as per your requirements)
