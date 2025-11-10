@@ -565,11 +565,31 @@ class SharedDatabaseManager:
             Success boolean
         """
         try:
+            if not prices:
+                return True
+
+            dedup_map: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
+            for entry in prices:
+                if not entry:
+                    continue
+                key = (entry.get('stock_id'), entry.get('price_date'))
+                if not key[0] or not key[1]:
+                    continue
+                dedup_map[key] = entry
+
+            if not dedup_map:
+                return True
+
+            chunk_size = 500
+            items = list(dedup_map.values())
+
             # Upsert to avoid duplicates
-            self.supabase.table('historical_prices').upsert(
-                prices,
-                on_conflict='stock_id,price_date'
-            ).execute()
+            for i in range(0, len(items), chunk_size):
+                chunk = items[i:i + chunk_size]
+                self.supabase.table('historical_prices').upsert(
+                    chunk,
+                    on_conflict='stock_id,price_date'
+                ).execute()
             return True
         except Exception as e:
             st.error(f"Error saving historical prices: {str(e)}")
@@ -854,6 +874,8 @@ class SharedDatabaseManager:
             
             response = query.execute()
             holdings = response.data
+
+            latest_channels = self._prefetch_latest_channels(user_id)
             
             # Normalize live price information before channel lookup
             for holding in holdings:
@@ -870,15 +892,7 @@ class SharedDatabaseManager:
                 if live_price > 0 and current_price_val == 0:
                     holding['current_price'] = live_price
 
-                # Get the most recent channel for this stock
-                channel_response = self.supabase.table('user_transactions').select('channel').eq(
-                    'user_id', user_id
-                ).eq('stock_id', stock_id).order('transaction_date', desc=True).limit(1).execute()
-                
-                if channel_response.data:
-                    holding['channel'] = channel_response.data[0]['channel']
-                else:
-                    holding['channel'] = 'Direct'
+                holding['channel'] = latest_channels.get(stock_id, 'Direct')
             
             return holdings
         except Exception as e:
@@ -896,6 +910,8 @@ class SharedDatabaseManager:
             
             response = query.execute()
             holdings = response.data
+
+            latest_channels = self._prefetch_latest_channels(user_id)
             
             # Normalize live price information before channel lookup
             for holding in holdings:
@@ -912,19 +928,38 @@ class SharedDatabaseManager:
                 if live_price > 0 and current_price_val == 0:
                     holding['current_price'] = live_price
 
-                # Get the most recent channel for this stock
-                channel_response = self.supabase.table('user_transactions').select('channel').eq(
-                    'user_id', user_id
-                ).eq('stock_id', stock_id).order('transaction_date', desc=True).limit(1).execute()
-                
-                if channel_response.data:
-                    holding['channel'] = channel_response.data[0]['channel']
-                else:
-                    holding['channel'] = 'Direct'
+                holding['channel'] = latest_channels.get(stock_id, 'Direct')
             
             return holdings
         except Exception as e:
             return []
+
+    def _prefetch_latest_channels(self, user_id: str) -> Dict[str, str]:
+        """Fetch latest channel per stock in a single query."""
+        try:
+            response = (
+                self.supabase.table('user_transactions')
+                .select('stock_id, channel, transaction_date')
+                .eq('user_id', user_id)
+                .order('transaction_date', desc=True)
+                .limit(5000)
+                .execute()
+            )
+        except Exception:
+            return {}
+
+        channel_map: Dict[str, str] = {}
+        for row in response.data or []:
+            stock_id = row.get('stock_id')
+            if not stock_id or stock_id in channel_map:
+                continue
+            channel_value = row.get('channel') or 'Direct'
+            channel_map[stock_id] = channel_value
+
+            if len(channel_map) > 5000:
+                break
+
+        return channel_map
     
     def get_user_transactions(self, user_id: str, portfolio_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get user transactions with stock details (uses view)"""
@@ -1854,8 +1889,9 @@ class SharedDatabaseManager:
             
             # Check if we already have historical data (shared across users)
             existing_hist = self.supabase.table('historical_prices').select('id, iso_year, iso_week').eq('stock_id', stock_id).execute()
-            existing_pairs = {(row['iso_year'], row['iso_week']) for row in existing_hist.data or []}
-            existing_count = len(existing_hist.data) if existing_hist.data else 0
+            existing_rows = existing_hist.data or []
+            existing_pairs = {(row.get('iso_year'), row.get('iso_week')) for row in existing_rows if row.get('iso_year') is not None and row.get('iso_week') is not None}
+            existing_count = len(existing_rows)
             print(f"[HIST] Existing historical records: {existing_count}")
             
             required_pairs: Optional[set] = None
@@ -1865,7 +1901,8 @@ class SharedDatabaseManager:
                     for entry in target_weeks
                     if entry.get('year') is not None and entry.get('week') is not None
                 }
-                required_pairs -= existing_pairs
+                if required_pairs:
+                    required_pairs -= existing_pairs
                 if not required_pairs:
                     print("[HIST] All requested weeks already cached")
                     return []
@@ -1895,8 +1932,10 @@ class SharedDatabaseManager:
             # SOURCE 0: Mutual fund NAV history via AMFI/mftool
             if asset_type in ['mutual_fund', 'etf']:
                 try:
-                    from mftool import Mftool
-                    mf = Mftool()
+                    mf = fetcher._mftool or fetcher._get_shared_mftool()
+                    if mf is None:
+                        raise RuntimeError("mftool unavailable")
+
                     scheme_code = fetcher._resolve_amfi_code(ticker, stock_name) or ticker
                     nav_history = mf.get_scheme_historical_nav(scheme_code, as_Dataframe=True)
 

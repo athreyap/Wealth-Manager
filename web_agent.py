@@ -86,6 +86,30 @@ def get_cached_holdings(user_id: str):
     db = SharedDatabaseManager()
     return db.get_user_holdings_silent(user_id)
 
+@st.cache_data(ttl=21600)  # 6 hours
+def get_cached_amfi_schemes() -> Dict[str, str]:
+    """Cache AMFI scheme list to avoid repeated downloads."""
+    try:
+        from mftool import Mftool
+        mf = Mftool()
+        schemes = mf.get_scheme_codes()
+        if not schemes:
+            return {}
+        return {code: name for code, name in schemes.items() if code and name}
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=86400)  # 1 day
+def get_cached_amfi_nav_text() -> Optional[str]:
+    """Cache the raw AMFI NAV file text to avoid repeated downloads."""
+    try:
+        response = requests.get(AMFI_NAV_URL, timeout=60)
+        if response.status_code == 200 and response.text:
+            return response.text
+    except Exception:
+        pass
+    return None
+
 @st.cache_data(ttl=600)  # Cache for 10 minutes
 def get_cached_portfolio_summary(holdings: List[Dict]) -> str:
     """Cache comprehensive portfolio summary calculation"""
@@ -1296,6 +1320,12 @@ if 'db' not in st.session_state:
     st.session_state.db = SharedDatabaseManager()
 if 'price_fetcher' not in st.session_state:
     st.session_state.price_fetcher = EnhancedPriceFetcher()
+if 'missing_weeks_fetched' not in st.session_state:
+    st.session_state.missing_weeks_fetched = False
+if 'needs_initial_refresh' not in st.session_state:
+    st.session_state.needs_initial_refresh = True
+if 'last_fetch_time' not in st.session_state:
+    st.session_state.last_fetch_time = None
 
 # Function to detect corporate actions (splits/bonus)
 def detect_corporate_actions(user_id, db):
@@ -1475,6 +1505,56 @@ def update_bond_prices_with_ai(user_id, db):
         print(f"[BOND_UPDATE] Error updating bond prices: {e}")
         pass  # Silent failure - don't break login
 
+
+def run_portfolio_refresh(user_id: str, *, auto: bool = False) -> None:
+    """Refresh current prices and weekly history on-demand or automatically."""
+    spinner_message = "🔄 Refreshing portfolio data..." if not auto else "🔄 Initializing portfolio data..."
+    with st.spinner(spinner_message):
+        try:
+            update_bond_prices_with_ai(user_id, db)
+        except Exception as exc:
+            if not auto:
+                st.warning(f"Bond price refresh skipped: {str(exc)[:80]}")
+
+        holdings = db.get_user_holdings(user_id)
+
+        if holdings:
+            try:
+                missing_weeks = db.get_missing_weeks_for_user(user_id)
+                if missing_weeks:
+                    db.fetch_and_store_missing_weekly_prices(user_id, missing_weeks)
+            except Exception as exc:
+                if not auto:
+                    st.warning(f"Weekly history refresh failed: {str(exc)[:120]}")
+
+            try:
+                holdings_needing_update = should_update_prices_today(holdings, db)
+                if holdings_needing_update and bulk_ai_fetcher.available:
+                    unique_tickers = list({h['ticker'] for h in holdings_needing_update if h.get('ticker')})
+                    if unique_tickers:
+                        asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings_needing_update if h.get('ticker')}
+                        db.bulk_process_new_stocks_with_comprehensive_data(
+                            tickers=unique_tickers,
+                            asset_types=asset_types
+                        )
+                    else:
+                        st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
+                elif holdings_needing_update:
+                    st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
+            except Exception as exc:
+                if not auto:
+                    st.warning(f"Live price update failed: {str(exc)[:120]}")
+
+        st.session_state.missing_weeks_fetched = True
+        st.session_state.needs_initial_refresh = False
+        st.session_state.last_fetch_time = datetime.now()
+
+    if auto:
+        st.success("✅ Portfolio refreshed automatically.")
+    else:
+        st.success("✅ Portfolio data refreshed.")
+        st.experimental_rerun()
+
 # Function to update all live prices
 def update_all_live_prices():
     """Update live prices for all holdings"""
@@ -1572,53 +1652,9 @@ def login_page():
                 except:
                     pass  # Silent failure
                 
-        # Fetch current prices for all holdings on login (only if not updated today OR if prices are stale)
-                try:
-                    holdings = db.get_user_holdings(user['id'])
-                    if holdings and 'price_fetcher' in st.session_state:
-                        # Check which holdings need price updates (not updated today)
-                        holdings_needing_update = should_update_prices_today(holdings, db)
-                        
-                        # Also check for stale prices (current_price == average_price or missing)
-                        stale_holdings = []
-                        for h in holdings:
-                            cp = h.get('current_price') or h.get('live_price') or 0
-                            ap = h.get('average_price', 0)
-                            if cp is None or cp == 0 or (ap > 0 and abs(cp - ap) < 0.01):
-                                stale_holdings.append(h)
-                        
-                        # Combine both lists (remove duplicates)
-                        all_needing_update = {h.get('stock_id'): h for h in holdings_needing_update}
-                        for h in stale_holdings:
-                            all_needing_update[h.get('stock_id')] = h
-                        
-                        holdings_to_fetch = list(all_needing_update.values())
-                        
-                        if holdings_to_fetch:
-                            print(f"[LOGIN] Fetching current prices for {len(holdings_to_fetch)} holdings ({len(holdings_needing_update)} not updated today, {len(stale_holdings)} stale)...")
-                            st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_to_fetch, db)
-                            print(f"[LOGIN] ✅ Price fetching complete")
-                        else:
-                            print(f"[LOGIN] ✅ All prices already updated today, skipping fetch")
-                except Exception as e:
-                    print(f"[LOGIN] ⚠️ Price fetching failed: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    pass  # Silent failure - don't break login
-
-                # Fetch weekly historical prices on login if missing
-                if holdings:
-                    try:
-                        missing_weeks = db.get_missing_weeks_for_user(user['id'])
-                        if missing_weeks:
-                            st.caption("📅 Fetching weekly historical prices in background...")
-                            remaining = db.fetch_and_store_missing_weekly_prices(user['id'], missing_weeks)
-                            fetched_count = len(missing_weeks) - len(remaining)
-                            if fetched_count > 0:
-                                st.caption(f"✅ Cached {fetched_count} weekly price records")
-                    except Exception as exc:
-                        print(f"[LOGIN] ⚠️ Weekly price fetch failed: {exc}")
-                        pass
+                st.session_state.needs_initial_refresh = True
+                st.session_state.missing_weeks_fetched = False
+                st.session_state.last_fetch_time = None
                 
                 # Detect corporate actions (splits/bonus) on login
                 try:
@@ -3614,110 +3650,29 @@ def main_dashboard():
     user = st.session_state.user
     
     st.title(f"💰 Welcome, {user['full_name']}")
+
+    if st.session_state.get('needs_initial_refresh', False) and not st.session_state.get('_auto_refresh_running', False):
+        st.session_state['_auto_refresh_running'] = True
+        try:
+            run_portfolio_refresh(user['id'], auto=True)
+        finally:
+            st.session_state['_auto_refresh_running'] = False
     
     # Sidebar
     st.sidebar.title("📊 Navigation")
     
-    # Auto-fetch missing weeks on login (as per your image)
-    # Only fetch once per session to avoid duplicate fetching
-    if 'missing_weeks_fetched' not in st.session_state:
-        # Show loading animation during initial setup
-        with st.spinner("🔄 Initializing your portfolio..."):
-            # Create a nice loading container
-            loading_container = st.container()
-            with loading_container:
-                st.markdown("""
-                <div style="text-align: center; padding: 20px; background: linear-gradient(90deg, #f0f2f6, #e1e5e9); border-radius: 10px; margin: 10px 0;">
-                    <div style="font-size: 18px; color: #1f2937; margin-bottom: 10px;">
-                        🚀 Setting up your wealth management dashboard...
-                    </div>
-                    <div style="font-size: 14px; color: #6b7280;">
-                        • Analyzing holdings and transactions<br>
-                        • Fetching latest market prices<br>
-                        • Calculating portfolio performance<br>
-                        • Preparing insights and analytics
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Add a progress bar
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                # Update bond prices silently (AI-powered)
-                try:
-                    update_bond_prices_with_ai(user['id'], db)
-                except:
-                    pass  # Silent failure
-                
-                # Simulate progress steps
-                steps = [
-                    "🔍 Analyzing user holdings and transaction weeks...",
-                    "💰 Updating bond prices via AI...",
-                    "📊 Processing portfolio data...",
-                    "💰 Fetching latest market prices...",
-                    "📈 Calculating performance metrics...",
-                    "🎯 Preparing personalized insights...",
-                    "✅ Dashboard ready!"
-                ]
-                
-                for i, step in enumerate(steps):
-                    progress_bar.progress((i + 1) / len(steps))
-                    status_text.text(step)
-                    time.sleep(0.3)  # Small delay for visual effect
-                
-        # Auto-fetch comprehensive data for all holdings (only if needed - not on every login)
-            holdings = db.get_user_holdings(user['id'])
-            if holdings:
-                try:
-                    # Check which holdings need price updates (not updated today)
-                    holdings_needing_update = should_update_prices_today(holdings, db)
-                    
-                    if holdings_needing_update and bulk_ai_fetcher.available:
-                        # Get unique tickers that need updating
-                        unique_tickers = list(set([h['ticker'] for h in holdings_needing_update if h.get('ticker')]))
-                        
-                        if unique_tickers:
-                            # Use bulk comprehensive fetching for holdings that need update
-                            asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings_needing_update if h.get('ticker')}
-                            stock_ids = db.bulk_process_new_stocks_with_comprehensive_data(
-                                tickers=unique_tickers,
-                                asset_types=asset_types
-                            )
-                            # All data (stock info, current prices, weekly prices) fetched in bulk!
-                    elif holdings_needing_update:
-                        # Fallback to individual price updates
-                        st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
-                    # else: All prices are current, skip fetching
-                    
-                except Exception as e:
-                    # Silent fallback
-                    try:
-                        holdings_needing_update = should_update_prices_today(holdings, db)
-                        if holdings_needing_update:
-                            st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
-                    except:
-                        pass
-            
-                result = {'success': True, 'fetched': len(holdings_needing_update) if holdings_needing_update else 0}
-            else:
-                result = {'success': True, 'fetched': 0}
-        
-        # Mark as fetched to prevent re-fetching on page navigation
-        st.session_state.missing_weeks_fetched = True
-        st.session_state.last_fetch_time = datetime.now()
-        st.rerun()
-            
+    if st.session_state.needs_initial_refresh:
+        st.info("🔄 Portfolio data has not been refreshed this session. Use **Refresh All Prices** in the sidebar (or the button below) to load live prices and weekly history.")
+        if st.button("🚀 Refresh portfolio data now"):
+            run_portfolio_refresh(user['id'])
+    elif st.session_state.last_fetch_time:
+        time_since_fetch = (datetime.now() - st.session_state.last_fetch_time).total_seconds() / 60
+        st.sidebar.caption(f"✅ Prices checked {int(time_since_fetch)} min ago")
     else:
-        # Already fetched this session
-        if 'last_fetch_time' in st.session_state:
-            time_since_fetch = (datetime.now() - st.session_state.last_fetch_time).total_seconds() / 60
-            st.sidebar.caption(f"✅ Prices checked {int(time_since_fetch)} min ago")
-            
-            # Add refresh button (will re-fetch both historical and current prices)
-            if st.sidebar.button("🔄 Refresh All Prices"):
-                st.session_state.missing_weeks_fetched = False
-                st.rerun()
+        st.sidebar.caption("📊 No refresh history for this session.")
+
+    if st.sidebar.button("🔄 Refresh All Prices"):
+        run_portfolio_refresh(user['id'])
     
     # Navigation
     navigation_options = [

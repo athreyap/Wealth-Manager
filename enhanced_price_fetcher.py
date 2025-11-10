@@ -26,6 +26,7 @@ class EnhancedPriceFetcher:
         self.price_cache = {}
         self.cache_timeout = 300  # 5 minutes
         self._amfi_cache: Optional[Dict[str, Any]] = None
+        self._cached_scheme_maps: Optional[Tuple[Dict[str, str], Dict[str, str]]] = None
         self._stock_alias_cache: Dict[str, List[str]] = {}
         self._manual_alias_map: Dict[str, List[str]] = {
             # Seed known corporate action aliases; will grow automatically via metadata lookup.
@@ -37,6 +38,10 @@ class EnhancedPriceFetcher:
             "500285": ["SPICEJET.BO", "SPICEJET.NS"],
             "SPICEJET": ["SPICEJET.BO", "SPICEJET.NS"],
         }
+        self.http_session = self._get_http_session()
+        self._mftool = self._get_shared_mftool()
+        self.http_session = self._get_http_session()
+        self._mftool = self._get_shared_mftool()
         
         # Initialize OpenAI for AI fallback
         self.ai_available = False
@@ -337,8 +342,10 @@ class EnhancedPriceFetcher:
 
         suggestions: List[str] = []
 
+        session = self.http_session or self._get_http_session()
+
         try:
-            response = requests.get(url, headers=headers, timeout=8)
+            response = session.get(url, headers=headers, timeout=8)
             if response.status_code != 200:
                 return []
 
@@ -466,7 +473,7 @@ class EnhancedPriceFetcher:
         symbol_variants = self._expand_symbol_variants(base_candidates or [str(ticker or "").strip().upper()])
 
         self._last_resolved_ticker = base_candidates[0] if base_candidates else ticker
-
+        
         # Method 1: Try NSE
         # Trying yfinance NSE (silent)
         try:
@@ -474,18 +481,18 @@ class EnhancedPriceFetcher:
                 if not formatted.endswith('.NS'):
                     continue
                 stock = yf.Ticker(formatted)
-                hist = stock.history(period='1d')
-
-                if not hist.empty:
-                    price = float(hist['Close'].iloc[-1])
-                    if price > 0:
-                        # Found on NSE (silent)
-                        self._last_resolved_ticker = formatted
-                        return price, 'yfinance_nse'
+            hist = stock.history(period='1d')
+            
+            if not hist.empty:
+                price = float(hist['Close'].iloc[-1])
+                if price > 0:
+                    # Found on NSE (silent)
+                    self._last_resolved_ticker = formatted
+                    return price, 'yfinance_nse'
         except Exception:
             pass
-        # NSE failed (silent)
-
+            # NSE failed (silent)
+        
         # Method 2: Try BSE
         # Trying yfinance BSE (silent)
         try:
@@ -493,14 +500,14 @@ class EnhancedPriceFetcher:
                 if not formatted.endswith('.BO'):
                     continue
                 stock = yf.Ticker(formatted)
-                hist = stock.history(period='1d')
-
-                if not hist.empty:
-                    price = float(hist['Close'].iloc[-1])
-                    if price > 0:
-                        # Found on BSE
-                        self._last_resolved_ticker = formatted
-                        return price, 'yfinance_bse'
+            hist = stock.history(period='1d')
+            
+            if not hist.empty:
+                price = float(hist['Close'].iloc[-1])
+                if price > 0:
+                    # Found on BSE
+                    self._last_resolved_ticker = formatted
+                    return price, 'yfinance_bse'
         except Exception:
             pass
 # BSE failed
@@ -515,7 +522,7 @@ class EnhancedPriceFetcher:
             try:
                 stock = yf.Ticker(clean_ticker)
                 hist = stock.history(period='1d')
-
+                
                 if not hist.empty:
                     price = float(hist['Close'].iloc[-1])
                     if price > 0:
@@ -529,20 +536,17 @@ class EnhancedPriceFetcher:
         # Method 4: Try mftool (in case it's a mutual fund)
         ##st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")
         try:
-            from mftool import Mftool
-            mf = Mftool()
-            
-            # Try ticker as scheme code
-            primary_candidate = base_candidates[0] if base_candidates else str(ticker or '').strip()
-            clean_ticker = primary_candidate.replace('.NS', '').replace('.BO', '').replace('MF_', '')
-            quote = mf.get_scheme_quote(clean_ticker)
-            
-            if quote and 'nav' in quote:
-                price = float(quote['nav'])
-                if price > 0:
-                    #st.caption(f"      ✅ Found as MF on mftool: ₹{price:,.2f}")
-                    return price, 'mftool'
-        except Exception as e:
+            mf = self._mftool or self._get_shared_mftool()
+            if mf:
+                primary_candidate = base_candidates[0] if base_candidates else str(ticker or '').strip()
+                clean_ticker = primary_candidate.replace('.NS', '').replace('.BO', '').replace('MF_', '')
+                quote = mf.get_scheme_quote(clean_ticker)
+                
+                if quote and 'nav' in quote:
+                    price = float(quote['nav'])
+                    if price > 0:
+                        return price, 'mftool'
+        except Exception:
             pass
 # mftool failed
         
@@ -599,27 +603,20 @@ class EnhancedPriceFetcher:
                     stock_price, stock_source = self._get_stock_price_with_fallback(ticker, context_name=fund_name)
                     if stock_price:
                         return stock_price, stock_source
-
+        
         # Method 1: Try mftool
         # Trying mftool (AMFI API)
         try:
-            from mftool import Mftool
-            mf = Mftool()
-            
-            quote = mf.get_scheme_quote(scheme_code)
-            
-            if quote and 'nav' in quote:
-                price = float(quote['nav'])
-                if price > 0:
-                    # Found on mftool
-                    return price, 'mftool'
-                else:
-                    # Invalid NAV returned
-                    pass
-            else:
-                # No NAV data found for scheme
-                pass
-        except Exception as e:
+            mf = self._mftool or self._get_shared_mftool()
+            if mf:
+                quote = mf.get_scheme_quote(scheme_code)
+                
+                if quote and 'nav' in quote:
+                    price = float(quote['nav'])
+                    if price > 0:
+                        return price, 'mftool'
+            # Fall through if mf unavailable or NAV not found
+        except Exception:
             pass
 # mftool failed
 
@@ -826,9 +823,32 @@ class EnhancedPriceFetcher:
             return self._amfi_cache
 
         try:
-            response = requests.get("https://portal.amfiindia.com/spages/NAVAll.txt", timeout=60)
-            response.raise_for_status()
-            data = response.text.splitlines()
+            from web_agent import get_cached_amfi_nav_text
+        except Exception:
+            get_cached_amfi_nav_text = None  # type: ignore
+
+        raw_text: Optional[str] = None
+        if get_cached_amfi_nav_text:
+            try:
+                raw_text = get_cached_amfi_nav_text()
+            except Exception:
+                raw_text = None
+
+        if not raw_text:
+            session = self.http_session or self._get_http_session()
+            try:
+                response = session.get("https://portal.amfiindia.com/spages/NAVAll.txt", timeout=60)
+                response.raise_for_status()
+                raw_text = response.text
+            except Exception:
+                raw_text = None
+
+        if not raw_text:
+            self._amfi_cache = {}
+            return self._amfi_cache
+
+        try:
+            data = raw_text.splitlines()
             reader = csv.DictReader(data, delimiter=';')
 
             code_lookup: Dict[str, Dict[str, str]] = {}
@@ -859,6 +879,34 @@ class EnhancedPriceFetcher:
 
         return self._amfi_cache
 
+    def _get_cached_scheme_maps(self) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """Return cached mappings of AMFI code→name and normalized name→code."""
+        if self._cached_scheme_maps is not None:
+            return self._cached_scheme_maps
+
+        code_to_name: Dict[str, str] = {}
+        name_to_code: Dict[str, str] = {}
+
+        schemes: Dict[str, str] = {}
+        try:
+            from web_agent import get_cached_amfi_schemes  # Lazy import to avoid circular dependencies
+            schemes = get_cached_amfi_schemes()
+        except Exception:
+            schemes = {}
+
+        for raw_code, raw_name in (schemes or {}).items():
+            code = (raw_code or "").strip()
+            name = (raw_name or "").strip()
+            if not code or not name:
+                continue
+            code_to_name[code] = name
+            normalized = self._normalize_scheme_name(name)
+            if normalized and normalized not in name_to_code:
+                name_to_code[normalized] = code
+
+        self._cached_scheme_maps = (code_to_name, name_to_code)
+        return self._cached_scheme_maps
+
     def _resolve_amfi_code(self, ticker: str, fund_name: Optional[str]) -> Optional[str]:
         """Resolve a mutual fund identifier to an AMFI scheme code."""
         if not ticker:
@@ -870,17 +918,29 @@ class EnhancedPriceFetcher:
         if ticker and ticker.isdigit():
             return ticker
 
+        cached_codes, cached_names = self._get_cached_scheme_maps()
         dataset = self._get_amfi_dataset()
         code_lookup = dataset.get("code_lookup", {})
         name_lookup = dataset.get("name_lookup", {})
 
-        if not dataset:
+        if cached_codes:
+            if normalized_ticker in cached_codes:
+                return normalized_ticker
+            if ticker in cached_codes:
+                return ticker
+
+        if not dataset and not cached_codes:
             return None
 
         if normalized_ticker in code_lookup:
             return normalized_ticker
         if ticker in code_lookup:
             return ticker
+
+        if cached_codes:
+            normalized_name = self._normalize_scheme_name(fund_name or ticker)
+            if normalized_name and normalized_name in cached_names:
+                return cached_names[normalized_name]
 
         search_name = fund_name or ticker
         normalized = self._normalize_scheme_name(search_name)
@@ -927,6 +987,69 @@ class EnhancedPriceFetcher:
             return None
         except:
             return None
+
+    def _get_http_session(self) -> requests.Session:
+        """Get or create a shared HTTP session with default headers."""
+        session = getattr(self, "_shared_requests_session", None)
+        if session:
+            return session
+
+        cached_session = None
+        try:
+            cached_session = st.session_state.get("_shared_requests_session")
+        except Exception:
+            cached_session = None
+
+        if cached_session is not None:
+            self._shared_requests_session = cached_session
+            return cached_session
+
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+
+        try:
+            st.session_state["_shared_requests_session"] = session
+        except Exception:
+            pass
+
+        self._shared_requests_session = session
+        return session
+
+    def _get_shared_mftool(self):
+        """Get or create a shared Mftool instance."""
+        cached_tool = getattr(self, "_shared_mftool_instance", None)
+        if cached_tool:
+            return cached_tool
+
+        session_cached = None
+        try:
+            session_cached = st.session_state.get("_shared_mftool")
+        except Exception:
+            session_cached = None
+
+        if session_cached is not None:
+            self._shared_mftool_instance = session_cached
+            return session_cached
+
+        try:
+            from mftool import Mftool
+            tool = Mftool()
+        except Exception:
+            tool = None
+
+        if tool is not None:
+            try:
+                st.session_state["_shared_mftool"] = tool
+            except Exception:
+                pass
+            self._shared_mftool_instance = tool
+            return tool
+
+        return None
     
     def _get_mf_price_from_ai_enhanced(self, ticker: str, fund_name: str) -> Optional[float]:
         """
@@ -989,7 +1112,6 @@ class EnhancedPriceFetcher:
         """
         # Try web scraping first for real-time prices
         try:
-            import requests
             from bs4 import BeautifulSoup
             
             # Try multiple sources
@@ -1009,7 +1131,8 @@ class EnhancedPriceFetcher:
                     headers = {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                     }
-                    response = requests.get(source['url'], headers=headers, timeout=10)
+                    session = self.http_session or self._get_http_session()
+                    response = session.get(source['url'], headers=headers, timeout=10)
                     
                     if response.status_code == 200:
                         soup = BeautifulSoup(response.text, 'html.parser')
@@ -1530,7 +1653,7 @@ If not found, return: NOT_FOUND"""
                         stock = yf.Ticker(variant)
 
                         hist = stock.history(start=start_date, end=end_date)
-
+                        
                         if not hist.empty:
                             prices = []
                             for date, row in hist.iterrows():
@@ -1545,35 +1668,35 @@ If not found, return: NOT_FOUND"""
                         else:
                             from datetime import datetime, timedelta
                             import pytz
-
+                            
                             start_dt = datetime.strptime(start_date, '%Y-%m-%d')
                             end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-
+                            
                             start_dt = pytz.UTC.localize(start_dt)
                             end_dt = pytz.UTC.localize(end_dt)
-
+                            
                             expanded_start = (start_dt - timedelta(days=7)).strftime('%Y-%m-%d')
                             expanded_end = (end_dt + timedelta(days=7)).strftime('%Y-%m-%d')
-
+                            
                             hist_expanded = stock.history(start=expanded_start, end=expanded_end)
-
+                            
                             if not hist_expanded.empty:
                                 target_dt = start_dt
                                 closest_date = None
                                 min_diff = float('inf')
-
+                                
                                 for date, row in hist_expanded.iterrows():
                                     if date.tzinfo is None:
                                         date = pytz.UTC.localize(date)
-
+                                    
                                     date_diff = abs((date - target_dt).days)
                                     if date_diff < min_diff:
                                         min_diff = date_diff
                                         closest_date = date
-
+                                
                                 if closest_date:
                                     closest_price = float(hist_expanded.loc[closest_date, 'Close'])
-
+                                    
                                     return [{
                                         'asset_symbol': ticker,
                                         'asset_type': 'stock',
@@ -1585,32 +1708,31 @@ If not found, return: NOT_FOUND"""
                         continue
 
                 try:
-                    from mftool import Mftool
-                    mf = Mftool()
-
-                    primary_candidate = base_candidates[0] if base_candidates else str(ticker or '').strip()
-                    clean_ticker = primary_candidate.replace('.NS', '').replace('.BO', '').replace('MF_', '')
-                    hist_data = mf.get_scheme_historical_nav(clean_ticker, as_Dataframe=True)
-
-                    if hist_data is not None and not hist_data.empty:
-                        hist_data['date'] = pd.to_datetime(hist_data.index, format='%d-%m-%Y', dayfirst=True)
-
-                        start_dt = pd.to_datetime(start_date)
-                        end_dt = pd.to_datetime(end_date)
-
-                        filtered = hist_data[(hist_data['date'] >= start_dt) & (hist_data['date'] <= end_dt)]
-
-                        if not filtered.empty:
-                            prices = []
-                            for idx, row in filtered.iterrows():
-                                prices.append({
-                                    'asset_symbol': ticker,
-                                    'asset_type': 'mutual_fund',
-                                    'price': float(row['nav']),
-                                    'price_date': row['date'].strftime('%Y-%m-%d'),
-                                    'volume': None
-                                })
-                            return prices
+                    mf = self._mftool or self._get_shared_mftool()
+                    if mf:
+                        primary_candidate = base_candidates[0] if base_candidates else str(ticker or '').strip()
+                        clean_ticker = primary_candidate.replace('.NS', '').replace('.BO', '').replace('MF_', '')
+                        hist_data = mf.get_scheme_historical_nav(clean_ticker, as_Dataframe=True)
+                        
+                        if hist_data is not None and not hist_data.empty:
+                            hist_data['date'] = pd.to_datetime(hist_data.index, format='%d-%m-%Y', dayfirst=True)
+                            
+                            start_dt = pd.to_datetime(start_date)
+                            end_dt = pd.to_datetime(end_date)
+                            
+                            filtered = hist_data[(hist_data['date'] >= start_dt) & (hist_data['date'] <= end_dt)]
+                            
+                            if not filtered.empty:
+                                prices = []
+                                for idx, row in filtered.iterrows():
+                                    prices.append({
+                                        'asset_symbol': ticker,
+                                        'asset_type': 'mutual_fund',
+                                        'price': float(row['nav']),
+                                        'price_date': row['date'].strftime('%Y-%m-%d'),
+                                        'volume': None
+                                    })
+                                return prices
                 except Exception:
                     pass
             
@@ -1618,42 +1740,32 @@ If not found, return: NOT_FOUND"""
                 # Try mftool
                 # Trying mftool (AMFI API)
                 try:
-                    from mftool import Mftool
-                    mf = Mftool()
-                    
-                    normalized_code = self._resolve_amfi_code(ticker, fund_name) or ticker
-                    scheme_code = normalized_code.replace('MF_', '') if normalized_code.startswith('MF_') else normalized_code
-                    hist_data = mf.get_scheme_historical_nav(scheme_code, as_Dataframe=True)
-                    
-                    if hist_data is not None and not hist_data.empty:
-                        hist_data['date'] = pd.to_datetime(hist_data.index, format='%d-%m-%Y', dayfirst=True)
+                    mf = self._mftool or self._get_shared_mftool()
+                    if mf:
+                        normalized_code = self._resolve_amfi_code(ticker, fund_name) or ticker
+                        scheme_code = normalized_code.replace('MF_', '') if normalized_code.startswith('MF_') else normalized_code
+                        hist_data = mf.get_scheme_historical_nav(scheme_code, as_Dataframe=True)
                         
-                        # Filter by date range
-                        start_dt = pd.to_datetime(start_date)
-                        end_dt = pd.to_datetime(end_date)
-                        
-                        filtered = hist_data[(hist_data['date'] >= start_dt) & (hist_data['date'] <= end_dt)]
-                        
-                        if not filtered.empty:
-                            prices = []
-                            for idx, row in filtered.iterrows():
-                                prices.append({
-                                    'asset_symbol': ticker,
-                                    'asset_type': 'mutual_fund',
-                                    'price': float(row['nav']),
-                                    'price_date': row['date'].strftime('%Y-%m-%d'),
-                                    'volume': None
-                                })
-                            pass
-##st.caption(f"      ✅ Found {len(prices)} historical NAVs")
-                            return prices
-                        else:
-                            pass
-##st.caption(f"      ❌ mftool: No data in date range")
-                    else:
-                        pass
-##st.caption(f"      ❌ mftool: No historical data")
-                except Exception as e:
+                        if hist_data is not None and not hist_data.empty:
+                            hist_data['date'] = pd.to_datetime(hist_data.index, format='%d-%m-%Y', dayfirst=True)
+                            
+                            start_dt = pd.to_datetime(start_date)
+                            end_dt = pd.to_datetime(end_date)
+                            
+                            filtered = hist_data[(hist_data['date'] >= start_dt) & (hist_data['date'] <= end_dt)]
+                            
+                            if not filtered.empty:
+                                prices = []
+                                for idx, row in filtered.iterrows():
+                                    prices.append({
+                                        'asset_symbol': ticker,
+                                        'asset_type': 'mutual_fund',
+                                        'price': float(row['nav']),
+                                        'price_date': row['date'].strftime('%Y-%m-%d'),
+                                        'volume': None
+                                    })
+                                return prices
+                except Exception:
                     pass
 # mftool failed
             
