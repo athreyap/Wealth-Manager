@@ -1202,41 +1202,80 @@ def _tx_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col_lower in all_canonical_names:
             used_targets.add(col_lower)
 
+    # Process columns in two passes:
+    # 1. First pass: Exact matches (prioritize these)
+    # 2. Second pass: Partial matches
+    
+    exact_matches = {}
+    partial_matches = {}
+    
     for col in df.columns:
         col_name = _tx_safe_str(col).lower()
         target = None
+        is_exact = False
 
-        # If column already has canonical name, keep it
+        # If column already has canonical name, keep it (exact match)
         if col_name in all_canonical_names:
             target = col_name
+            is_exact = True
         else:
             # Apply hard mappings first
             for hard_target, aliases in HARD_MAP.items():
                 if col_name in aliases:
                     target = hard_target
+                    is_exact = (col_name == hard_target.lower())
                     break
 
             if target is None:
                 for canonical, aliases in _TX_COLUMN_ALIASES.items():
                     for alias in aliases:
                         alias_lower = alias.lower()
-                        if col_name == alias_lower or alias_lower in col_name:
+                        # Exact match (preferred)
+                        if col_name == alias_lower:
                             target = canonical
+                            is_exact = True
                             break
+                        # Partial match (only if no exact match found)
+                        elif alias_lower in col_name and target is None:
+                            target = canonical
+                            is_exact = False
                     if target:
                         break
 
-        if target and target not in used_targets:
+        if target:
+            if is_exact:
+                exact_matches[col] = target
+            else:
+                partial_matches[col] = target
+        else:
+            rename_map[col] = col
+    
+    # Process exact matches first (they take priority)
+    for col, target in exact_matches.items():
+        if target not in used_targets:
             rename_map[col] = target
             used_targets.add(target)
             if col != target:
                 mapping_entries.append({
                     'source': col,
                     'target': target,
-                    'reason': 'alias_match' if target not in HARD_MAP else 'hard_map',
+                    'reason': 'exact_match',
                 })
         else:
-            # If target is already used, keep original column name to avoid duplicates
+            rename_map[col] = col
+    
+    # Then process partial matches (only if target not already used)
+    for col, target in partial_matches.items():
+        if target not in used_targets:
+            rename_map[col] = target
+            used_targets.add(target)
+            mapping_entries.append({
+                'source': col,
+                'target': target,
+                'reason': 'partial_match',
+            })
+        else:
+            # If target already used by exact match, keep original name
             rename_map[col] = col
 
     df = df.rename(columns=rename_map)
