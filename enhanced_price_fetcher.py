@@ -343,9 +343,11 @@ class EnhancedPriceFetcher:
     def _extract_names_from_metadata(self, ticker: str) -> List[str]:
         """Pull potential successor names via yfinance metadata for delisted symbols."""
         names: List[str] = []
-        variants = {ticker.upper()}
-        variants.add(f"{ticker.upper()}.NS")
-        variants.add(f"{ticker.upper()}.BO")
+        # Normalize ticker first to remove $ and other invalid characters
+        normalized = self._normalize_base_ticker(ticker)
+        variants = {normalized}
+        variants.add(f"{normalized}.NS")
+        variants.add(f"{normalized}.BO")
 
         for symbol in variants:
             try:
@@ -534,11 +536,13 @@ class EnhancedPriceFetcher:
             for formatted in symbol_variants:
                 if not formatted.endswith('.NS'):
                     continue
-                hist = yf.Ticker(formatted).history(period='1d')
+                # Safety: ensure ticker is normalized (should already be, but double-check)
+                clean_formatted = self._normalize_base_ticker(formatted.replace('.NS', '')) + '.NS'
+                hist = yf.Ticker(clean_formatted).history(period='1d')
                 if not hist.empty:
                     price = float(hist['Close'].iloc[-1])
                     if price > 0:
-                        self._last_resolved_ticker = formatted
+                        self._last_resolved_ticker = clean_formatted
                         return price, 'yfinance_nse'
         except Exception:
             pass
@@ -550,11 +554,13 @@ class EnhancedPriceFetcher:
             for formatted in symbol_variants:
                 if not formatted.endswith('.BO'):
                     continue
-                hist = yf.Ticker(formatted).history(period='1d')
+                # Safety: ensure ticker is normalized (should already be, but double-check)
+                clean_formatted = self._normalize_base_ticker(formatted.replace('.BO', '')) + '.BO'
+                hist = yf.Ticker(clean_formatted).history(period='1d')
                 if not hist.empty:
                     price = float(hist['Close'].iloc[-1])
                     if price > 0:
-                        self._last_resolved_ticker = formatted
+                        self._last_resolved_ticker = clean_formatted
                         return price, 'yfinance_bse'
         except Exception:
             pass
@@ -567,6 +573,8 @@ class EnhancedPriceFetcher:
                 clean_ticker = formatted.replace('.NS', '').replace('.BO', '')
             else:
                 clean_ticker = formatted
+            # Safety: normalize ticker to remove $ and other invalid characters
+            clean_ticker = self._normalize_base_ticker(clean_ticker)
             try:
                 stock = yf.Ticker(clean_ticker)
                 hist = stock.history(period='1d')

@@ -1461,10 +1461,11 @@ def _tx_dataframe_to_transactions(
         })
 
     for _, row in prepared_df.iterrows():
-        raw_date = row.get('date') or row.get('transaction date')
+        raw_date = row.get('date') or row.get('transaction_date') or row.get('transaction date')
         raw_quantity = row.get('quantity')
         raw_amount = row.get('amount')
-        if pd.isna(raw_date) or (_tx_safe_str(raw_date) == '' and _tx_safe_str(row.get('transaction_date')) == ''):
+        date_str = _tx_safe_str(raw_date)
+        if pd.isna(raw_date) or (date_str == '' and _tx_safe_str(row.get('transaction_date')) == ''):
             continue
 
         quantity_value = _tx_safe_float(raw_quantity)
@@ -1548,8 +1549,18 @@ def extract_transactions_python(uploaded_file, filename: str) -> Tuple[List[Dict
     try:
         if suffix in {'.csv', '.tsv'}:
             uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, sep='\t' if suffix == '.tsv' else ',')
+            try:
+                df = pd.read_csv(uploaded_file, sep='\t' if suffix == '.tsv' else ',', encoding='utf-8')
+            except UnicodeDecodeError:
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, sep='\t' if suffix == '.tsv' else ',', encoding='latin-1')
+            if df.empty:
+                print(f"[FILE_PARSE] CSV {filename} is empty after reading")
+            else:
+                print(f"[FILE_PARSE] CSV {filename} has {len(df)} rows, columns: {list(df.columns)}")
             transactions = _tx_dataframe_to_transactions(df, filename, debug_log=debug_log)
+            if not transactions:
+                print(f"[FILE_PARSE] No transactions extracted from {filename} after processing {len(df)} rows")
         elif suffix in {'.xlsx', '.xls'}:
             uploaded_file.seek(0)
             workbook = pd.read_excel(uploaded_file, sheet_name=None)
@@ -4169,25 +4180,18 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
         method_used = 'python'
 
         try:
-            method_used = 'ai'
             transactions = []
             python_debug_log: List[Dict[str, Any]] = []
-
-            try:
-                uploaded_file.seek(0)
-            except Exception:
-                pass
-
-            ai_transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
-            transactions = ai_transactions
-
-            if not transactions:
+            
+            # Try Python parser first for CSV/Excel (more reliable for structured data)
+            file_ext = Path(file_name).suffix.lower()
+            if file_ext in {'.csv', '.tsv', '.xlsx', '.xls'}:
                 method_used = 'python'
                 try:
                     uploaded_file.seek(0)
                 except Exception:
                     pass
-
+                
                 extraction_result = extract_transactions_python(uploaded_file, file_name)
                 if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
                     python_transactions, python_debug_log = extraction_result
@@ -4195,6 +4199,17 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     python_transactions = extraction_result or []
                     python_debug_log = []
                 transactions = python_transactions
+            
+            # Fallback to AI only if Python found nothing (or for PDFs)
+            if not transactions:
+                method_used = 'ai'
+                try:
+                    uploaded_file.seek(0)
+                except Exception:
+                    pass
+                
+                ai_transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
+                transactions = ai_transactions
 
             if not transactions:
                 st.error(f"   ❌ Could not extract transactions from {file_name}.")
