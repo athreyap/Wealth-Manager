@@ -99,6 +99,17 @@ class EnhancedPriceFetcher:
             - price: float or None
             - source: str indicating data source
         """
+        # Safety check: If ticker is numeric (AMFI code), it's ALWAYS a mutual fund
+        # even if asset_type was incorrectly set to 'bond' (e.g., bond mutual funds)
+        try:
+            cleaned = str(ticker).replace(',', '').replace('$', '').strip()
+            numeric_value = float(cleaned)
+            # If it's numeric, override asset_type to mutual_fund
+            if asset_type == 'bond':
+                asset_type = 'mutual_fund'
+        except (ValueError, AttributeError):
+            pass
+        
         # Check cache first
         cache_key = f"{ticker}_{asset_type}_current"
         if cache_key in self.price_cache:
@@ -202,8 +213,8 @@ class EnhancedPriceFetcher:
                     
                 elif asset_type == 'mutual_fund':
                     mf_count += 1
-                    # Get fund name for enhanced AI fallback
-                    fund_name = holding.get('stock_name', '')
+                    # Get fund name for ticker resolution - prefer scheme_name for better AMFI code lookup
+                    fund_name = holding.get('scheme_name') or holding.get('stock_name', '')
                     current_price, source = self._get_mf_price_with_fallback(ticker, fund_name)
                     resolved_ticker = getattr(self, "_last_resolved_ticker", ticker)
                     if current_price:

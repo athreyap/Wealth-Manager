@@ -989,6 +989,21 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
     name = stock_name.lower()
     ticker_upper = ticker.upper()
 
+    # Check if ticker is numeric (including decimals like "10.65" - AMFI codes)
+    is_numeric_amfi = False
+    try:
+        # Remove any non-numeric characters except decimal point
+        cleaned = ticker_upper.replace(',', '').replace('$', '').strip()
+        numeric_value = float(cleaned)
+        is_numeric_amfi = True
+    except (ValueError, AttributeError):
+        pass
+
+    # IMPORTANT: If ticker is numeric (AMFI code), it's ALWAYS a mutual fund
+    # regardless of scheme name (even if name contains "bond")
+    if is_numeric_amfi:
+        return 'mutual_fund'
+
     if ticker_upper.isdigit():
         if len(ticker_upper) >= 5:
             return 'mutual_fund'
@@ -1012,14 +1027,31 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
         return 'pms'
     if ticker_upper.startswith('AIF') or 'aif' in name or 'alternative investment' in name:
         return 'aif'
-    if ticker_upper.startswith('SGB') or 'bond' in name or 'debenture' in name or 'sgb' in name:
-        return 'bond'
+    
+    # Check for mutual fund keywords FIRST (even if "bond" is in name - bond funds are still MFs)
+    mf_keywords = ['fund', 'scheme', 'growth', 'nav', 'mutual', 'mf', 'plan']
+    has_mf_keyword = any(keyword in name for keyword in mf_keywords)
+    
+    if has_mf_keyword:
+        return 'mutual_fund'
+    
     if ticker_upper.isdigit() and len(ticker_upper) >= 5:
         return 'mutual_fund'
+    
+    # Only check for bonds if NOT a mutual fund and NOT numeric
+    # SGB (Sovereign Gold Bonds) are actual bonds, not mutual funds
+    if ticker_upper.startswith('SGB') or 'sgb' in name:
+        return 'bond'
+    # Debentures are bonds
+    if 'debenture' in name and not has_mf_keyword:
+        return 'bond'
+    # Other "bond" mentions might be bond mutual funds, so only classify as bond if no MF keywords
+    if 'bond' in name and not has_mf_keyword and not is_numeric_amfi:
+        return 'bond'
+    
     if '.NS' in ticker_upper or '.BO' in ticker_upper:
         return 'stock'
-    if 'fund' in name or 'scheme' in name or 'growth' in name:
-        return 'mutual_fund'
+    
     return 'stock'
 
 
@@ -1162,25 +1194,37 @@ def _tx_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         'stock_name': {'scrip name', 'scrip-name', 'scrip_name'},
     }
 
+    # First, mark columns that already have canonical names as used
+    all_canonical_names = set(_TX_COLUMN_ALIASES.keys())
+    all_canonical_names.update(HARD_MAP.keys())
+    for col in df.columns:
+        col_lower = _tx_safe_str(col).lower()
+        if col_lower in all_canonical_names:
+            used_targets.add(col_lower)
+
     for col in df.columns:
         col_name = _tx_safe_str(col).lower()
         target = None
 
-        # Apply hard mappings first
-        for hard_target, aliases in HARD_MAP.items():
-            if col_name in aliases:
-                target = hard_target
-                break
-
-        if target is None:
-            for canonical, aliases in _TX_COLUMN_ALIASES.items():
-                for alias in aliases:
-                    alias_lower = alias.lower()
-                    if col_name == alias_lower or alias_lower in col_name:
-                        target = canonical
-                        break
-                if target:
+        # If column already has canonical name, keep it
+        if col_name in all_canonical_names:
+            target = col_name
+        else:
+            # Apply hard mappings first
+            for hard_target, aliases in HARD_MAP.items():
+                if col_name in aliases:
+                    target = hard_target
                     break
+
+            if target is None:
+                for canonical, aliases in _TX_COLUMN_ALIASES.items():
+                    for alias in aliases:
+                        alias_lower = alias.lower()
+                        if col_name == alias_lower or alias_lower in col_name:
+                            target = canonical
+                            break
+                    if target:
+                        break
 
         if target and target not in used_targets:
             rename_map[col] = target
@@ -1192,6 +1236,7 @@ def _tx_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
                     'reason': 'alias_match' if target not in HARD_MAP else 'hard_map',
                 })
         else:
+            # If target is already used, keep original column name to avoid duplicates
             rename_map[col] = col
 
     df = df.rename(columns=rename_map)
@@ -1394,39 +1439,50 @@ def _tx_prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Detect header row
+    # Check if current columns already match known aliases - if so, don't replace them
+    current_cols_lower = [col.lower() for col in df.columns]
     alias_tokens = set()
-    for aliases in _TX_COLUMN_ALIASES.values():
-        alias_tokens.update(alias.lower() for alias in aliases)
+    canonical_names = set()
+    for canonical, aliases in _TX_COLUMN_ALIASES.items():
+        canonical_names.add(canonical.lower())
+        for alias in aliases:
+            alias_tokens.add(alias.lower())
+    
+    # Count how many current columns match known aliases
+    matching_cols = sum(1 for col in current_cols_lower if col in alias_tokens or col in canonical_names)
+    has_good_headers = matching_cols >= 3  # If 3+ columns match, assume headers are correct
+    
+    # Only detect header row if current headers don't look correct
+    if not has_good_headers:
+        def score_row(row: pd.Series) -> float:
+            score = 0.0
+            for value in row.values:
+                text = _tx_safe_str(value).lower()
+                if not text:
+                    continue
+                if text in alias_tokens:
+                    score += 3.0
+                elif any(token in text for token in alias_tokens):
+                    score += 1.5
+                elif len(text) <= 25:
+                    score += 0.5
+            return score
 
-    def score_row(row: pd.Series) -> float:
-        score = 0.0
-        for value in row.values:
-            text = _tx_safe_str(value).lower()
-            if not text:
-                continue
-            if text in alias_tokens:
-                score += 3.0
-            elif any(token in text for token in alias_tokens):
-                score += 1.5
-            elif len(text) <= 25:
-                score += 0.5
-        return score
+        header_candidates = df.head(8)
+        best_idx = None
+        best_score = 0.0
+        for idx, row in header_candidates.iterrows():
+            score = score_row(row)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
 
-    header_candidates = df.head(8)
-    best_idx = None
-    best_score = 0.0
-    for idx, row in header_candidates.iterrows():
-        score = score_row(row)
-        if score > best_score:
-            best_score = score
-            best_idx = idx
-
-    if best_idx is not None:
-        header_row = df.loc[best_idx]
-        new_columns = [ _tx_safe_str(val) for val in header_row.values ]
-        df = df.loc[best_idx + 1 :].reset_index(drop=True)
-        df.columns = new_columns
+        # Only replace headers if the found row scores significantly higher than current columns
+        if best_idx is not None and best_score > matching_cols * 2.0:
+            header_row = df.loc[best_idx]
+            new_columns = [ _tx_safe_str(val) for val in header_row.values ]
+            df = df.loc[best_idx + 1 :].reset_index(drop=True)
+            df.columns = new_columns
 
     return df
 
@@ -1443,13 +1499,22 @@ def _tx_dataframe_to_transactions(
     if df is None or df.empty:
         return transactions
 
+    # Debug: Check original DataFrame
+    print(f"[FILE_PARSE] Original DataFrame columns: {list(df.columns)}")
+    print(f"[FILE_PARSE] Original DataFrame shape: {df.shape}")
+    
     prepared_df = _tx_prepare_dataframe(df)
+    print(f"[FILE_PARSE] After _tx_prepare_dataframe columns: {list(prepared_df.columns)}")
+    
     prepared_df = prepared_df.dropna(how='all')
     if prepared_df.empty:
         return transactions
 
     prepared_df = _tx_standardize_columns(prepared_df)
+    print(f"[FILE_PARSE] After _tx_standardize_columns columns: {list(prepared_df.columns)}")
+    
     prepared_df = _tx_auto_map_missing_columns(prepared_df)
+    print(f"[FILE_PARSE] After _tx_auto_map_missing_columns columns: {list(prepared_df.columns)}")
 
     if debug_log is not None:
         debug_log.append({
@@ -1460,17 +1525,116 @@ def _tx_dataframe_to_transactions(
             'mapping': prepared_df.attrs.get('__tx_column_mapping', []),
         })
 
-    for _, row in prepared_df.iterrows():
-        raw_date = row.get('date') or row.get('transaction_date') or row.get('transaction date')
-        raw_quantity = row.get('quantity')
-        raw_amount = row.get('amount')
-        date_str = _tx_safe_str(raw_date)
-        if pd.isna(raw_date) or (date_str == '' and _tx_safe_str(row.get('transaction_date')) == ''):
+    rows_processed = 0
+    rows_skipped_date = 0
+    rows_skipped_ticker = 0
+    rows_added = 0
+
+    # Debug: Print actual column names
+    if rows_processed == 0:
+        print(f"[FILE_PARSE] DataFrame columns: {list(prepared_df.columns)}")
+        print(f"[FILE_PARSE] DataFrame shape: {prepared_df.shape}")
+        if not prepared_df.empty:
+            print(f"[FILE_PARSE] First row sample: {prepared_df.iloc[0].to_dict()}")
+
+    for idx, row in prepared_df.iterrows():
+        rows_processed += 1
+        
+        # Get date - try multiple column name variations
+        # Accept ANY date format - normalization will handle parsing later
+        raw_date = None
+        date_cols = ['date', 'transaction_date', 'transaction date', 'Date', 'DATE', 'Transaction Date']
+        
+        # First try exact column name match using prepared_df.columns (not row.index)
+        for col in date_cols:
+            if col in prepared_df.columns:
+                try:
+                    val = row[col]
+                    # Check if value exists and is not NaN/None/empty
+                    if val is not None and not pd.isna(val):
+                        val_str = str(val).strip()
+                        if val_str and val_str.lower() not in ['nan', 'none', 'null', 'n/a', '']:
+                            raw_date = val
+                            break
+                except (KeyError, IndexError):
+                    continue
+        
+        # If not found, try case-insensitive search on actual DataFrame columns
+        if raw_date is None:
+            for col in prepared_df.columns:
+                if isinstance(col, str) and col.lower() in [d.lower() for d in date_cols]:
+                    try:
+                        val = row[col]
+                        if val is not None and not pd.isna(val):
+                            val_str = str(val).strip()
+                            if val_str and val_str.lower() not in ['nan', 'none', 'null', 'n/a', '']:
+                                raw_date = val
+                                break
+                    except (KeyError, IndexError):
+                        continue
+        
+        # Check if date is missing - be lenient, just check if there's any value
+        if raw_date is None:
+            rows_skipped_date += 1
+            if rows_skipped_date <= 3:  # Log first 3 skipped rows for debugging
+                print(f"[FILE_PARSE] Row {idx} skipped - no date found")
+                print(f"[FILE_PARSE]   Looking for columns: {date_cols}")
+                print(f"[FILE_PARSE]   Available columns: {list(prepared_df.columns)}")
+                print(f"[FILE_PARSE]   Row data: {dict(row)}")
             continue
+        
+        # Convert to string for processing (normalization happens later)
+        date_str = str(raw_date).strip()
+        
+        raw_quantity = row.get('quantity') if 'quantity' in prepared_df.columns else None
+        raw_amount = row.get('amount') if 'amount' in prepared_df.columns else None
 
         quantity_value = _tx_safe_float(raw_quantity)
         amount_value = _tx_safe_float(raw_amount)
         price_value = _tx_safe_float(row.get('price'))
+
+        # Only check for swapped values if column names are ambiguous or missing
+        # If file has proper column names ('quantity' and 'amount'), trust them!
+        has_proper_columns = ('quantity' in prepared_df.columns and 'amount' in prepared_df.columns)
+        
+        should_swap = False
+        
+        # Only do swap detection if column names are NOT clear
+        # If we have proper column names, trust the file values
+        if not has_proper_columns:
+            # Smart detection: Check if quantity and amount are swapped
+            # Only swap when it's VERY CLEAR they're wrong - be conservative!
+            if price_value > 0 and quantity_value > 0 and amount_value > 0:
+                # Validate using price: quantity * price should approximately equal amount
+                expected_amount = quantity_value * price_value
+                expected_quantity_from_swapped = amount_value / price_value
+                
+                # Calculate how well each combination matches
+                current_match = abs(amount_value - expected_amount) / max(1.0, expected_amount)
+                swapped_match = abs(quantity_value - expected_quantity_from_swapped) / max(1.0, expected_quantity_from_swapped) if expected_quantity_from_swapped > 0 else 999
+                
+                # Only swap if:
+                # 1. Current values are WAY off (more than 10% difference)
+                # 2. Swapped values match MUCH better (at least 80% better match)
+                # 3. Swapped quantity is reasonable (positive and not too large)
+                if (current_match > 0.10 and  # Current values are clearly wrong
+                    swapped_match < current_match * 0.2 and  # Swapped is at least 80% better
+                    expected_quantity_from_swapped > 0 and
+                    expected_quantity_from_swapped < 1000000):  # Reasonable quantity
+                    should_swap = True
+                    print(f"[FILE_PARSE] Row {idx}: Swapping quantity/amount (price validation: current_diff={current_match:.2%}, swapped_diff={swapped_match:.2%})")
+            
+            # Fallback: Heuristic check if no price available
+            # Only swap if it's VERY obvious (quantity is huge, amount is tiny)
+            elif quantity_value > 0 and amount_value > 0:
+                # Quantities are typically small (1-10000), amounts are typically larger (100+)
+                # Only swap if quantity is VERY large (like an amount) and amount is VERY small (like quantity)
+                if quantity_value > 10000 and amount_value < 100 and quantity_value > amount_value * 100:
+                    should_swap = True
+                    print(f"[FILE_PARSE] Row {idx}: Swapping quantity/amount (heuristic: qty={quantity_value} looks like amount, amt={amount_value} looks like quantity)")
+        
+        if should_swap:
+            quantity_value, amount_value = amount_value, quantity_value
 
         transaction_type = _tx_normalize_transaction_type(
             row.get('transaction_type'),
@@ -1485,23 +1649,48 @@ def _tx_dataframe_to_transactions(
         if price_value < 0:
             price_value = abs(price_value)
 
-        stock_name = _tx_safe_str(row.get('stock_name') or row.get('scheme_name') or row.get('name'))
+        stock_name = _tx_safe_str(row.get('stock_name') or row.get('name'))
+        scheme_name = _tx_safe_str(row.get('scheme_name'))
         ticker = _tx_normalize_ticker(row.get('ticker') or row.get('symbol'))
+        
+        # For mutual funds, try to resolve ticker using scheme_name first
+        if not ticker and scheme_name:
+            # Try to resolve AMFI code from scheme name
+            # This will be done later during import, but we can set a flag here
+            ticker = _tx_normalize_ticker(scheme_name)
+        
         if not ticker:
             ticker = _tx_normalize_ticker(stock_name)
 
-        if not ticker and not stock_name:
+        if not ticker and not stock_name and not scheme_name:
+            rows_skipped_ticker += 1
             continue
 
         asset_hint = _tx_safe_str(row.get('asset_type'))
-        asset_type = _tx_infer_asset_type(ticker, stock_name, asset_hint)
+        asset_type = _tx_infer_asset_type(ticker, stock_name or scheme_name, asset_hint)
+        
+        # For mutual funds, ensure we have scheme_name for ticker resolution
+        if asset_type == 'mutual_fund' and not scheme_name:
+            scheme_name = stock_name  # Use stock_name as fallback
 
+        # Only recalculate missing values, don't override existing values from file
+        # Calculate price if missing
         if price_value == 0 and amount_value > 0 and quantity_value > 0:
             price_value = amount_value / quantity_value
+        
+        # Calculate amount if missing or significantly wrong (but only if we have quantity and price)
         if quantity_value > 0 and price_value > 0:
             computed_amount = quantity_value * price_value
-            if amount_value <= 0 or abs(amount_value - computed_amount) > 0.01 * max(1.0, computed_amount):
+            # Only override amount if it's missing or way off (more than 1% difference)
+            # This allows for rounding differences but fixes major errors
+            if amount_value <= 0:
                 amount_value = computed_amount
+            elif abs(amount_value - computed_amount) > 0.01 * max(1.0, computed_amount):
+                # Amount exists but doesn't match - only fix if difference is significant
+                amount_value = computed_amount
+        
+        # Don't recalculate quantity - use what's in the file
+        # Quantity is the source of truth from the transaction record
 
         channel = _tx_safe_str(row.get('channel'))
         if not channel:
@@ -1532,7 +1721,12 @@ def _tx_dataframe_to_transactions(
             'notes': notes,
         }
         transactions.append(transaction)
+        rows_added += 1
 
+    # Debug logging
+    if rows_processed > 0:
+        print(f"[FILE_PARSE] Processed {rows_processed} rows: {rows_added} added, {rows_skipped_date} skipped (date), {rows_skipped_ticker} skipped (ticker/name)")
+    
     return transactions
 
 
@@ -1651,6 +1845,10 @@ def _tx_build_db_transaction(
     asset_hint = _tx_safe_str(tx.get('asset_type'))
     asset_type = _tx_infer_asset_type(ticker, stock_name, asset_hint)
 
+    # For mutual funds, prefer scheme_name for ticker resolution (AMFI code lookup)
+    scheme_name = _tx_safe_str(tx.get('scheme_name'))
+    fund_name_for_lookup = scheme_name if (asset_type == 'mutual_fund' and scheme_name) else stock_name
+
     cache_key = (ticker, normalized_date, asset_type)
     if price_value <= 0 and price_cache is not None and cache_key in price_cache:
         cached = price_cache[cache_key]
@@ -1660,12 +1858,12 @@ def _tx_build_db_transaction(
     if price_value <= 0 and price_fetcher:
         fetched_price = None
         try:
-            fetched_price = price_fetcher.get_historical_price(ticker, asset_type, normalized_date, fund_name=stock_name)
+            fetched_price = price_fetcher.get_historical_price(ticker, asset_type, normalized_date, fund_name=fund_name_for_lookup)
         except Exception:
             fetched_price = None
         if not fetched_price:
             try:
-                fetched_price, _ = price_fetcher.get_current_price(ticker, asset_type, fund_name=stock_name)
+                fetched_price, _ = price_fetcher.get_current_price(ticker, asset_type, fund_name=fund_name_for_lookup)
             except Exception:
                 fetched_price = None
         if fetched_price and fetched_price > 0:
