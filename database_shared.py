@@ -16,6 +16,55 @@ import re
 from collections import defaultdict
 from pms_aif_calculator import PMS_AIF_Calculator
 
+
+def _normalize_stockmaster_ticker(value: str) -> str:
+    """Normalize ticker strings before storing / searching in stock_master."""
+    if not value:
+        return value
+    text = str(value).strip()
+    if ':' in text:
+        parts = [segment for segment in re.split(r'[:/]', text) if segment]
+        if parts:
+            text = parts[-1].strip()
+    text = text.replace('\u00a0', ' ')
+    text = ''.join(text.split())  # remove whitespace
+    text = text.lstrip('$')
+    text = re.sub(r'(?:[-_.]?)(T0|T1|BL)(?=\.|$)', '', text, flags=re.IGNORECASE)
+    text = text.replace('-', '')
+    if text.endswith('.0') and text.replace('.0', '').isdigit():
+        text = text[:-2]
+    return text.upper()
+
+
+def _tx_normalize_ticker(raw: Any) -> str:
+    """Normalize ticker values (shared with transaction pipeline)."""
+    if raw is None:
+        return ''
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        text = f"{raw}"
+    else:
+        text = str(raw)
+
+    if not text:
+        return ''
+
+    text = text.strip()
+    if ':' in text:
+        parts = [segment for segment in re.split(r'[:/]', text) if segment]
+        if parts:
+            text = parts[-1].strip()
+    text = text.replace('\u00a0', ' ')
+    text = ''.join(text.split())  # remove whitespace
+    text = text.lstrip('$')
+    text = re.sub(r'^(NSE|BSE|NSI|BOM)(EQ|BE|BZ|XT|XD|P|W|Z|T0|T1)?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?:[-_.]?)(EQ|BE|BZ|XT|XD|P|W|Z|T0|T1)$', '', text, flags=re.IGNORECASE)
+    if text.endswith('.0') and text.replace('.0', '').isdigit():
+        text = text[:-2]
+    text = text.replace('-', '')
+    if text.isdigit():
+        return text
+    return text.upper()
+
 class SharedDatabaseManager:
     """Manages database with shared historical data architecture"""
     
@@ -295,8 +344,9 @@ class SharedDatabaseManager:
         """
         try:
             # Try to find existing by ticker only (more flexible)
+            normalised_ticker = _tx_normalize_ticker(ticker)
             response = self.supabase.table('stock_master').select('*').eq(
-                'ticker', ticker
+                'ticker', normalised_ticker
             ).execute()
             
             if response.data and len(response.data) > 0:
@@ -304,6 +354,8 @@ class SharedDatabaseManager:
                 
                 # Update stock info if we have better data
                 update_data = {}
+                if existing_stock.get('ticker') != normalised_ticker:
+                    update_data['ticker'] = normalised_ticker
                 if stock_name and stock_name != 'Unknown' and (not existing_stock.get('stock_name') or existing_stock.get('stock_name') == 'Unknown'):
                     update_data['stock_name'] = stock_name
                 
@@ -333,7 +385,7 @@ class SharedDatabaseManager:
             
             # Create new
             insert_data = {
-                'ticker': ticker,
+                'ticker': normalised_ticker,
                 'stock_name': final_stock_name,
                 'asset_type': asset_type,
                 'sector': final_sector
@@ -364,6 +416,72 @@ class SharedDatabaseManager:
         except Exception as e:
             # Silently fail - we'll use provided data
             return {}
+    
+    def _extract_base_symbol(self, ticker: Optional[str]) -> str:
+        """Return canonical base symbol (strip exchange suffix, trade flags, case)."""
+        if not ticker:
+            return ""
+        normalized = _normalize_stockmaster_ticker(ticker)
+        if normalized.endswith('.NS') or normalized.endswith('.BO'):
+            return normalized[:-3]
+        return normalized
+
+    def _sector_from_asset_type(self, asset_type: Optional[str]) -> str:
+        """Fallback sector label derived from asset type."""
+        if not asset_type:
+            return 'Unknown'
+        mapping = {
+            'stock': 'Equity',
+            'equity': 'Equity',
+            'mutual_fund': 'Mutual Fund',
+            'mf': 'Mutual Fund',
+            'pms': 'PMS / AIF',
+            'aif': 'PMS / AIF',
+            'bond': 'Debt',
+            'debt': 'Debt',
+            'etf': 'ETF',
+            'index_fund': 'ETF',
+            'cash': 'Cash',
+        }
+        return mapping.get(asset_type.lower(), 'Unknown')
+
+    def _resolve_sector_for_stock(self, stock_id: str, portfolio_id: Optional[str] = None) -> str:
+        """
+        Resolve sector for a stock, collapsing tickers that only differ by exchange suffix.
+        Falls back to asset type if no definitive sector is found.
+        """
+        try:
+            response = (
+                self.supabase.table('stock_master')
+                .select('ticker, sector, asset_type')
+                .eq('id', stock_id)
+                .limit(1)
+                .execute()
+            )
+            stock = (response.data or [{}])[0]
+            sector_value = (stock.get('sector') or '').strip()
+            if sector_value and sector_value.lower() != 'unknown':
+                return sector_value
+
+            base_symbol = self._extract_base_symbol(stock.get('ticker'))
+            if base_symbol:
+                try:
+                    alt_response = (
+                        self.supabase.table('stock_master')
+                        .select('sector')
+                        .ilike('ticker', f"%{base_symbol}%")
+                        .execute()
+                    )
+                    for candidate in alt_response.data or []:
+                        candidate_sector = (candidate.get('sector') or '').strip()
+                        if candidate_sector and candidate_sector.lower() != 'unknown':
+                            return candidate_sector
+                except Exception:
+                    pass
+
+            return self._sector_from_asset_type(stock.get('asset_type'))
+        except Exception:
+            return 'Unknown'
     
     def _fetch_stock_info_yfinance(self, ticker: str) -> Dict[str, Any]:
         """Fetch stock info from yfinance"""
@@ -847,7 +965,8 @@ class SharedDatabaseManager:
                         'portfolio_id': calc['portfolio_id'],
                         'stock_id': stock_id,
                         'total_quantity': total_quantity,
-                        'average_price': average_price
+                        'average_price': average_price,
+                        'sector': self._resolve_sector_for_stock(stock_id, calc['portfolio_id'])
                     }, on_conflict='user_id,portfolio_id,stock_id').execute()
                     
                     updated_count += 1

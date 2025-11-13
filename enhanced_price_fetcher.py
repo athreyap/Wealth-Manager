@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
+import re
 import streamlit as st
 import yfinance as yf
 
@@ -60,6 +61,29 @@ class EnhancedPriceFetcher:
         except Exception as e:
             self.pms_aif_calculator = None
             #st.caption(f"⚠️ PMS/AIF calculator not available: {str(e)}")
+
+    def _normalize_base_ticker(self, value: str) -> str:
+        if not value:
+            return value
+        text = str(value).strip()
+        if ':' in text:
+            text = text.split(':')[-1]
+        text = re.sub(r'(?:[-_.]?)INSTRUMENT$', '', text, flags=re.IGNORECASE)
+        text = text.replace('\u00a0', ' ')
+        text = ''.join(text.split())  # remove whitespace
+        text = text.lstrip('$')
+        text = re.sub(r'(?:[-_.]?)(T0|T1|BL)(?=\.|$)', '', text, flags=re.IGNORECASE)
+        text = text.replace('-', '')
+        return text.upper()
+
+    def _base_symbol(self, value: str) -> str:
+        """Collapse exchange suffixes and trade-tags to a canonical base symbol."""
+        normalized = self._normalize_base_ticker(value or "")
+        if not normalized:
+            return ""
+        if normalized.endswith('.NS') or normalized.endswith('.BO'):
+            return normalized[:-3]
+        return normalized
     
     def get_current_price(self, ticker: str, asset_type: str, fund_name: str = None) -> tuple:
         """
@@ -130,13 +154,29 @@ class EnhancedPriceFetcher:
         
         for holding in holdings:
             try:
-                ticker = holding.get('ticker')
+                original_ticker = holding.get('ticker')
+                ticker = original_ticker
                 asset_type = holding.get('asset_type', 'stock')
                 stock_id = holding.get('stock_id')
                 
                 if not ticker or not stock_id:
                     print(f"[PRICE_UPDATE] ⚠️ Skipping holding with missing ticker or stock_id: ticker={ticker}, stock_id={stock_id}")
                     continue
+
+                cleaned_ticker = self._normalize_base_ticker(ticker)
+                if cleaned_ticker and cleaned_ticker != ticker:
+                    print(f"[PRICE_UPDATE] 🔧 Normalizing ticker {original_ticker} -> {cleaned_ticker}")
+                    base_symbol = self._base_symbol(original_ticker)
+                    try:
+                        db_manager.supabase.table('stock_master').update({
+                            'ticker': cleaned_ticker,
+                            'last_updated': datetime.now().isoformat()
+                        }).ilike('ticker', f"%{base_symbol}%").execute()
+                        print(f"[PRICE_UPDATE] 🔁 Normalized ticker: {cleaned_ticker}")
+                    except Exception:
+                        pass
+                    ticker = cleaned_ticker
+                    holding['ticker'] = cleaned_ticker
                 
                 current_price = None
                 source = None
@@ -230,12 +270,19 @@ class EnhancedPriceFetcher:
 
         candidates: List[str] = []
 
-        def _add(value: str) -> None:
-            val = (value or "").strip()
-            if val and val.upper() not in candidates:
-                candidates.append(val.upper())
+        def _sanitize_symbol(raw_symbol: str) -> str:
+            """Keep only characters that work with Yahoo (A-Z, 0-9, dot, hyphen)."""
+            if not raw_symbol:
+                return ""
+            return re.sub(r'[^A-Za-z0-9\.\-]', '', raw_symbol.upper())
 
-        _add(raw)
+        def _add(value: str) -> None:
+            val = _sanitize_symbol(value)
+            if val and val not in candidates:
+                candidates.append(val)
+
+        normalized_raw = self._normalize_base_ticker(raw)
+        _add(normalized_raw)
 
         manual_keys = {raw.upper()}
         if context_name:
@@ -244,7 +291,7 @@ class EnhancedPriceFetcher:
         for key in manual_keys:
             if key in self._manual_alias_map:
                 for override in self._manual_alias_map[key]:
-                    _add(override)
+                    _add(self._normalize_base_ticker(override))
 
         # Convert float-like numeric strings to integers (e.g., "500285.0" -> "500285")
         for item in list(candidates):
@@ -259,13 +306,13 @@ class EnhancedPriceFetcher:
         # Always fold in exchange suffix variants for obvious tickers
         base_snapshot = list(candidates)
         for symbol in base_snapshot:
-            if symbol.endswith('.NS') or symbol.endswith('.BO'):
+            if not symbol:
                 continue
-            if symbol.isdigit():
-                _add(f"{symbol}.BO")
-            else:
-                _add(f"{symbol}.NS")
-                _add(f"{symbol}.BO")
+            core_base = self._normalize_base_ticker(symbol)
+            if core_base:
+                _add(core_base)
+                _add(f"{core_base}.NS")
+                _add(f"{core_base}.BO")
 
         # Deterministic lookup using Yahoo Finance search by name
         if context_name:
@@ -278,10 +325,13 @@ class EnhancedPriceFetcher:
                 _add(suggestion)
 
         # For pure numeric or otherwise weak identifiers, force enrichment
+        has_exchange_candidate = any(
+            sym.endswith(('.NS', '.BO')) for sym in candidates if sym.replace('.', '').isalnum()
+        )
         needs_ai = self.ai_available and (
             raw.isdigit()
             or (context_name and len(candidates) < 10)
-            or not any(sym.endswith(('.NS', '.BO')) for sym in candidates)
+            or not has_exchange_candidate
         )
 
         if needs_ai:
@@ -468,11 +518,15 @@ class EnhancedPriceFetcher:
         5. AI (OpenAI)
         """
         # Fetching with fallback chain (silent)
-        stock_name_hint = context_name or self._get_stock_name_from_cache(ticker)
-        base_candidates = self._generate_stock_aliases(ticker, stock_name_hint)
-        symbol_variants = self._expand_symbol_variants(base_candidates or [str(ticker or "").strip().upper()])
+        base_ticker = self._normalize_base_ticker(ticker)
+        stock_name_hint = context_name or self._get_stock_name_from_cache(base_ticker)
+        base_candidates = self._generate_stock_aliases(base_ticker, stock_name_hint)
+        symbol_variants = self._expand_symbol_variants(base_candidates or [base_ticker])
+        symbol_variants.insert(0, base_ticker)
+        symbol_variants.insert(1, f"{base_ticker}.NS")
+        symbol_variants.insert(2, f"{base_ticker}.BO")
 
-        self._last_resolved_ticker = base_candidates[0] if base_candidates else ticker
+        self._last_resolved_ticker = base_candidates[0] if base_candidates else base_ticker
         
         # Method 1: Try NSE
         # Trying yfinance NSE (silent)
@@ -480,15 +534,12 @@ class EnhancedPriceFetcher:
             for formatted in symbol_variants:
                 if not formatted.endswith('.NS'):
                     continue
-                stock = yf.Ticker(formatted)
-            hist = stock.history(period='1d')
-            
-            if not hist.empty:
-                price = float(hist['Close'].iloc[-1])
-                if price > 0:
-                    # Found on NSE (silent)
-                    self._last_resolved_ticker = formatted
-                    return price, 'yfinance_nse'
+                hist = yf.Ticker(formatted).history(period='1d')
+                if not hist.empty:
+                    price = float(hist['Close'].iloc[-1])
+                    if price > 0:
+                        self._last_resolved_ticker = formatted
+                        return price, 'yfinance_nse'
         except Exception:
             pass
             # NSE failed (silent)
@@ -499,15 +550,12 @@ class EnhancedPriceFetcher:
             for formatted in symbol_variants:
                 if not formatted.endswith('.BO'):
                     continue
-                stock = yf.Ticker(formatted)
-            hist = stock.history(period='1d')
-            
-            if not hist.empty:
-                price = float(hist['Close'].iloc[-1])
-                if price > 0:
-                    # Found on BSE
-                    self._last_resolved_ticker = formatted
-                    return price, 'yfinance_bse'
+                hist = yf.Ticker(formatted).history(period='1d')
+                if not hist.empty:
+                    price = float(hist['Close'].iloc[-1])
+                    if price > 0:
+                        self._last_resolved_ticker = formatted
+                        return price, 'yfinance_bse'
         except Exception:
             pass
 # BSE failed

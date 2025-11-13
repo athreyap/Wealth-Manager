@@ -46,6 +46,9 @@ if cwd not in sys.path:
 AI_AGENTS_AVAILABLE = False
 AI_FILE_EXTRACTION_ENABLED = True  # Unified uploader (Python-first with AI fallback)
 AI_TICKER_RESOLUTION_ENABLED = True  # ENABLED - uses Gemini fallback (free/cheap)
+PRICE_FETCHER_VERSION = 3
+
+_preview_price_cache: Dict[Tuple[str, str, str], Optional[float]] = {}
 
 AMFI_NAV_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
 
@@ -798,10 +801,10 @@ _TX_COLUMN_ALIASES: Dict[str, List[str]] = {
     'date': [
         'date', 'transaction date', 'trade date', 'tx date', 'tran date',
         'order date', 'purchase date', 'nav date', 'valuation date',
-        'execution date', 'deal date'
+        'execution', 'execution date', 'execution date and time', 'deal date'
     ],
     'ticker': [
-        'ticker', 'symbol', 'code', 'isin', 'scrip', 'stock code',
+        'ticker', 'symbol','scrip symbol', 'code', 'isin', 'scrip', 'stock code',
         'security code', 'instrument code', 'scheme code', 'amfi',
         'amfi code', 'isin code', 'investment code'
     ],
@@ -839,13 +842,13 @@ _TX_COLUMN_ALIASES: Dict[str, List[str]] = {
     ],
     'channel': [
         'channel', 'platform', 'broker', 'account', 'source', 'portfolio',
-        'through', 'partner', 'advisor'
+        'through', 'partner', 'advisor', 'exchange'
     ],
     'sector': [
         'sector', 'industry', 'sector name', 'segment'
     ],
     'notes': [
-        'notes', 'remarks', 'comment', 'description'
+        'notes', 'remarks', 'comment', 'description', 'order status'
     ],
     'folio': [
         'folio', 'folio no', 'folio number'
@@ -907,11 +910,30 @@ def _tx_normalize_ticker(raw: Any) -> str:
         text = f"{raw}"
     if not text:
         return ''
+    text = text.strip()
+    if ':' in text:
+        parts = [segment for segment in re.split(r'[:/]', text) if segment]
+        if parts:
+            text = parts[-1].strip()
+    text = text.replace('\u00a0', ' ')
+    text = ''.join(text.split())  # remove whitespace
+    text = text.lstrip('$')
+    text = re.sub(r'^(NSE|BSE|NSI|BOM)(EQ|BE|BZ|XT|XD|P|W|Z|T0|T1)?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?:[-_.]?)(EQ|BE|BZ|XT|XD|P|W|Z|T0|T1)$', '', text, flags=re.IGNORECASE)
     if text.endswith('.0') and text.replace('.0', '').isdigit():
         text = text[:-2]
+    text = text.replace('-', '')
     if text.isdigit():
         return text
     return text.upper()
+
+
+def _tx_fallback_ticker_from_name(name: str) -> str:
+    """Generate a synthetic ticker from the stock name when none is available."""
+    if not name:
+        return ''
+    candidate = re.sub(r'[^A-Za-z0-9]', '', name.upper())
+    return candidate or ''
 
 
 def _tx_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -966,6 +988,13 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
     hint = asset_hint.lower()
     name = stock_name.lower()
     ticker_upper = ticker.upper()
+
+    if ticker_upper.isdigit():
+        if len(ticker_upper) >= 5:
+            return 'mutual_fund'
+        if any(keyword in name for keyword in ('fund', 'growth', 'plan', 'scheme')):
+            return 'mutual_fund'
+        return 'stock'
 
     if hint:
         if 'mutual' in hint or 'mf' in hint or hint == 'mutual_fund':
@@ -1038,10 +1067,375 @@ def _tx_extract_tables_from_pdf(uploaded_file) -> List[pd.DataFrame]:
     return tables
 
 
+_TX_COLUMN_ALIASES: Dict[str, List[str]] = {
+    'date': [
+        'date', 'transaction date', 'trade date', 'tx date', 'tran date',
+        'order date', 'purchase date', 'nav date', 'valuation date',
+        'execution', 'execution date', 'execution date and time', 'deal date',
+        'order datetime', 'order date / time'
+    ],
+    'ticker': [
+        'ticker', 'symbol', 'scrip symbol', 'scrip', 'scrip sym',
+        'trading symbol', 'script', 'code', 'bse code', 'nse code',
+        'security code', 'instrument code', 'scheme code',
+        'isin code', 'isin', 'amfi code', 'amfi',
+        'investment code', 'contract symbol', 'security id'
+    ],
+    'stock_name': [
+        'stock name', 'scrip name', 'security name', 'instrument', 'name', 'scheme name',
+        'company', 'fund name', 'description', 'asset name', 'holding',
+        'product', 'contract description', 'company name'
+    ],
+    'scheme_name': [
+        'scheme name', 'fund scheme', 'scheme', 'schemename', 'plan name'
+    ],
+    'quantity': [
+        'quantity', 'qty', 'units', 'shares', 'quantity/unit',
+        'no. of units', 'no of units', 'units/qty', 'units (credit)',
+        'units (debit)', 'lot size', 'filled quantity', 'executed quantity'
+    ],
+    'price': [
+        'price', 'rate', 'nav', 'purchase price', 'per unit price',
+        'trade price', 'unit price', 'cost price', 'nav per unit',
+        'deal price', 'executed price', 'execution price', 'order price', 'strike price'
+    ],
+    'amount': [
+        'amount', 'value', 'total value', 'consideration', 'txn amount',
+        'gross amount', 'net amount', 'investment amount', 'order value',
+        'total', 'investment', 'transaction value', 'contract value', 'turnover'
+    ],
+    'transaction_type': [
+        'transaction type', 'type', 'action', 'side', 'buy/sell',
+        'txn type', 'order type', 'direction', 'nature', 'transaction',
+        'mode', 'buy/sell/other', 'transaction mode', 'trade type'
+    ],
+    'asset_type': [
+        'asset type', 'instrument type', 'category', 'asset class',
+        'type of asset', 'class', 'instrument category'
+    ],
+    'channel': [
+        'channel', 'platform', 'broker', 'account', 'source', 'portfolio',
+        'through', 'partner', 'advisor', 'exchange'
+    ],
+    'sector': [
+        'sector', 'industry', 'sector name', 'segment'
+    ],
+    'notes': [
+        'notes', 'remarks', 'comment', 'description', 'order status'
+    ],
+    'folio': [
+        'folio', 'folio no', 'folio number'
+    ],
+}
+
+_TX_CANONICAL_COLUMNS = set(_TX_COLUMN_ALIASES.keys())
+_TX_AUTO_MAP_TARGETS = (
+    'date',
+    'ticker',
+    'stock_name',
+    'quantity',
+    'price',
+    'amount',
+    'transaction_type',
+)
+
+_TX_AUTO_MAP_THRESHOLD: Dict[str, float] = {
+    'date': 0.7,
+    'ticker': 0.65,
+    'stock_name': 0.6,
+    'quantity': 0.6,
+    'price': 0.6,
+    'amount': 0.6,
+    'transaction_type': 0.55,
+}
+
+
+def _tx_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename columns to canonical names based on aliases."""
+    rename_map: Dict[str, str] = {}
+    used_targets: set[str] = set()
+    mapping_entries: List[Dict[str, Any]] = []
+
+    # Hard rules for common broker exports (e.g. "Scrip Symbol" → ticker, "Scrip Name" → stock_name)
+    HARD_MAP = {
+        'ticker': {'scrip symbol', 'scrip-symbol', 'scrip_symbol', 'trading symbol'},
+        'stock_name': {'scrip name', 'scrip-name', 'scrip_name'},
+    }
+
+    for col in df.columns:
+        col_name = _tx_safe_str(col).lower()
+        target = None
+
+        # Apply hard mappings first
+        for hard_target, aliases in HARD_MAP.items():
+            if col_name in aliases:
+                target = hard_target
+                break
+
+        if target is None:
+            for canonical, aliases in _TX_COLUMN_ALIASES.items():
+                for alias in aliases:
+                    alias_lower = alias.lower()
+                    if col_name == alias_lower or alias_lower in col_name:
+                        target = canonical
+                        break
+                if target:
+                    break
+
+        if target and target not in used_targets:
+            rename_map[col] = target
+            used_targets.add(target)
+            if col != target:
+                mapping_entries.append({
+                    'source': col,
+                    'target': target,
+                    'reason': 'alias_match' if target not in HARD_MAP else 'hard_map',
+                })
+        else:
+            rename_map[col] = col
+
+    df = df.rename(columns=rename_map)
+    if mapping_entries:
+        df.attrs.setdefault('__tx_column_mapping', [])
+        df.attrs['__tx_column_mapping'].extend(mapping_entries)
+    return df
+
+
+def _tx_auto_map_missing_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Use statistical heuristics to map remaining columns to canonical names."""
+    if df is None or df.empty:
+        return df
+
+    existing_lower = {col.lower() for col in df.columns}
+    missing_targets = [target for target in _TX_AUTO_MAP_TARGETS if target not in existing_lower]
+    if not missing_targets:
+        return df
+
+    def _sample(series: pd.Series, sample_size: int = 60) -> pd.Series:
+        return series.dropna().head(sample_size)
+
+    def _score_date(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        sample_str = sample.astype(str).str.strip()
+        parsed_dayfirst = pd.to_datetime(sample_str, errors='coerce', dayfirst=True)
+        parsed_monthfirst = pd.to_datetime(sample_str, errors='coerce', dayfirst=False)
+        return float(max(parsed_dayfirst.notna().mean(), parsed_monthfirst.notna().mean()))
+
+    def _score_transaction_type(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        keywords = {
+            'buy', 'sell', 'redeem', 'redemption', 'sip', 'switch in', 'switch out',
+            'subscription', 'allotment', 'investment', 'withdrawal', 'debit', 'credit',
+        }
+        values = [str(val).strip().lower() for val in sample]
+        matches = sum(1 for value in values if any(token in value for token in keywords))
+        return float(matches / len(values))
+
+    def _score_numeric(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        numeric = pd.to_numeric(sample, errors='coerce')
+        if numeric.empty:
+            return 0.0
+        return float(numeric.notna().mean())
+
+    def _score_quantity(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        numeric = pd.to_numeric(sample, errors='coerce')
+        numeric = numeric.dropna()
+        if numeric.empty:
+            return 0.0
+        integerish = (numeric.round(4) - numeric.round()).abs() <= 0.01
+        positive_ratio = (numeric > 0).mean() if not numeric.empty else 0.0
+        return float(min(1.0, 0.6 * integerish.mean() + 0.4 * positive_ratio))
+
+    def _score_price(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        numeric = pd.to_numeric(sample, errors='coerce').dropna()
+        if numeric.empty:
+            return 0.0
+        mean_val = numeric.abs().mean()
+        if mean_val <= 0:
+            return 0.0
+        decimal_ratio = ((numeric - numeric.round(2)).abs() > 0.005).mean()
+        return float(min(1.0, 0.5 * decimal_ratio + 0.5 * min(mean_val / 1000, 1.0)))
+
+    def _score_amount(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        numeric = pd.to_numeric(sample, errors='coerce').dropna()
+        if numeric.empty:
+            return 0.0
+        mean_val = numeric.abs().mean()
+        if mean_val <= 0:
+            return 0.0
+        return float(min(1.0, 0.4 + min(mean_val / 50000, 0.6)))
+
+    def _score_ticker(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        values = [str(val).strip() for val in sample]
+
+        def looks_like_ticker(value: str) -> bool:
+            if not value or len(value) > 25:
+                return False
+            stripped = value.replace('.', '').replace('-', '').replace(' ', '')
+            if not stripped:
+                return False
+            if stripped.isdigit() and 3 <= len(stripped) <= 12:
+                return True
+            if not all(ch.isalnum() or ch in {'.', '-', '/', '&'} for ch in value):
+                return False
+            alpha_chars = sum(ch.isalpha() for ch in value)
+            if alpha_chars == 0:
+                return False
+            upper_ratio = sum(ch.isupper() for ch in value if ch.isalpha()) / alpha_chars
+            return upper_ratio >= 0.6
+
+        matches = sum(1 for value in values if looks_like_ticker(value))
+        uniqueness = len(set(values)) / len(values)
+        base_score = matches / len(values)
+        return float(min(1.0, 0.7 * base_score + 0.3 * uniqueness))
+
+    def _score_stock_name(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        values = [str(val).strip() for val in sample]
+        meaningful = sum(1 for value in values if len(value) >= 3 and any(ch.isalpha() for ch in value))
+        spaced = sum(1 for value in values if ' ' in value or value.title() == value)
+        return float(min(1.0, 0.5 * (meaningful / len(values)) + 0.5 * (spaced / len(values))))
+
+    scoring_functions = {
+        'date': _score_date,
+        'ticker': _score_ticker,
+        'stock_name': _score_stock_name,
+        'quantity': _score_quantity,
+        'price': _score_price,
+        'amount': _score_amount,
+        'transaction_type': _score_transaction_type,
+    }
+
+    rename_map: Dict[str, str] = {}
+    mapping_entries: List[Dict[str, Any]] = []
+    used_sources: set[str] = set()
+
+    for target in missing_targets:
+        best_col = None
+        best_score = 0.0
+        scorer = scoring_functions.get(target)
+        if not scorer:
+            continue
+
+        for col in df.columns:
+            col_lower = col.lower()
+            if col_lower in _TX_CANONICAL_COLUMNS or col_lower == target:
+                continue
+            if col in rename_map or col in used_sources:
+                continue
+            score = scorer(df[col])
+            if score > best_score:
+                best_score = score
+                best_col = col
+
+        threshold = _TX_AUTO_MAP_THRESHOLD.get(target, 0.7)
+        if best_col and best_score >= threshold:
+            rename_map[best_col] = target
+            used_sources.add(best_col)
+            mapping_entries.append({
+                'source': best_col,
+                'target': target,
+                'reason': 'heuristic_match',
+                'score': round(best_score, 3),
+            })
+
+    if not rename_map:
+        return df
+
+    df = df.rename(columns=rename_map)
+    if mapping_entries:
+        df.attrs.setdefault('__tx_column_mapping', [])
+        df.attrs['__tx_column_mapping'].extend(mapping_entries)
+    return df
+
+
+def _tx_prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean up raw dataframes by stripping metadata rows and fixing headers."""
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+    df.attrs['__tx_original_columns'] = list(df.columns)
+    df.attrs.setdefault('__tx_column_mapping', [])
+
+    # Normalize column labels
+    normalized_columns = []
+    for col in df.columns:
+        if isinstance(col, tuple):
+            col = ' '.join([_tx_safe_str(part) for part in col if part is not None])
+        normalized_columns.append(_tx_safe_str(col))
+    df.columns = normalized_columns
+
+    # Drop empty rows/cols
+    df = df.dropna(how='all')
+    df = df.dropna(axis=1, how='all')
+
+    if df.empty:
+        return df
+
+    # Detect header row
+    alias_tokens = set()
+    for aliases in _TX_COLUMN_ALIASES.values():
+        alias_tokens.update(alias.lower() for alias in aliases)
+
+    def score_row(row: pd.Series) -> float:
+        score = 0.0
+        for value in row.values:
+            text = _tx_safe_str(value).lower()
+            if not text:
+                continue
+            if text in alias_tokens:
+                score += 3.0
+            elif any(token in text for token in alias_tokens):
+                score += 1.5
+            elif len(text) <= 25:
+                score += 0.5
+        return score
+
+    header_candidates = df.head(8)
+    best_idx = None
+    best_score = 0.0
+    for idx, row in header_candidates.iterrows():
+        score = score_row(row)
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+
+    if best_idx is not None:
+        header_row = df.loc[best_idx]
+        new_columns = [ _tx_safe_str(val) for val in header_row.values ]
+        df = df.loc[best_idx + 1 :].reset_index(drop=True)
+        df.columns = new_columns
+
+    return df
+
+
 def _tx_dataframe_to_transactions(
     df: pd.DataFrame,
     filename: str,
     sheet_label: Optional[str] = None,
+    debug_log: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Convert a standardized DataFrame into transaction dicts."""
     transactions: List[Dict[str, Any]] = []
@@ -1049,13 +1443,24 @@ def _tx_dataframe_to_transactions(
     if df is None or df.empty:
         return transactions
 
-    df = df.dropna(how='all')
-    if df.empty:
+    prepared_df = _tx_prepare_dataframe(df)
+    prepared_df = prepared_df.dropna(how='all')
+    if prepared_df.empty:
         return transactions
 
-    df = _tx_standardize_columns(df)
+    prepared_df = _tx_standardize_columns(prepared_df)
+    prepared_df = _tx_auto_map_missing_columns(prepared_df)
 
-    for _, row in df.iterrows():
+    if debug_log is not None:
+        debug_log.append({
+            'sheet': sheet_label or Path(filename).stem,
+            'rows': int(prepared_df.shape[0]),
+            'columns': list(prepared_df.columns),
+            'original_columns': prepared_df.attrs.get('__tx_original_columns', []),
+            'mapping': prepared_df.attrs.get('__tx_column_mapping', []),
+        })
+
+    for _, row in prepared_df.iterrows():
         raw_date = row.get('date') or row.get('transaction date')
         raw_quantity = row.get('quantity')
         raw_amount = row.get('amount')
@@ -1092,6 +1497,10 @@ def _tx_dataframe_to_transactions(
 
         if price_value == 0 and amount_value > 0 and quantity_value > 0:
             price_value = amount_value / quantity_value
+        if quantity_value > 0 and price_value > 0:
+            computed_amount = quantity_value * price_value
+            if amount_value <= 0 or abs(amount_value - computed_amount) > 0.01 * max(1.0, computed_amount):
+                amount_value = computed_amount
 
         channel = _tx_safe_str(row.get('channel'))
         if not channel:
@@ -1126,29 +1535,34 @@ def _tx_dataframe_to_transactions(
     return transactions
 
 
-def extract_transactions_python(uploaded_file, filename: str) -> List[Dict[str, Any]]:
-    """Try to extract transactions using deterministic Python parsing."""
+def extract_transactions_python(uploaded_file, filename: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Try to extract transactions using deterministic Python parsing.
+
+    Returns:
+        Tuple of (transactions, debug_log) where debug_log contains per-sheet mapping details.
+    """
     suffix = Path(filename).suffix.lower()
     transactions: List[Dict[str, Any]] = []
+    debug_log: List[Dict[str, Any]] = []
 
     try:
         if suffix in {'.csv', '.tsv'}:
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file, sep='\t' if suffix == '.tsv' else ',')
-            transactions = _tx_dataframe_to_transactions(df, filename)
+            transactions = _tx_dataframe_to_transactions(df, filename, debug_log=debug_log)
         elif suffix in {'.xlsx', '.xls'}:
             uploaded_file.seek(0)
             workbook = pd.read_excel(uploaded_file, sheet_name=None)
             rows: List[Dict[str, Any]] = []
             for sheet_name, sheet_df in (workbook or {}).items():
-                rows.extend(_tx_dataframe_to_transactions(sheet_df, filename, sheet_label=sheet_name))
+                rows.extend(_tx_dataframe_to_transactions(sheet_df, filename, sheet_label=sheet_name, debug_log=debug_log))
             transactions = rows
         elif suffix == '.pdf':
             tables = _tx_extract_tables_from_pdf(uploaded_file)
             rows: List[Dict[str, Any]] = []
             for table in tables:
                 label = table.attrs.get('__tx_source')
-                rows.extend(_tx_dataframe_to_transactions(table, filename, sheet_label=label))
+                rows.extend(_tx_dataframe_to_transactions(table, filename, sheet_label=label, debug_log=debug_log))
             transactions = rows
         else:
             transactions = []
@@ -1161,7 +1575,8 @@ def extract_transactions_python(uploaded_file, filename: str) -> List[Dict[str, 
         except Exception:
             pass
 
-    return [tx for tx in transactions if tx.get('quantity') or tx.get('amount')]
+    filtered = [tx for tx in transactions if tx.get('quantity') or tx.get('amount')]
+    return filtered, debug_log
 
 
 def _tx_build_db_transaction(
@@ -1191,6 +1606,9 @@ def _tx_build_db_transaction(
         ticker = _tx_normalize_ticker(stock_name)
     if not ticker:
         return None
+    if re.fullmatch(r'\d+(\.\d+)?', ticker):
+        fallback_ticker = _tx_fallback_ticker_from_name(stock_name)
+        ticker = fallback_ticker or ticker
     if not stock_name:
         stock_name = ticker
 
@@ -1214,6 +1632,10 @@ def _tx_build_db_transaction(
     price_value = _tx_safe_float(tx.get('price'))
     if price_value <= 0 and amount_value > 0:
         price_value = amount_value / quantity_value
+    if quantity_value > 0 and price_value > 0:
+        computed_amount = quantity_value * price_value
+        if amount_value <= 0 or abs(amount_value - computed_amount) > 0.01 * max(1.0, computed_amount):
+            amount_value = computed_amount
 
     asset_hint = _tx_safe_str(tx.get('asset_type'))
     asset_type = _tx_infer_asset_type(ticker, stock_name, asset_hint)
@@ -1318,8 +1740,12 @@ if 'user' not in st.session_state:
     st.session_state.user = None
 if 'db' not in st.session_state:
     st.session_state.db = SharedDatabaseManager()
-if 'price_fetcher' not in st.session_state:
+if (
+    'price_fetcher' not in st.session_state
+    or st.session_state.get('price_fetcher_version') != PRICE_FETCHER_VERSION
+):
     st.session_state.price_fetcher = EnhancedPriceFetcher()
+    st.session_state.price_fetcher_version = PRICE_FETCHER_VERSION
 if 'missing_weeks_fetched' not in st.session_state:
     st.session_state.missing_weeks_fetched = False
 if 'needs_initial_refresh' not in st.session_state:
@@ -1557,7 +1983,7 @@ def run_portfolio_refresh(user_id: str, *, auto: bool = False) -> None:
         st.success("✅ Portfolio refreshed automatically.")
     else:
         st.success("✅ Portfolio data refreshed.")
-        st.experimental_rerun()
+        st.rerun()
 
 # Function to update all live prices
 def update_all_live_prices():
@@ -1691,6 +2117,42 @@ def login_page():
             accept_multiple_files=True,
             help="Python will auto-map standard columns; unsupported layouts fall back to AI extraction automatically."
         )
+
+        if uploaded_files:
+            if st.button("📝 Convert to CSV (Preview)", key="register_convert_csv"):
+                with st.spinner("🔄 Converting files..."):
+                    csv_rows: List[Dict[str, Any]] = []
+                    summary_messages: List[str] = []
+
+                    for uploaded_file in uploaded_files:
+                        rows, method_used = extract_transactions_for_csv(uploaded_file, uploaded_file.name, None)
+                        if rows:
+                            csv_rows.extend(rows)
+                            summary_messages.append(f"📄 {uploaded_file.name}: {len(rows)} rows ({method_used.upper()})")
+                        else:
+                            summary_messages.append(f"⚠️ {uploaded_file.name}: No transactions detected.")
+
+                if csv_rows:
+                    df_preview = pd.DataFrame(csv_rows)
+                    st.success(f"✅ Extracted {len(csv_rows)} transactions. Review below or download as CSV.")
+                    for msg in summary_messages:
+                        st.caption(msg)
+                    st.dataframe(df_preview, use_container_width=True)
+
+                    csv_data = df_preview.to_csv(index=False).encode('utf-8')
+                    timestamp = int(time.time())
+                    st.download_button(
+                        "⬇️ Download Converted CSV",
+                        csv_data,
+                        file_name=f"registration_transactions_{timestamp}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        key=f"register_csv_download_{timestamp}"
+                    )
+                else:
+                    for msg in summary_messages:
+                        st.caption(msg)
+                    st.warning("No transactions extracted from the selected files. Please review the input.")
         
         if st.button("Register"):
             if password != confirm_password:
@@ -3488,10 +3950,197 @@ def _legacy_process_uploaded_files(uploaded_files, user_id, portfolio_id):
     return total_imported
 
 
+def _tx_prepare_preview_row(
+    tx: Dict[str, Any],
+    source_file: str,
+    method: str,
+    *,
+    use_price_fetcher: bool = False,
+    price_fetcher: Optional["EnhancedPriceFetcher"] = None,
+) -> Dict[str, Any]:
+    """Normalize a transaction dict for CSV preview/download (and DB import when use_price_fetcher=True)."""
+    date_value = tx.get('transaction_date') or tx.get('date') or tx.get('Date') or ''
+    ticker_value = tx.get('ticker') or ''
+    stock_name = tx.get('stock_name') or tx.get('scheme_name') or ticker_value or ''
+
+    normalized = {
+        'source_file': source_file,
+        'extraction_method': method,
+        'date': _tx_safe_str(date_value),
+        'ticker': _tx_normalize_ticker(ticker_value) or _tx_fallback_ticker_from_name(stock_name),
+        'stock_name': _tx_safe_str(stock_name),
+        'scheme_name': _tx_safe_str(tx.get('scheme_name')),
+        'quantity': _tx_safe_float(tx.get('quantity') or tx.get('units')),
+        'price': _tx_safe_float(tx.get('price')),
+        'amount': _tx_safe_float(tx.get('amount') or tx.get('value')),
+        'transaction_type': _tx_safe_str(tx.get('transaction_type') or tx.get('type') or 'buy').lower(),
+        'asset_type': _tx_safe_str(tx.get('asset_type') or tx.get('category') or ''),
+        'channel': _tx_safe_str(tx.get('channel') or tx.get('platform') or ''),
+        'sector': _tx_safe_str(tx.get('sector')),
+        'notes': _tx_safe_str(tx.get('notes') or tx.get('remarks')),
+    }
+
+    asset_type_lower = normalized['asset_type'].lower()
+
+    if asset_type_lower == 'mutual_fund':
+        resolved_code, _source = _preview_resolve_mutual_fund_ticker(stock_name, normalized['ticker'])
+        if resolved_code:
+            normalized['ticker'] = resolved_code
+            normalized['sector'] = normalized['sector'] or 'Mutual Fund'
+
+    if normalized['ticker'] and normalized['date'] and use_price_fetcher:
+        key = (
+            normalized['ticker'],
+            normalized['date'],
+            asset_type_lower or 'stock',
+        )
+        fetched_price = _preview_price_cache.get(key)
+        if fetched_price is None and (normalized['price'] <= 0 or normalized['amount'] <= 0):
+            fetcher = price_fetcher or _preview_get_price_fetcher()
+            if fetcher:
+                try:
+                    fetched_price = fetcher.get_historical_price(
+                        normalized['ticker'],
+                        asset_type_lower or 'stock',
+                        normalized['date'],
+                        fund_name=normalized['stock_name'],
+                    )
+                except Exception:
+                    fetched_price = None
+                if not fetched_price:
+                    try:
+                        fetched_price, _ = fetcher.get_current_price(
+                            normalized['ticker'],
+                            asset_type_lower or 'stock',
+                            fund_name=normalized['stock_name'],
+                        )
+                    except Exception:
+                        fetched_price = None
+            _preview_price_cache[key] = fetched_price
+
+        if fetched_price and fetched_price > 0:
+            normalized['price'] = round(float(fetched_price), 4)
+
+    if normalized['amount'] <= 0 and normalized['quantity'] > 0 and normalized['price'] > 0:
+        normalized['amount'] = round(normalized['quantity'] * normalized['price'], 4)
+    elif normalized['price'] <= 0 and normalized['quantity'] > 0 and normalized['amount'] > 0:
+        normalized['price'] = round(normalized['amount'] / normalized['quantity'], 4)
+    elif normalized['quantity'] > 0 and normalized['price'] > 0:
+        computed_amount = round(normalized['quantity'] * normalized['price'], 4)
+        if normalized['amount'] <= 0 or abs(normalized['amount'] - computed_amount) > 0.01 * max(1.0, computed_amount):
+            normalized['amount'] = computed_amount
+
+    return normalized
+
+
+def extract_transactions_for_csv(uploaded_file, file_name: str, user_id: Optional[str]) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Extract transactions from any supported file type without inserting into the database.
+    Returns normalized rows ready for CSV download along with the method used.
+    """
+    transactions: List[Dict[str, Any]] = []
+    method_used = 'python'
+
+    # Always try deterministic parsing first so we avoid AI warnings for structured CSV/XLSX
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+    extraction_result = extract_transactions_python(uploaded_file, file_name)
+    if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+        python_transactions, _python_log = extraction_result
+    else:
+        python_transactions = extraction_result or []
+    transactions = python_transactions or []
+
+    # Fall back to AI only when Python parser finds nothing
+    if not transactions and AI_AGENTS_AVAILABLE:
+        method_used = 'ai'
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
+
+    normalized_rows = [
+        _tx_prepare_preview_row(tx, file_name, method_used, use_price_fetcher=True)
+        for tx in transactions
+        if isinstance(tx, dict)
+    ]
+
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+
+    return normalized_rows, method_used
+
+
+@st.cache_data(ttl=600)
+def _preview_get_amfi_dataset() -> Dict[str, Any]:
+    """Cached AMFI dataset for preview conversions."""
+    return get_amfi_dataset()
+
+
+@st.cache_resource(show_spinner=False)
+def _preview_get_price_fetcher() -> Optional["EnhancedPriceFetcher"]:
+    """Create a shared EnhancedPriceFetcher instance for preview conversions."""
+    try:
+        return EnhancedPriceFetcher()
+    except Exception:
+        return None
+
+
+def _preview_resolve_mutual_fund_ticker(scheme_name: str, current_ticker: str) -> Tuple[str, Optional[str]]:
+    """
+    Resolve mutual fund ticker to AMFI code for CSV preview without mutating the database.
+    Returns (resolved_code, source) where resolved_code may equal current_ticker if no better match is found.
+    """
+    dataset = _preview_get_amfi_dataset()
+    if not dataset.get("schemes"):
+        return current_ticker, None
+
+    cleaned_current = str(current_ticker or "").strip()
+    if cleaned_current.isdigit() and len(cleaned_current) >= 5:
+        return cleaned_current, "current"
+
+    resolution = resolve_mutual_fund_with_amfi(scheme_name, cleaned_current, dataset)
+    status = resolution.get("status")
+    direct_scheme = resolution.get("direct_scheme")
+    matches = resolution.get("matches", [])
+    code_lookup = dataset.get("code_lookup", {})
+
+    if status == "direct" and direct_scheme:
+        return direct_scheme.get("code") or cleaned_current, "amfi_direct"
+
+    if status == "direct_mismatch" and direct_scheme:
+        return direct_scheme.get("code") or cleaned_current, "amfi_direct_mismatch"
+
+    if matches:
+        top_match = matches[0]
+        code = top_match.get("code")
+        if code:
+            return code, "amfi_name_match"
+
+    result = search_mftool_for_amfi_code(scheme_name)
+    if result:
+        return result.get("ticker") or cleaned_current, "mftool"
+
+    # As a last resort, try AI selection if available (without committing changes)
+    if matches:
+        ai_choice = ai_select_amfi_code(scheme_name, cleaned_current, matches)
+        if ai_choice:
+            code = str(ai_choice.get("code") or "").strip()
+            if code and code_lookup.get(code):
+                return code, "ai_amfi"
+
+    return cleaned_current or _tx_fallback_ticker_from_name(scheme_name), None
+
+
 def process_uploaded_files(uploaded_files, user_id, portfolio_id):
     """
     Process uploaded files and store transactions in the database.
-    Uses deterministic Python parsing first, then falls back to AI extraction.
+    Currently uses AI-first extraction for better column mapping.
     """
     if not uploaded_files:
         return 0
@@ -3520,21 +4169,32 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
         method_used = 'python'
 
         try:
-            python_transactions = extract_transactions_python(uploaded_file, file_name)
-            transactions = python_transactions
+            method_used = 'ai'
+            transactions = []
+            python_debug_log: List[Dict[str, Any]] = []
+
+            try:
+                uploaded_file.seek(0)
+            except Exception:
+                pass
+
+            ai_transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
+            transactions = ai_transactions
 
             if not transactions:
-                method_used = 'ai'
+                method_used = 'python'
                 try:
                     uploaded_file.seek(0)
                 except Exception:
                     pass
-                transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
-            else:
-                try:
-                    uploaded_file.seek(0)
-                except Exception:
-                    pass
+
+                extraction_result = extract_transactions_python(uploaded_file, file_name)
+                if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+                    python_transactions, python_debug_log = extraction_result
+                else:
+                    python_transactions = extraction_result or []
+                    python_debug_log = []
+                transactions = python_transactions
 
             if not transactions:
                 st.error(f"   ❌ Could not extract transactions from {file_name}.")
@@ -3544,26 +4204,37 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     'skipped': 0,
                     'errors': 1,
                     'method': method_used,
+                    'debug': python_debug_log,
                 })
                 continue
 
             fallback_channel = (Path(file_name).stem or 'Direct').title()
 
             for tx in transactions:
-                payload = _tx_build_db_transaction(
+                normalized_tx = _tx_prepare_preview_row(
                     tx,
-                    fallback_channel,
                     file_name,
-                    user_id,
-                    portfolio_id,
-                    db,
-                    price_fetcher,
-                    price_cache,
+                    method_used,
+                    use_price_fetcher=True,
+                    price_fetcher=price_fetcher,
                 )
-                if not payload:
-                    errors += 1
-                    continue
-
+                payload = {
+                    'user_id': user_id,
+                    'portfolio_id': portfolio_id,
+                    'ticker': normalized_tx['ticker'],
+                    'stock_name': normalized_tx['stock_name'],
+                    'scheme_name': normalized_tx.get('scheme_name'),
+                    'quantity': normalized_tx['quantity'],
+                    'price': normalized_tx['price'],
+                    'transaction_date': normalized_tx['date'],
+                    'transaction_type': normalized_tx['transaction_type'],
+                    'asset_type': normalized_tx['asset_type'] or 'stock',
+                    'channel': normalized_tx['channel'] or fallback_channel,
+                    'sector': normalized_tx['sector'] or ('Mutual Fund' if (normalized_tx['asset_type'] or '').lower() == 'mutual_fund' else 'Unknown'),
+                    'amount': normalized_tx['amount'],
+                    'filename': file_name,
+                    'notes': normalized_tx.get('notes'),
+                }
                 try:
                     result = db.add_transaction(payload)
                 except Exception as exc:
@@ -3575,10 +4246,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     imported += 1
                     ticker_key = payload.get('ticker')
                     asset_type_value = payload.get('asset_type', 'stock')
-                    if ticker_key:
-                        collected_tickers[ticker_key] = asset_type_value
-                    if imported % 75 == 0:
-                        time.sleep(0.2)
+                    collected_tickers[ticker_key] = asset_type_value or 'stock'
                 else:
                     error_msg = (result.get('error') or '').lower()
                     if 'duplicate' in error_msg:
@@ -3587,8 +4255,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                         errors += 1
 
             if imported > 0:
-                mapper_label = "Python" if method_used == 'python' else "AI"
-                st.success(f"   ✅ Imported {imported} transaction(s) from {file_name} ({mapper_label} mapper)")
+                st.success(f"   ✅ Imported {imported} transaction(s) from {file_name} (AI mapper)")
                 if skipped:
                     st.info(f"   ⏭️  Skipped {skipped} duplicate transaction(s)")
                 if errors:
@@ -3605,6 +4272,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                 'skipped': skipped,
                 'errors': errors,
                 'method': method_used,
+                'debug': python_debug_log,
             })
             total_imported += imported
 
@@ -3646,6 +4314,12 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     f"📄 {log['file']} • {method_label} • "
                     f"{log['imported']} imported, {log['skipped']} skipped, {log['errors']} errors"
                 )
+                debug_entries = log.get('debug') or []
+                if debug_entries:
+                    for entry in debug_entries:
+                        sheet_name = entry.get('sheet', 'Unknown sheet')
+                        columns = ", ".join(entry.get('columns', []))
+                        st.caption(f"      -> {sheet_name}: {columns}")
 
     return total_imported
 
@@ -8722,8 +9396,9 @@ def upload_files_page():
                 </div>
                 """, unsafe_allow_html=True)
         
-        col1, col2 = st.columns([3, 1])
-        
+        col1, col2, col3 = st.columns([3, 1, 1])
+        convert_to_csv_clicked = False
+
         with col1:
             if st.button("🚀 Process Files", type="primary", use_container_width=True):
                 st.info(f"🚀 Processing {len(uploaded_files)} file(s) for portfolio: {portfolio['portfolio_name']}")
@@ -8741,9 +9416,48 @@ def upload_files_page():
                     status_text.error(f"❌ Error processing files: {str(e)}")
         
         with col2:
+            convert_to_csv_clicked = st.button("📝 Convert to CSV", use_container_width=True)
+
+        with col3:
             if st.button("🗑️ Clear Files", use_container_width=True):
-                st.session_state.upload_files_main = []
+                if "upload_files_main" in st.session_state:
+                    del st.session_state["upload_files_main"]
                 st.rerun()
+
+        if convert_to_csv_clicked:
+            with st.spinner("🔄 Converting files..."):
+                csv_rows: List[Dict[str, Any]] = []
+                summary_messages: List[str] = []
+
+                for uploaded_file in uploaded_files:
+                    rows, method_used = extract_transactions_for_csv(uploaded_file, uploaded_file.name, user['id'])
+                    if rows:
+                        csv_rows.extend(rows)
+                        summary_messages.append(f"📄 {uploaded_file.name}: {len(rows)} rows ({method_used.upper()})")
+                    else:
+                        summary_messages.append(f"⚠️ {uploaded_file.name}: No transactions detected.")
+
+            if csv_rows:
+                df_preview = pd.DataFrame(csv_rows)
+                st.success(f"✅ Extracted {len(csv_rows)} transactions. Review below or download as CSV.")
+                for msg in summary_messages:
+                    st.caption(msg)
+                st.dataframe(df_preview, use_container_width=True)
+
+                csv_data = df_preview.to_csv(index=False).encode('utf-8')
+                timestamp = int(time.time())
+                st.download_button(
+                    "⬇️ Download Converted CSV",
+                    csv_data,
+                    file_name=f"converted_transactions_{timestamp}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key=f"csv_download_{timestamp}"
+                )
+            else:
+                for msg in summary_messages:
+                    st.caption(msg)
+                st.warning("No transactions extracted from the selected files. Please review the input.")
     
     # Show transactions with week info
     st.subheader("📊 Your Transactions (with Week Info)")

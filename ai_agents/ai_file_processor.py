@@ -158,71 +158,52 @@ class AIFileProcessor(BaseAgent):
         
         try:
             # Create intelligent prompt based on file type
-            prompt = f"""Extract ALL investment transactions from this {file_type.upper()} file intelligently:
+            prompt = f"""
+You are parsing an IndMoney transaction report. The first row of each sheet is the header and matches one of these patterns:
+- "Scrip Symbol", "Scrip Name", "Txn Date", "Quantity", "Price", "Amount", "Transaction Type", etc.
 
-FILENAME: {filename}
-FILE TYPE: {file_type}
+Map the file into JSON using the canonical schema below. Every row that represents a buy or sell transaction must appear in the output.
 
-FILE CONTENT:
-{file_content[:8000]}  
-
-YOUR TASK:
-1. **IDENTIFY TRANSACTIONS**: Find all buy/sell transactions for stocks, mutual funds, PMS, AIF, or bonds
-2. **EXTRACT DATA**: For each transaction, extract:
-   - Date (normalize to YYYY-MM-DD)
-   - Ticker/Symbol/Scheme Code
-   - Stock/Fund Name
-   - Quantity
-   - Price (if available, otherwise use 0)
-   - Transaction Type (buy/sell)
-   - Asset Type (stock/mutual_fund/pms/aif/bond)
-   - Sector (if available or infer from name)
-   - Channel/Platform (if available or use filename)
-
-3. **INTELLIGENT INFERENCE**:
-   - **Stock Name**: If missing, infer from ticker
-   - **Sector**: Determine from company name (e.g., "Infosys" → "Technology")
-   - **Asset Type**: 
-     * Numeric codes (120760, 122639) → mutual_fund
-     * .NS or .BO suffix → stock
-     * Company names → stock
-     * "Fund" in name → mutual_fund
-   - **Channel**: Extract from file or use filename
-   - **Price**: If missing or 0, leave as 0 (will be fetched later)
-
-4. **DATA VALIDATION**:
-   - Ensure dates are valid
-   - Ensure quantities are positive numbers
-   - Ensure prices are non-negative (0 if missing)
-   - Normalize transaction types to "buy" or "sell"
-
-5. **HANDLE ALL FORMATS**:
-   - CSV: Parse columns intelligently
-   - PDF: Extract from tables or text
-   - Excel: Handle multiple sheets
-   - Text: Parse structured or unstructured data
-
-CRITICAL RULES:
-- Extract EVERY transaction found in the file
-- If data is missing and cannot be inferred, use reasonable defaults
-- If price is missing/zero, set price to 0 (system will fetch it later)
-- Return ONLY valid JSON array, no other text
-
-RETURN THIS EXACT JSON FORMAT:
+Schema (JSON array of objects):
 [
   {{
     "date": "YYYY-MM-DD",
-    "ticker": "stock ticker or scheme code",
-    "stock_name": "full name of security",
-    "scheme_name": "MF scheme name if applicable, else null",
-    "quantity": 100.0,
-    "price": 1500.50,
-    "transaction_type": "buy",
-    "asset_type": "stock",
-    "sector": "Technology",
-    "channel": "Zerodha"
+    "ticker": "exchange-ready ticker",
+    "stock_name": "full security name",
+    "scheme_name": null,
+    "quantity": 0.0,
+    "price": 0.0,
+    "amount": 0.0,
+    "transaction_type": "buy" | "sell",
+    "asset_type": "stock" | "mutual_fund" | "bond" | "pms" | "aif",
+    "sector": "Sector name or Unknown",
+    "channel": "Broker/platform or filename"
   }}
-]"""
+]
+
+Column rules:
+- `Scrip Symbol`, `Trading Symbol`, or similar → `"ticker"`. Normalize to a trading code (e.g., RELIANCE → RELIANCE.NS if needed). Never return ISINs or descriptive names in `"ticker"`.
+- `Scrip Name`, `Security Name`, `Scheme Name` → `"stock_name"`.
+- `Txn Date`, `Transaction Date`, `Trade Date` → `"date"` (normalize to YYYY-MM-DD).
+- `Quantity`, `Qty`, `Units` → `"quantity"`.
+- `Price`, `Rate`, `NAV` → `"price"` (use 0 if missing).
+- `Amount`, `Value`, `Consideration` → `"amount"` (use 0 if missing).
+- Transaction verb columns (`Transaction Type`, `Action`, `Side`) → `"transaction_type"` (map all buy-like terms to `"buy"`; sell/redemption/switch-out to `"sell"`).
+- Identify `"asset_type"` heuristically: numeric ticker → mutual_fund; `.NS`/`.BO` suffix or a typical stock symbol → stock; contains "bond"/"debenture"/"SGB" → bond; contains "PMS" → pms; contains "AIF" → aif.
+- `"channel"`: prefer columns named `Channel`, `Broker`, `Platform`. If none exist, use the filename `{filename}`.
+- `"sector"`: use any explicit sector column; otherwise default to `"Unknown"` unless you can infer from the company name.
+- `"scheme_name"`: only set for mutual funds; otherwise null.
+
+Validation:
+- Skip rows whose quantity and amount are both blank or zero.
+- Ensure quantity is positive. If a row shows negative quantity/amount for a sell, output a positive quantity and mark `"transaction_type": "sell"`.
+- If price is absent, set it to 0 (downstream logic will backfill).
+
+Output ONLY the JSON array—no commentary.
+
+File excerpt (comma-separated rows):
+{file_content[:6000]}
+"""
 
             # Call OpenAI
             response = self.openai_client.chat.completions.create(
@@ -307,6 +288,14 @@ CRITICAL RULES:
                     continue
                 
                 # Normalize and validate fields
+                transaction_type_raw = (
+                    trans.get('transaction_type')
+                    or trans.get('type')
+                    or trans.get('action')
+                    or trans.get('side')
+                )
+                amount_value = trans.get('amount', trans.get('value', 0))
+
                 validated_trans = {
                     'date': self._normalize_date(trans.get('date', '')),
                     'ticker': str(trans.get('ticker', '')).strip(),
@@ -314,7 +303,7 @@ CRITICAL RULES:
                     'scheme_name': trans.get('scheme_name'),
                     'quantity': self._safe_float(trans.get('quantity', 0)),
                     'price': self._safe_float(trans.get('price', 0)),  # 0 if missing - will be fetched
-                    'transaction_type': str(trans.get('transaction_type', 'buy')).lower(),
+                    'transaction_type': str(transaction_type_raw or 'buy').lower(),
                     'asset_type': self._detect_asset_type(trans),
                     'sector': trans.get('sector') or 'Unknown',
                     'channel': self._infer_channel_from_filename(
@@ -322,6 +311,11 @@ CRITICAL RULES:
                         trans.get('channel')
                     )
                 }
+
+                if validated_trans['price'] <= 0 and amount_value:
+                    amount_float = self._safe_float(amount_value)
+                    if amount_float > 0 and validated_trans['quantity'] > 0:
+                        validated_trans['price'] = amount_float / validated_trans['quantity']
                 
                 # Validate quantity is positive
                 if validated_trans['quantity'] <= 0:
@@ -409,7 +403,11 @@ CRITICAL RULES:
             
             # Remove common currency symbols and commas
             if isinstance(value, str):
-                value = value.replace('₹', '').replace('Rs', '').replace(',', '').strip()
+                cleaned = value.replace('₹', '').replace('Rs', '').replace(',', '').strip()
+                cleaned = re.sub(r'[^0-9\.\-]', '', cleaned)
+                if cleaned in {'', '.', '-', '-.'}:
+                    return 0.0
+                value = cleaned
             
             return float(value)
         except:
