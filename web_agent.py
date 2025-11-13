@@ -1327,6 +1327,10 @@ if 'needs_initial_refresh' not in st.session_state:
 if 'last_fetch_time' not in st.session_state:
     st.session_state.last_fetch_time = None
 
+# Ensure SharedDatabaseManager has latest methods after code updates
+if not hasattr(st.session_state.db, "get_channel_weekly_history") or not hasattr(st.session_state.db, "get_sector_weekly_history"):
+    st.session_state.db = SharedDatabaseManager()
+
 # Function to detect corporate actions (splits/bonus)
 def detect_corporate_actions(user_id, db):
     """
