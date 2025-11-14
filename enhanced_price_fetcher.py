@@ -2258,24 +2258,11 @@ If not found, return: NOT_FOUND"""
                     else:
                         #st.caption(f"      ❌ AI couldn't find historical price for {target_date}")
                         
-                        # Final fallback: Try to get current price for recent dates
-                        from datetime import datetime
-                        target_dt = datetime.strptime(target_date, '%Y-%m-%d')
-                        current_dt = datetime.now()
-                        
-                        # If target date is within last 6 months, try current price
-                        if (current_dt - target_dt).days < 180:
-                            #st.caption(f"      🔄 Target date is recent, trying current price as fallback...")
-                            current_price = self._get_price_from_ai(ticker, asset_type, asset_name=fund_name)
-                            if current_price:
-                                #st.caption(f"      ✅ Using current price as fallback: ₹{current_price:,.2f}")
-                                return [{
-                                    'asset_symbol': ticker,
-                                    'asset_type': asset_type,
-                                    'price': current_price,
-                                    'price_date': target_date,
-                                    'volume': None
-                                }]
+                        # CRITICAL: Do NOT use current price as fallback for historical prices
+                        # This would use today's date instead of the transaction date, which is incorrect
+                        # The target_date is the transaction date from the file - we must respect it
+                        # If historical price is not available, return empty list (let caller handle fallback)
+                        print(f"[HIST_PRICE] ⚠️ Historical price not available for {ticker} on {target_date_str} - NOT using current price (would be incorrect)")
                 except Exception as e:
                     # AI failed
                     pass
