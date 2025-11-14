@@ -387,7 +387,7 @@ class EnhancedPriceFetcher:
             
             for url in urls_to_try:
                 try:
-                    response = session.get(url, headers=headers, timeout=10)
+                    response = session.get(url, headers=headers)
                     if response.status_code == 200:
                         html_content = response.text
                         
@@ -764,7 +764,7 @@ class EnhancedPriceFetcher:
         session = self.http_session or self._get_http_session()
 
         try:
-            response = session.get(url, headers=headers, timeout=8)
+            response = session.get(url, headers=headers)
             if response.status_code != 200:
                 return []
 
@@ -855,7 +855,6 @@ class EnhancedPriceFetcher:
                 model="gpt-5-mini",
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=150,
-                timeout=20,
             )
             ai_text = response.choices[0].message.content.strip()
             suggestions: List[str] = []
@@ -1302,7 +1301,7 @@ class EnhancedPriceFetcher:
         if not raw_text:
             session = self.http_session or self._get_http_session()
             try:
-                response = session.get("https://portal.amfiindia.com/spages/NAVAll.txt", timeout=60)
+                response = session.get("https://portal.amfiindia.com/spages/NAVAll.txt")
                 response.raise_for_status()
                 raw_text = response.text
             except Exception:
@@ -1551,7 +1550,6 @@ class EnhancedPriceFetcher:
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=50,
                 # Note: GPT-5-mini only supports default temperature (1)
-                timeout=30
             )
             
             ai_response = response.choices[0].message.content.strip()
@@ -1597,7 +1595,7 @@ class EnhancedPriceFetcher:
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                     }
                     session = self.http_session or self._get_http_session()
-                    response = session.get(source['url'], headers=headers, timeout=10)
+                    response = session.get(source['url'], headers=headers)
                     
                     if response.status_code == 200:
                         soup = BeautifulSoup(response.text, 'html.parser')
@@ -2046,7 +2044,6 @@ If not found, return: NOT_FOUND"""
                 ],
                 max_completion_tokens=20,  # We only need a number
                 # Note: GPT-5-mini only supports default temperature (1)
-                timeout=10  # 10 second timeout
             )
             
             if response and response.choices:
@@ -2406,7 +2403,6 @@ If you cannot estimate, return: NOT_FOUND"""
                 ],
                 max_completion_tokens=50,
                 # Note: GPT-5 only supports default temperature (1)
-                timeout=30
             )
             
             if response and response.choices:

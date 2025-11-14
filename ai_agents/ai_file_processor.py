@@ -408,7 +408,6 @@ Return ALL transactions found on this page, even if the format is slightly diffe
                             }
                         ],
                         max_tokens=4000,
-                        timeout=90
                     )
                     
                     page_text = response.choices[0].message.content

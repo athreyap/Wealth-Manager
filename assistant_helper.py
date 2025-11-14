@@ -84,7 +84,6 @@ class AssistantRunner:
         user_message: str,
         function_map: Optional[Dict[str, Callable[..., Any]]] = None,
         extra_messages: Optional[List[Dict[str, str]]] = None,
-        timeout: int = 45,
     ) -> str:
         """Run assistant conversation and return final assistant text."""
 
@@ -110,8 +109,6 @@ class AssistantRunner:
             thread_id=thread.id,
             assistant_id=self.assistant_id,
         )
-
-        start = time.time()
 
         while True:
             if run.status == "requires_action":
@@ -146,13 +143,6 @@ class AssistantRunner:
 
             if run.status in {"completed", "failed", "cancelled"}:
                 break
-
-            if time.time() - start > timeout:
-                self._client.beta.threads.runs.cancel(
-                    thread_id=thread.id,
-                    run_id=run.id,
-                )
-                raise TimeoutError("Assistant run timed out.")
 
             time.sleep(1.5)
             run = self._client.beta.threads.runs.retrieve(

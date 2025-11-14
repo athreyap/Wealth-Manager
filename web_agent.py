@@ -106,7 +106,7 @@ def get_cached_amfi_schemes() -> Dict[str, str]:
 def get_cached_amfi_nav_text() -> Optional[str]:
     """Cache the raw AMFI NAV file text to avoid repeated downloads."""
     try:
-        response = requests.get(AMFI_NAV_URL, timeout=60)
+        response = requests.get(AMFI_NAV_URL)
         if response.status_code == 200 and response.text:
             return response.text
     except Exception:
@@ -584,7 +584,7 @@ def _build_document_payload_from_url(url: str) -> Tuple[Optional[Dict[str, Any]]
                 '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             )
         }
-        response = requests.get(cleaned_url, headers=headers, timeout=12)
+        response = requests.get(cleaned_url, headers=headers)
         response.raise_for_status()
     except Exception as exc:
         return None, f"Failed to fetch article: {exc}"
@@ -1759,7 +1759,6 @@ Return ALL transactions found on this page, even if the format is slightly diffe
                             }
                         ],
                         max_tokens=4000,
-                        timeout=90  # Increased timeout for larger images
                     )
                     
                     if not response or not response.choices:
@@ -3632,7 +3631,7 @@ def normalize_scheme_name(name: str) -> str:
 def get_amfi_dataset() -> Dict[str, Any]:
     """Download AMFI NAV dataset and build lookup tables."""
     try:
-        response = requests.get(AMFI_NAV_URL, timeout=60)
+        response = requests.get(AMFI_NAV_URL)
         response.raise_for_status()
 
         data = response.text.splitlines()
@@ -9042,7 +9041,7 @@ def ai_assistant_page():
                             # Try each URL until we get results
                             for url in moneycontrol_urls[:3]:  # Limit to 3 URLs to avoid too many requests
                                 try:
-                                    response = requests.get(url, headers=headers, timeout=10)
+                                    response = requests.get(url, headers=headers)
                                     if response.status_code == 200:
                                         soup = BeautifulSoup(response.content, 'html.parser')
                                         

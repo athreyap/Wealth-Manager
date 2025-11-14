@@ -7,7 +7,7 @@ Database Manager with Shared Architecture
 
 import streamlit as st
 from supabase import create_client, Client
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any, Tuple, Callable
 import hashlib
 from datetime import datetime, timedelta
 import pandas as pd
@@ -15,6 +15,8 @@ from dateutil import parser as dateutil_parser
 import re
 from collections import defaultdict
 from pms_aif_calculator import PMS_AIF_Calculator
+import time
+import httpx
 
 
 def _normalize_stockmaster_ticker(value: str) -> str:
@@ -93,6 +95,57 @@ class SharedDatabaseManager:
         except Exception as e:
             st.error(f"❌ Database connection error: {str(e)}")
             raise
+    
+    def _retry_db_operation(self, operation: Callable, max_retries: int = 3, base_delay: float = 1.0) -> Any:
+        """
+        Retry a database operation with exponential backoff.
+        
+        Args:
+            operation: A callable that performs the database operation
+            max_retries: Maximum number of retry attempts (default: 3)
+            base_delay: Base delay in seconds for exponential backoff (default: 1.0)
+        
+        Returns:
+            The result of the operation
+        
+        Raises:
+            The last exception if all retries fail
+        """
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                return operation()
+            except (httpx.ReadError, httpx.ConnectError, OSError) as e:
+                # These are transient network errors that should be retried
+                last_exception = e
+                error_code = getattr(e, 'errno', None)
+                error_msg = str(e)
+                
+                # Check if it's a retryable error
+                is_retryable = (
+                    isinstance(e, (httpx.ReadError, httpx.ConnectError)) or
+                    (isinstance(e, OSError) and error_code == 11) or  # EAGAIN: Resource temporarily unavailable
+                    'temporarily unavailable' in error_msg.lower() or
+                    'connection' in error_msg.lower()
+                )
+                
+                if not is_retryable or attempt == max_retries - 1:
+                    # Not retryable or last attempt, raise immediately
+                    raise
+                
+                # Calculate exponential backoff delay
+                delay = base_delay * (2 ** attempt)
+                print(f"[DB_RETRY] ⚠️ Database operation failed (attempt {attempt + 1}/{max_retries}): {error_msg}")
+                print(f"[DB_RETRY]    Retrying in {delay:.2f} seconds...")
+                time.sleep(delay)
+            except Exception as e:
+                # Non-retryable errors, raise immediately
+                raise
+        
+        # If we exhausted all retries, raise the last exception
+        if last_exception:
+            raise last_exception
     
     # ========================================================================
     # USER MANAGEMENT (Unchanged)
@@ -1182,9 +1235,13 @@ class SharedDatabaseManager:
             #st.caption("   🔍 Step 1: Getting user transactions...")
             
             # Get all transactions with their weeks
-            response = self.supabase.table('user_transactions').select(
-                'stock_id, iso_year, iso_week'
-            ).eq('user_id', user_id).execute()
+            response = self._retry_db_operation(
+                lambda: self.supabase.table('user_transactions').select(
+                    'stock_id, iso_year, iso_week'
+                ).eq('user_id', user_id).execute(),
+                max_retries=3,
+                base_delay=1.0
+            )
             
             if not response.data:
                 #st.caption("   ⚠️ No transactions found")
@@ -1230,13 +1287,22 @@ class SharedDatabaseManager:
             #st.caption("   🔍 Step 2: Getting stock details from stock_master...")
             stock_details = {}
             for stock_id in stock_ids:
-                stock_response = self.supabase.table('stock_master').select(
-                    'id, ticker, stock_name'
-                ).eq('id', stock_id).execute()
-                
-                if stock_response.data:
-                    stock = stock_response.data[0]
-                    stock_details[stock_id] = stock['ticker']
+                try:
+                    stock_response = self._retry_db_operation(
+                        lambda: self.supabase.table('stock_master').select(
+                            'id, ticker, stock_name'
+                        ).eq('id', stock_id).execute(),
+                        max_retries=3,
+                        base_delay=1.0
+                    )
+                    
+                    if stock_response.data:
+                        stock = stock_response.data[0]
+                        stock_details[stock_id] = stock['ticker']
+                except Exception as e:
+                    print(f"[DB_ERROR] ⚠️ Error getting stock details for stock_id {stock_id}: {e}")
+                    # Continue with other stocks even if one fails
+                    continue
             
             #st.caption(f"   ✅ Retrieved details for {len(stock_details)} stocks")
             
@@ -1246,9 +1312,13 @@ class SharedDatabaseManager:
             existing_prices = {}
             if stock_ids:
                 # Get all existing prices for user's stocks in one query
-                existing_response = self.supabase.table('historical_prices').select(
-                    'stock_id, iso_year, iso_week'
-                ).in_('stock_id', stock_ids).execute()
+                existing_response = self._retry_db_operation(
+                    lambda: self.supabase.table('historical_prices').select(
+                        'stock_id, iso_year, iso_week'
+                    ).in_('stock_id', stock_ids).execute(),
+                    max_retries=3,
+                    base_delay=1.0
+                )
                 
                 # Build a set of existing (stock_id, year, week) combinations
                 for row in existing_response.data:
@@ -1281,10 +1351,20 @@ class SharedDatabaseManager:
             
             return missing_weeks
             
+        except (httpx.ReadError, httpx.ConnectError, OSError) as e:
+            error_msg = str(e)
+            if 'temporarily unavailable' in error_msg.lower() or (isinstance(e, OSError) and getattr(e, 'errno', None) == 11):
+                st.warning(f"⚠️ Network error: Database connection temporarily unavailable. Please try again in a moment.")
+                print(f"[DB_ERROR] Network error getting missing weeks: {error_msg}")
+            else:
+                st.error(f"❌ Network error getting missing weeks: {error_msg}")
+            return []
         except Exception as e:
-            st.error(f"❌ Error getting missing weeks: {str(e)}")
+            error_msg = str(e)
+            st.error(f"❌ Error getting missing weeks: {error_msg}")
+            print(f"[DB_ERROR] Error getting missing weeks: {error_msg}")
             import traceback
-            st.code(traceback.format_exc())
+            print(f"[DB_ERROR] Traceback:\n{traceback.format_exc()}")
             return []
     
     def fetch_and_store_missing_weekly_prices(
