@@ -2885,19 +2885,26 @@ def _tx_dataframe_to_transactions(
         amount_present = raw_amount is not None and not pd.isna(raw_amount) and str(raw_amount).strip() != ''
         price_present = raw_price is not None and not pd.isna(raw_price) and str(raw_price).strip() != ''
 
-        quantity_value = _tx_safe_float(raw_quantity)
-        amount_value = _tx_safe_float(raw_amount)
-        price_value = _tx_safe_float(raw_price)
+        quantity_value = _tx_safe_float(raw_quantity) if quantity_present else 0.0
+        amount_value = _tx_safe_float(raw_amount) if amount_present else 0.0
+        price_value = _tx_safe_float(raw_price) if price_present else 0.0
+        
+        # Debug logging for first row
+        if idx == 0:
+            print(f"[FILE_PARSE] Row {idx} values:")
+            print(f"[FILE_PARSE]   quantity_present={quantity_present}, quantity_value={quantity_value}")
+            print(f"[FILE_PARSE]   amount_present={amount_present}, amount_value={amount_value}")
+            print(f"[FILE_PARSE]   price_present={price_present}, price_value={price_value}")
 
-        # Only check for swapped values if column names are ambiguous or missing
-        # If file has proper column names ('quantity' and 'amount'), trust them!
+        # CRITICAL: If we have properly mapped columns, NEVER swap or recalculate
+        # Trust the file values when columns are correctly mapped
         has_proper_columns = ('quantity' in prepared_df.columns and 'amount' in prepared_df.columns)
         
         should_swap = False
         
-        # Only do swap detection if column names are NOT clear
-        # If we have proper column names, trust the file values
-        if not has_proper_columns:
+        # Only do swap detection if column names are NOT clear AND we don't have proper mappings
+        # If we have proper column names (after mapping), trust the file values completely
+        if not has_proper_columns and quantity_present and amount_present:
             # Smart detection: Check if quantity and amount are swapped
             # Only swap when it's VERY CLEAR they're wrong - be conservative!
             if price_value > 0 and quantity_value > 0 and amount_value > 0:
@@ -2930,7 +2937,11 @@ def _tx_dataframe_to_transactions(
                     print(f"[FILE_PARSE] Row {idx}: Swapping quantity/amount (heuristic: qty={quantity_value} looks like amount, amt={amount_value} looks like quantity)")
         
         if should_swap:
+            print(f"[FILE_PARSE] Row {idx}: ⚠️ Swapping quantity and amount (qty={quantity_value} ↔ amt={amount_value})")
             quantity_value, amount_value = amount_value, quantity_value
+            # After swap, update presence flags
+            quantity_present = True  # After swap, we have quantity
+            amount_present = True    # After swap, we have amount
 
         transaction_type = _tx_normalize_transaction_type(
             row.get('transaction_type'),
@@ -2969,11 +2980,26 @@ def _tx_dataframe_to_transactions(
         if asset_type == 'mutual_fund' and not scheme_name:
             scheme_name = stock_name  # Use stock_name as fallback
 
+        # CRITICAL: Never recalculate quantity if it's present in the file
+        # Quantity is the source of truth - if it's in the file, use it as-is
+        original_quantity = quantity_value  # Store original before any calculations
+        
         # Only recalculate missing values, don't override existing values from file
-        # Calculate price if missing (only if price column was not present in file)
+        # Priority 1: Calculate price if missing (when we have quantity and amount)
         if not price_present and amount_present and quantity_present and amount_value > 0 and quantity_value > 0:
             price_value = amount_value / quantity_value
-            print(f"[FILE_PARSE] Row {idx}: Calculated price from amount/quantity: {price_value}")
+            print(f"[FILE_PARSE] Row {idx}: ✅ Calculated price from amount/quantity: {price_value} (qty={quantity_value}, amt={amount_value})")
+        
+        # Priority 2: Only calculate quantity if it's TRULY missing (not present in file)
+        # AND we have amount+price, AND quantity was never present
+        if not quantity_present and amount_present and price_present and amount_value > 0 and price_value > 0:
+            quantity_value = amount_value / price_value
+            print(f"[FILE_PARSE] Row {idx}: ✅ Calculated quantity from amount/price: {quantity_value} (amt={amount_value}, price={price_value})")
+        
+        # Safety check: If quantity was present, never override it
+        if quantity_present and quantity_value != original_quantity:
+            print(f"[FILE_PARSE] Row {idx}: ⚠️ WARNING: Quantity was present ({original_quantity}) but got changed to {quantity_value}. Restoring original.")
+            quantity_value = original_quantity
         
         # Calculate amount if missing or significantly wrong (but only if we have quantity and price)
         if quantity_value > 0 and price_value > 0:
