@@ -86,8 +86,21 @@ class AIFileProcessor(BaseAgent):
             file_content, file_type = self._extract_file_content(file_data, filename)
             
             if not file_content:
-                self.logger.error("Could not extract content from file")
-                return []
+                self.logger.error(f"Could not extract content from {filename} (file_type: {file_type})")
+                # If it's a PDF that failed, try Vision API directly as last resort
+                if filename.lower().endswith('.pdf') and file_type == 'error':
+                    self.logger.info("Attempting direct Vision API call for PDF...")
+                    file_data.seek(0)
+                    vision_text = self._extract_pdf_with_vision(file_data, filename)
+                    if vision_text and vision_text.strip():
+                        self.logger.info(f"Vision API successfully extracted {len(vision_text)} characters")
+                        file_content = vision_text
+                        file_type = 'pdf'
+                    else:
+                        self.logger.error("Vision API also failed - cannot process this PDF")
+                        return []
+                else:
+                    return []
             
             # Use AI to extract transactions
             transactions = self._ai_extract_transactions(file_content, filename, file_type)
@@ -209,6 +222,191 @@ class AIFileProcessor(BaseAgent):
         
         return ""
     
+    def _extract_pdf_with_vision(self, file_data: Any, filename: str) -> str:
+        """
+        Extract text from image-based PDF using GPT-4 Vision API.
+        This is the final fallback when OCR is not available.
+        """
+        self.logger.info(f"[VISION_API] Starting GPT-4 Vision extraction for {filename}...")
+        
+        if not self.openai_client:
+            self.logger.error("[VISION_API] ❌ OpenAI client not available for Vision API")
+            self.logger.error("[VISION_API] Check if OpenAI API key is configured in Streamlit secrets")
+            return ""
+        
+        self.logger.info("[VISION_API] ✅ OpenAI client is available, proceeding with Vision API...")
+        
+        try:
+            import base64
+            import io
+            
+            # Convert PDF to images using PyMuPDF (fitz) - doesn't require Poppler
+            from PIL import Image
+            try:
+                # Try standard import first
+                import fitz  # PyMuPDF
+                self.logger.info("[VISION_API] Using PyMuPDF to convert PDF to images (no system dependencies required)...")
+                use_fitz = True
+            except ImportError:
+                self.logger.warning("[VISION_API] PyMuPDF not available, trying pdf2image...")
+                use_fitz = False
+                # Fallback to pdf2image if PyMuPDF not available
+                try:
+                    from pdf2image import convert_from_bytes
+                    self.logger.info("[VISION_API] Using pdf2image to convert PDF to images (requires Poppler)...")
+                    use_fitz = False
+                except ImportError:
+                    self.logger.error("[VISION_API] ❌ Neither PyMuPDF nor pdf2image available for Vision API")
+                    self.logger.info("[VISION_API] Install PyMuPDF with: pip install pymupdf (recommended, no system dependencies)")
+                    self.logger.info("[VISION_API] Or install pdf2image with: pip install pdf2image (requires Poppler)")
+                    self.logger.info("[VISION_API] Note: After installing, restart Streamlit to load the module")
+                    return ""
+            
+            # Read PDF bytes
+            file_data.seek(0)
+            if hasattr(file_data, 'read'):
+                pdf_bytes = file_data.read()
+            elif hasattr(file_data, 'getvalue'):
+                pdf_bytes = file_data.getvalue()
+                if isinstance(pdf_bytes, str):
+                    pdf_bytes = pdf_bytes.encode('utf-8')
+            else:
+                pdf_bytes = file_data
+            
+            # Convert PDF pages to images
+            images = []
+            try:
+                if use_fitz:
+                    self.logger.info(f"[VISION_API] Opening PDF with PyMuPDF (filename: {filename})...")
+                    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                    total_pages = len(pdf_doc)
+                    self.logger.info(f"[VISION_API] ✅ PDF opened successfully with {total_pages} pages")
+                    for page_num in range(total_pages):
+                        try:
+                            page = pdf_doc[page_num]
+                            # Render page to image (300 DPI for good quality)
+                            mat = fitz.Matrix(300/72, 300/72)  # 300 DPI
+                            pix = page.get_pixmap(matrix=mat)
+                            # Convert to PIL Image
+                            img_data = pix.tobytes("png")
+                            img = Image.open(io.BytesIO(img_data))
+                            images.append(img)
+                            if (page_num + 1) % 3 == 0 or page_num == 0:  # Log every 3rd page or first page
+                                self.logger.info(f"[VISION_API] Converted page {page_num + 1}/{total_pages} to image")
+                        except Exception as page_error:
+                            self.logger.warning(f"[VISION_API] Failed to convert page {page_num + 1} to image: {str(page_error)}")
+                            continue
+                    pdf_doc.close()
+                    self.logger.info(f"[VISION_API] ✅ Successfully converted {len(images)}/{total_pages} pages to images")
+                else:
+                    # Use pdf2image
+                    self.logger.info("[VISION_API] Converting PDF to images using pdf2image...")
+                    images = convert_from_bytes(pdf_bytes, dpi=300, fmt='RGB')
+                    self.logger.info(f"[VISION_API] ✅ pdf2image converted {len(images)} pages")
+            except Exception as conv_error:
+                self.logger.error(f"[VISION_API] ❌ Failed to convert PDF to images: {str(conv_error)}")
+                import traceback
+                self.logger.error(f"[VISION_API] Conversion error traceback: {traceback.format_exc()}")
+                return ""
+            
+            if not images:
+                self.logger.error("[VISION_API] ❌ No images extracted from PDF for Vision API")
+                return ""
+            
+            self.logger.info(f"[VISION_API] ✅ Ready to process {len(images)} PDF pages with GPT-4 Vision")
+            
+            # Process images with GPT-4 Vision (process first 10 pages to avoid token limits)
+            max_pages = min(10, len(images))
+            all_text = []
+            
+            for page_num, image in enumerate(images[:max_pages], 1):
+                try:
+                    # Convert PIL Image to base64
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG")
+                    img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                    
+                    # Call GPT-4 Vision API
+                    self.logger.info(f"[VISION_API] Processing page {page_num}/{max_pages} with GPT-4 Vision API...")
+                    response = self.openai_client.chat.completions.create(
+                        model="gpt-4o",  # GPT-4 Vision model
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
+                            },
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": f"""Extract all financial transactions from this PDF page (Page {page_num} of {len(images)} from file: {filename}).
+
+Look for transaction data including:
+- Transaction dates (in any format - will be normalized)
+- Stock/scheme names and tickers/symbols
+- Quantities (shares/units)
+- Prices (per unit)
+- Amounts (total value)
+- Transaction types (buy, sell, purchase, redemption, etc.)
+- Asset types (stocks, mutual funds, PMS, AIF, bonds)
+- Channels/brokers/platforms
+
+Format the output as plain text with one transaction per line, like:
+Date: YYYY-MM-DD | Ticker: SYMBOL | Name: Stock Name | Quantity: 100 | Price: 50.00 | Amount: 5000 | Type: buy | Asset: stock | Channel: Broker Name
+
+Or if it's a table, extract all rows with transaction data.
+
+If this page doesn't contain any transaction data, return exactly: "No transactions on this page"
+
+Return ALL transactions found on this page, even if the format is slightly different."""
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/png;base64,{img_base64}"
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=4000,
+                        timeout=90
+                    )
+                    
+                    page_text = response.choices[0].message.content
+                    if page_text and page_text.strip() and "No transactions" not in page_text:
+                        all_text.append(f"--- Page {page_num} ---\n{page_text}\n")
+                        self.logger.info(f"[VISION_API] ✅ Page {page_num}: Extracted transaction data ({len(page_text)} chars)")
+                    else:
+                        self.logger.info(f"[VISION_API] Page {page_num}: No transaction data found")
+                        
+                except Exception as page_error:
+                    self.logger.error(f"[VISION_API] ❌ GPT-4 Vision failed for page {page_num}: {str(page_error)}")
+                    import traceback
+                    self.logger.error(f"[VISION_API] Page error traceback: {traceback.format_exc()}")
+                    continue
+            
+            if all_text:
+                combined_text = "\n".join(all_text)
+                self.logger.info(f"[VISION_API] ✅ Successfully extracted {len(combined_text)} characters from {len(all_text)} pages")
+                return combined_text
+            else:
+                self.logger.warning("[VISION_API] ⚠️ GPT-4 Vision completed but no transaction data extracted from any pages")
+                return ""
+                
+        except ImportError as import_error:
+            self.logger.error(f"Required library not available for Vision API: {import_error}")
+            self.logger.info("Install PyMuPDF with: pip install pymupdf (recommended, no system dependencies)")
+            import traceback
+            self.logger.debug(f"Import error traceback: {traceback.format_exc()}")
+            return ""
+        except Exception as e:
+            self.logger.error(f"GPT-4 Vision extraction failed: {str(e)}")
+            import traceback
+            self.logger.error(f"Vision API error traceback: {traceback.format_exc()}")
+            return ""
+    
     def _extract_file_content(self, file_data: Any, filename: str) -> tuple:
         """Extract content from any file type"""
         
@@ -228,7 +426,12 @@ class AIFileProcessor(BaseAgent):
             
             # PDF Files
             elif file_ext == 'pdf':
+                # Store filename for Vision API
+                pdf_filename = filename
+                
                 # Try pdfplumber first (better text extraction)
+                pdf_text = ""
+                
                 try:
                     import pdfplumber
                     import io
@@ -236,10 +439,8 @@ class AIFileProcessor(BaseAgent):
                     # Convert file_data to BytesIO for pdfplumber compatibility
                     file_data.seek(0)
                     if hasattr(file_data, 'read'):
-                        # If it's a file-like object, read bytes
                         pdf_bytes = file_data.read()
                     elif hasattr(file_data, 'getvalue'):
-                        # If it's a BytesIO/StringIO, get value
                         pdf_bytes = file_data.getvalue()
                         if isinstance(pdf_bytes, str):
                             pdf_bytes = pdf_bytes.encode('utf-8')
@@ -250,17 +451,13 @@ class AIFileProcessor(BaseAgent):
                     if isinstance(pdf_bytes, str):
                         pdf_bytes = pdf_bytes.encode('latin-1')
                     
-                    pdf_text = ""
                     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                         total_pages = len(pdf.pages)
-                        self.logger.info(f"PDF opened successfully with {total_pages} pages")
+                        self.logger.info(f"[PDF_EXTRACT] PDF opened with {total_pages} pages")
                         
                         for page_num, page in enumerate(pdf.pages, 1):
                             try:
-                                # Try standard text extraction first
                                 page_text = page.extract_text()
-                                
-                                # If that fails, try extracting from words
                                 if not page_text or not page_text.strip():
                                     words = page.extract_words()
                                     if words:
@@ -268,82 +465,99 @@ class AIFileProcessor(BaseAgent):
                                 
                                 if page_text and page_text.strip():
                                     pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
-                                    self.logger.info(f"Page {page_num}: Extracted {len(page_text)} characters")
-                                else:
-                                    # Log which pages have no text
-                                    words = page.extract_words()
-                                    chars = page.chars if hasattr(page, 'chars') else []
-                                    self.logger.warning(f"Page {page_num}: No text extracted (words: {len(words) if words else 0}, chars: {len(chars) if chars else 0})")
+                                    self.logger.info(f"[PDF_EXTRACT] Page {page_num}: Extracted {len(page_text)} chars")
                             except Exception as page_error:
-                                self.logger.warning(f"Page {page_num}: Error during extraction: {str(page_error)}")
+                                self.logger.warning(f"[PDF_EXTRACT] Page {page_num}: Error - {str(page_error)}")
                                 continue
                     
                     if pdf_text.strip():
-                        self.logger.info(f"Successfully extracted {len(pdf_text)} characters from PDF")
+                        self.logger.info(f"[PDF_EXTRACT] ✅ pdfplumber extracted {len(pdf_text)} characters")
                         return pdf_text, 'pdf'
                     else:
-                        self.logger.warning("PDF text extraction returned empty - attempting OCR...")
-                        # Try OCR as fallback - use the SAME implementation as AI Assistant
-                        # Both now use identical dual-fallback: Tesseract → EasyOCR
+                        self.logger.warning("[PDF_EXTRACT] pdfplumber returned empty text")
+                        
+                except ImportError as import_error:
+                    self.logger.warning(f"[PDF_EXTRACT] pdfplumber not installed: {import_error}")
+                except Exception as e:
+                    self.logger.warning(f"[PDF_EXTRACT] pdfplumber failed: {e}")
+                
+                # Try PyPDF2 as fallback
+                if not pdf_text.strip():
+                    try:
+                        import PyPDF2
+                        import io
+                        
+                        file_data.seek(0)
+                        if hasattr(file_data, 'read'):
+                            pdf_bytes = file_data.read()
+                        elif hasattr(file_data, 'getvalue'):
+                            pdf_bytes = file_data.getvalue()
+                            if isinstance(pdf_bytes, str):
+                                pdf_bytes = pdf_bytes.encode('utf-8')
+                        else:
+                            pdf_bytes = file_data
+                        
+                        if isinstance(pdf_bytes, str):
+                            pdf_bytes = pdf_bytes.encode('latin-1')
+                        
+                        pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+                        pdf_text = ""
+                        
+                        for page_num, page in enumerate(pdf_reader.pages, 1):
+                            try:
+                                page_text = page.extract_text()
+                                if page_text and page_text.strip():
+                                    pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+                            except Exception as page_error:
+                                continue
+                        
+                        if pdf_text.strip():
+                            self.logger.info(f"[PDF_EXTRACT] ✅ PyPDF2 extracted {len(pdf_text)} characters")
+                            return pdf_text, 'pdf'
+                        else:
+                            self.logger.warning("[PDF_EXTRACT] PyPDF2 also returned empty text")
+                    except Exception as e:
+                        self.logger.warning(f"[PDF_EXTRACT] PyPDF2 failed: {e}")
+                
+                # If both pdfplumber and PyPDF2 failed, try OCR
+                if not pdf_text.strip():
+                    self.logger.warning("[PDF_EXTRACT] Trying OCR as fallback...")
+                    try:
                         file_data.seek(0)
                         ocr_text = self._extract_pdf_with_ocr(file_data)
-                        
                         if ocr_text and ocr_text.strip():
-                            self.logger.info(f"OCR successfully extracted {len(ocr_text)} characters")
+                            self.logger.info(f"[PDF_EXTRACT] ✅ OCR extracted {len(ocr_text)} characters")
                             return ocr_text, 'pdf'
                         else:
-                            self.logger.warning("OCR also failed or not available - PDF may be image-based")
-                except ImportError as import_error:
-                    self.logger.error(f"pdfplumber not installed: {import_error}")
-                    self.logger.warning("Falling back to PyPDF2")
-                except Exception as e:
-                    self.logger.warning(f"pdfplumber extraction failed: {e}, trying PyPDF2")
-                    import traceback
-                    self.logger.debug(f"pdfplumber error traceback: {traceback.format_exc()}")
+                            self.logger.warning("[PDF_EXTRACT] OCR failed or not available")
+                    except Exception as ocr_error:
+                        self.logger.warning(f"[PDF_EXTRACT] OCR error: {ocr_error}")
                 
-                # Fallback to PyPDF2
-                try:
-                    import PyPDF2
-                    import io
-                    
-                    # Convert file_data to BytesIO for PyPDF2 compatibility
-                    file_data.seek(0)
-                    if hasattr(file_data, 'read'):
-                        pdf_bytes = file_data.read()
-                    elif hasattr(file_data, 'getvalue'):
-                        pdf_bytes = file_data.getvalue()
-                        if isinstance(pdf_bytes, str):
-                            pdf_bytes = pdf_bytes.encode('utf-8')
-                    else:
-                        pdf_bytes = file_data
-                    
-                    # Ensure we have bytes
-                    if isinstance(pdf_bytes, str):
-                        pdf_bytes = pdf_bytes.encode('latin-1')
-                    
-                    pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
-                    pdf_text = ""
-                    
-                    for page_num, page in enumerate(pdf_reader.pages, 1):
-                        try:
-                            page_text = page.extract_text()
-                            if page_text and page_text.strip():
-                                pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
-                        except Exception as page_error:
-                            self.logger.warning(f"PyPDF2: Page {page_num} extraction failed: {str(page_error)}")
-                            continue
-                    
-                    if pdf_text.strip():
-                        self.logger.info(f"PyPDF2 extracted {len(pdf_text)} characters from PDF")
-                        return pdf_text, 'pdf'
-                    else:
-                        self.logger.warning("Both pdfplumber and PyPDF2 returned empty - PDF is likely image-based/scanned")
-                        return "⚠️ PDF appears to be image-based (scanned) and has no extractable text. Please use OCR software to convert it to a text-selectable PDF, or provide the original source file (CSV/Excel).", 'pdf'
-                except Exception as e:
-                    self.logger.error(f"PyPDF2 extraction also failed: {e}")
-                    import traceback
-                    self.logger.debug(f"PyPDF2 error traceback: {traceback.format_exc()}")
+                # Final fallback: GPT-4 Vision API
+                if not pdf_text.strip():
+                    self.logger.warning("[PDF_EXTRACT] All text extraction methods failed - trying GPT-4 Vision API...")
+                    try:
+                        file_data.seek(0)
+                        self.logger.info(f"[PDF_EXTRACT] 🚀 Calling GPT-4 Vision API for {pdf_filename}...")
+                        vision_text = self._extract_pdf_with_vision(file_data, pdf_filename)
+                        if vision_text and vision_text.strip():
+                            self.logger.info(f"[PDF_EXTRACT] ✅ GPT-4 Vision extracted {len(vision_text)} characters")
+                            return vision_text, 'pdf'
+                        else:
+                            self.logger.error("[PDF_EXTRACT] ❌ GPT-4 Vision also returned empty text")
+                            return None, 'error'
+                    except Exception as vision_error:
+                        self.logger.error(f"[PDF_EXTRACT] ❌ GPT-4 Vision failed: {str(vision_error)}")
+                        import traceback
+                        self.logger.error(f"[PDF_EXTRACT] Vision error: {traceback.format_exc()}")
+                        return None, 'error'
+                
+                # If we get here, all methods failed
+                if not pdf_text.strip():
+                    self.logger.error("[PDF_EXTRACT] ❌ All PDF extraction methods failed")
                     return None, 'error'
+                else:
+                    return pdf_text, 'pdf'
             
             # Text Files
             elif file_ext in ['txt', 'text']:

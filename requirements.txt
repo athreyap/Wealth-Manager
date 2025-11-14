@@ -21,6 +21,8 @@ pytesseract  # Requires Tesseract OCR (system dependency - see installation belo
 Pillow
 # Pure Python OCR (works on Streamlit Cloud without system dependencies)
 easyocr
+# PDF to image conversion (doesn't require Poppler)
+pymupdf  # Also known as fitz - can convert PDF to images without Poppler
 
 # ============================================================================
 # SYSTEM DEPENDENCIES (Required for OCR functionality)

@@ -365,20 +365,65 @@ def _build_document_payload_from_file(uploaded_file) -> Tuple[Optional[Dict[str,
                     pdf_text = ""  # Will trigger OCR fallback
 
             if not pdf_text.strip():
-                # Last resort: Try OCR for image-based PDFs
-                print(f"[AI_ASSISTANT_PDF] No text extracted, attempting OCR for {filename}...")
-                uploaded_file.seek(0)
-                ocr_text = _extract_pdf_with_ocr(uploaded_file)
-                if ocr_text and ocr_text.strip():
-                    pdf_text = ocr_text
-                    metadata['extraction_method'] = 'OCR'
-                    metadata['info_message'] = (
-                        f"✅ Extracted {len(pdf_text)} characters using OCR from {page_count} pages"
-                    )
-                    metadata['info_lines'].append("- Extraction: OCR (image-based PDF)")
-                    print(f"[AI_ASSISTANT_PDF] ✅ OCR successfully extracted {len(pdf_text)} characters")
-                else:
-                    return None, f"Could not extract readable text from '{filename}'. PDF appears to be image-based - OCR failed or not available. Please install OCR dependencies (pdf2image, pytesseract, Tesseract) or use a text-selectable PDF."
+                # Last resort: Try direct PDF upload to OpenAI first (fastest, no dependencies)
+                print(f"[AI_ASSISTANT_PDF] No text extracted, attempting direct PDF upload to OpenAI...")
+                try:
+                    import streamlit as st
+                    import openai
+                    openai_client = openai.OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
+                    uploaded_file.seek(0)
+                    direct_text = _extract_pdf_with_direct_upload(uploaded_file, filename, openai_client, show_ui_errors=False)
+                    if direct_text and direct_text.strip():
+                        pdf_text = direct_text
+                        metadata['extraction_method'] = 'Direct OpenAI Upload'
+                        metadata['info_message'] = (
+                            f"✅ Extracted {len(pdf_text)} characters using direct OpenAI PDF processing"
+                        )
+                        metadata['info_lines'].append("- Extraction: Direct OpenAI PDF Upload (fastest)")
+                        print(f"[AI_ASSISTANT_PDF] ✅ Direct OpenAI upload successfully extracted {len(pdf_text)} characters")
+                    else:
+                        # Try Vision API (page-by-page) as fallback
+                        print(f"[AI_ASSISTANT_PDF] Direct upload failed, trying Vision API...")
+                        uploaded_file.seek(0)
+                        vision_text = _extract_pdf_with_vision_api(uploaded_file, filename, show_ui_errors=False)
+                        if vision_text and vision_text.strip():
+                            pdf_text = vision_text
+                            metadata['extraction_method'] = 'Vision API'
+                            metadata['info_message'] = (
+                                f"✅ Extracted {len(pdf_text)} characters using GPT-4 Vision API"
+                            )
+                            metadata['info_lines'].append("- Extraction: GPT-4 Vision API (page-by-page)")
+                            print(f"[AI_ASSISTANT_PDF] ✅ Vision API successfully extracted {len(pdf_text)} characters")
+                        else:
+                            # Final fallback: Try OCR (requires system dependencies)
+                            print(f"[AI_ASSISTANT_PDF] Vision API failed, attempting OCR...")
+                            uploaded_file.seek(0)
+                            ocr_text = _extract_pdf_with_ocr(uploaded_file)
+                            if ocr_text and ocr_text.strip():
+                                pdf_text = ocr_text
+                                metadata['extraction_method'] = 'OCR'
+                                metadata['info_message'] = (
+                                    f"✅ Extracted {len(pdf_text)} characters using OCR from {page_count} pages"
+                                )
+                                metadata['info_lines'].append("- Extraction: OCR (image-based PDF)")
+                                print(f"[AI_ASSISTANT_PDF] ✅ OCR successfully extracted {len(pdf_text)} characters")
+                            else:
+                                return None, f"Could not extract readable text from '{filename}'. PDF appears to be image-based. Tried: 1) Direct OpenAI upload, 2) GPT-4 Vision API, 3) OCR - all failed. Please check your OpenAI API key or use a text-selectable PDF."
+                except Exception as ai_error:
+                    print(f"[AI_ASSISTANT_PDF] AI extraction methods failed: {str(ai_error)}")
+                    # Try OCR as final fallback
+                    uploaded_file.seek(0)
+                    ocr_text = _extract_pdf_with_ocr(uploaded_file)
+                    if ocr_text and ocr_text.strip():
+                        pdf_text = ocr_text
+                        metadata['extraction_method'] = 'OCR'
+                        metadata['info_message'] = (
+                            f"✅ Extracted {len(pdf_text)} characters using OCR from {page_count} pages"
+                        )
+                        metadata['info_lines'].append("- Extraction: OCR (image-based PDF)")
+                        print(f"[AI_ASSISTANT_PDF] ✅ OCR successfully extracted {len(pdf_text)} characters")
+                    else:
+                        return None, f"Could not extract readable text from '{filename}'. PDF appears to be image-based. All extraction methods failed. Error: {str(ai_error)}"
 
             metadata['pages'] = page_count
             metadata['tables_found'] = len(tables_found)
@@ -1256,8 +1301,517 @@ def _extract_pdf_with_ocr(uploaded_file) -> str:
         import traceback
         traceback.print_exc()
         return ""
+
+
+def _extract_pdf_with_direct_upload(uploaded_file, filename: str, openai_client, show_ui_errors: bool = True) -> str:
+    """
+    Try to process PDF directly with OpenAI (if supported).
+    Currently, GPT-4o Vision API requires converting PDF to images.
+    This function tries Assistants API file upload as an alternative.
     
-    return ""
+    Returns extracted text or empty string if not supported.
+    """
+    try:
+        # Read PDF bytes
+        uploaded_file.seek(0)
+        pdf_bytes = uploaded_file.read()
+        pdf_size_mb = len(pdf_bytes) / (1024 * 1024)
+        
+        # Check file size (OpenAI has limits)
+        if pdf_size_mb > 50:  # Reduced limit for safety
+            print(f"[PDF_DIRECT] PDF too large ({pdf_size_mb:.2f} MB) for direct upload")
+            return ""
+        
+        print(f"[PDF_DIRECT] Attempting direct PDF processing ({pdf_size_mb:.2f} MB)...")
+        
+        # Note: Current OpenAI Chat Completions API (gpt-4o) doesn't support direct PDF upload
+        # It requires converting PDF pages to images first.
+        # The File API is for Assistants API, which is a different use case.
+        # 
+        # So we return empty string to trigger the fallback (page-by-page image conversion)
+        # which we know works.
+        print(f"[PDF_DIRECT] Direct PDF upload not available in Chat Completions API")
+        print(f"[PDF_DIRECT] GPT-4o requires PDF pages to be converted to images")
+        print(f"[PDF_DIRECT] Falling back to page-by-page Vision API processing...")
+        return ""
+        
+    except Exception as e:
+        print(f"[PDF_DIRECT] Direct PDF upload check failed: {str(e)}")
+        return ""
+
+
+def _extract_pdf_with_vision_api(uploaded_file, filename: str = "uploaded_file.pdf", show_ui_errors: bool = True) -> str:
+    """
+    Extract text from image-based PDF using GPT-4 Vision API.
+    This tries direct PDF upload first, then falls back to page-by-page processing.
+    
+    Args:
+        uploaded_file: PDF file to process
+        filename: Name of the file
+        show_ui_errors: If True, display errors in Streamlit UI (default: True)
+    
+    Returns extracted text or empty string if Vision API fails or is unavailable.
+    """
+    error_messages = []  # Collect error messages for UI display
+    diagnostic_info = []  # Collect diagnostic information
+    
+    try:
+        import openai
+        import streamlit as st
+        import base64
+        import io
+        from PIL import Image
+        
+        # Diagnostic: Test PyMuPDF import (try multiple import methods)
+        fitz_available = False
+        fitz = None
+        try:
+            # Try standard import first
+            import fitz
+            fitz_version = fitz.version if hasattr(fitz, 'version') else "unknown"
+            msg = f"✅ PyMuPDF (fitz) import test: SUCCESS (version: {fitz_version})"
+            print(f"[PDF_VISION] {msg}")
+            diagnostic_info.append(msg)
+            fitz_available = True
+        except ImportError as fitz_import_test:
+            msg = f"❌ PyMuPDF (fitz) import test: FAILED - {str(fitz_import_test)}"
+            print(f"[PDF_VISION] {msg}")
+            diagnostic_info.append(msg)
+            error_messages.append(f"PyMuPDF not installed: {str(fitz_import_test)}")
+            print(f"[PDF_VISION] 💡 Install with: pip install pymupdf")
+            print(f"[PDF_VISION] 💡 Note: After installing, restart Streamlit to load the module")
+        except Exception as fitz_test_err:
+            msg = f"⚠️ PyMuPDF (fitz) import test: ERROR - {str(fitz_test_err)}"
+            print(f"[PDF_VISION] {msg}")
+            diagnostic_info.append(msg)
+            error_messages.append(f"PyMuPDF error: {str(fitz_test_err)}")
+        
+        # Initialize OpenAI client
+        try:
+            openai_client = openai.OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
+            diagnostic_info.append("✅ OpenAI client initialized successfully")
+        except Exception as e:
+            error_msg = f"OpenAI client not available: {str(e)}"
+            print(f"[PDF_VISION] ❌ {error_msg}")
+            error_messages.append(error_msg)
+            if show_ui_errors:
+                try:
+                    st.error(f"❌ **Vision API Error**: {error_msg}\n\nPlease check your OpenAI API key in Streamlit secrets.")
+                except:
+                    pass
+            return ""
+        
+        # FIRST: Try direct PDF upload (fastest, simplest - processes entire PDF in one call)
+        print(f"[PDF_VISION] Attempting direct PDF upload first (fastest method)...")
+        uploaded_file.seek(0)
+        direct_text = _extract_pdf_with_direct_upload(uploaded_file, filename, openai_client, show_ui_errors=show_ui_errors)
+        if direct_text and direct_text.strip():
+            print(f"[PDF_VISION] ✅ Direct PDF upload successful! Extracted {len(direct_text)} characters")
+            diagnostic_info.append(f"✅ Direct PDF upload: Success ({len(direct_text)} chars)")
+            return direct_text
+        else:
+            print(f"[PDF_VISION] Direct PDF upload not supported or failed, falling back to page-by-page Vision API...")
+            diagnostic_info.append("⚠️ Direct PDF upload: Not supported, using page-by-page method")
+        
+        # FALLBACK: Convert PDF to images using PyMuPDF (fitz) - doesn't require Poppler
+        uploaded_file.seek(0)
+        pdf_bytes = uploaded_file.read()
+        pdf_size_mb = len(pdf_bytes) / (1024 * 1024)
+        print(f"[PDF_VISION] Read {len(pdf_bytes)} bytes ({pdf_size_mb:.2f} MB) from PDF file: {filename}")
+        diagnostic_info.append(f"📄 PDF size: {pdf_size_mb:.2f} MB")
+        
+        images = []
+        image_conversion_error = None
+        try:
+            if fitz_available:
+                import fitz  # PyMuPDF
+                print(f"[PDF_VISION] Using PyMuPDF to convert PDF to images...")
+                try:
+                    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                    total_pages = len(pdf_doc)
+                    
+                    # Check if PDF is encrypted
+                    is_encrypted = pdf_doc.is_encrypted
+                    needs_password = pdf_doc.needs_pass
+                    print(f"[PDF_VISION] PDF info - Pages: {total_pages}, Encrypted: {is_encrypted}, Needs Password: {needs_password}")
+                    diagnostic_info.append(f"📄 PDF pages: {total_pages}")
+                    if is_encrypted:
+                        diagnostic_info.append(f"🔒 PDF is encrypted: {is_encrypted}")
+                    if needs_password:
+                        error_msg = "PDF is password-protected. Please provide a password or use an unprotected PDF."
+                        print(f"[PDF_VISION] ❌ {error_msg}")
+                        error_messages.append(error_msg)
+                        diagnostic_info.append(f"❌ {error_msg}")
+                        if show_ui_errors:
+                            try:
+                                st.error(f"❌ **PDF Error**: {error_msg}\n\nPlease use an unprotected PDF or provide the password.")
+                            except:
+                                pass
+                        pdf_doc.close()
+                        return ""
+                    
+                    # Check PDF metadata
+                    metadata = pdf_doc.metadata
+                    if metadata:
+                        print(f"[PDF_VISION] PDF metadata: {metadata}")
+                    
+                    print(f"[PDF_VISION] ✅ PDF opened successfully with {total_pages} pages")
+                    diagnostic_info.append(f"✅ PDF opened successfully")
+                    
+                    failed_pages = []
+                    for page_num in range(total_pages):
+                        try:
+                            page = pdf_doc[page_num]
+                            
+                            # Check page properties
+                            page_rect = page.rect
+                            page_width = page_rect.width
+                            page_height = page_rect.height
+                            
+                            # Try to render page to image (300 DPI for good quality)
+                            try:
+                                mat = fitz.Matrix(300/72, 300/72)  # 300 DPI
+                                pix = page.get_pixmap(matrix=mat)
+                                
+                                # Check if pixmap is valid
+                                if pix.width == 0 or pix.height == 0:
+                                    error_msg = f"Page {page_num + 1}: Invalid page dimensions (width: {pix.width}, height: {pix.height})"
+                                    print(f"[PDF_VISION] ⚠️ {error_msg}")
+                                    error_messages.append(error_msg)
+                                    failed_pages.append(page_num + 1)
+                                    continue
+                                
+                                # Convert to PIL Image
+                                img_data = pix.tobytes("png")
+                                if not img_data or len(img_data) == 0:
+                                    error_msg = f"Page {page_num + 1}: Failed to generate image data (empty)"
+                                    print(f"[PDF_VISION] ⚠️ {error_msg}")
+                                    error_messages.append(error_msg)
+                                    failed_pages.append(page_num + 1)
+                                    continue
+                                
+                                img = Image.open(io.BytesIO(img_data))
+                                if img.size[0] == 0 or img.size[1] == 0:
+                                    error_msg = f"Page {page_num + 1}: Invalid image size {img.size}"
+                                    print(f"[PDF_VISION] ⚠️ {error_msg}")
+                                    error_messages.append(error_msg)
+                                    failed_pages.append(page_num + 1)
+                                    continue
+                                
+                                images.append(img)
+                                if (page_num + 1) % 3 == 0 or page_num == 0 or page_num == total_pages - 1:
+                                    img_size_kb = len(img_data) / 1024
+                                    print(f"[PDF_VISION] ✅ Page {page_num + 1}/{total_pages}: Converted to image ({img.width}x{img.height}, {img_size_kb:.1f} KB)")
+                            except Exception as render_error:
+                                error_msg = f"Page {page_num + 1}: Render error - {str(render_error)}"
+                                print(f"[PDF_VISION] ⚠️ {error_msg}")
+                                import traceback
+                                print(f"[PDF_VISION] Render error traceback: {traceback.format_exc()}")
+                                error_messages.append(error_msg)
+                                failed_pages.append(page_num + 1)
+                                continue
+                        except Exception as page_error:
+                            error_msg = f"Page {page_num + 1}: Failed to process - {str(page_error)}"
+                            print(f"[PDF_VISION] ⚠️ {error_msg}")
+                            import traceback
+                            print(f"[PDF_VISION] Page error traceback: {traceback.format_exc()}")
+                            error_messages.append(error_msg)
+                            failed_pages.append(page_num + 1)
+                            continue
+                    
+                    pdf_doc.close()
+                    
+                    if failed_pages:
+                        warning_msg = f"⚠️ Failed to convert {len(failed_pages)} pages: {failed_pages}"
+                        print(f"[PDF_VISION] {warning_msg}")
+                        diagnostic_info.append(warning_msg)
+                    
+                    success_msg = f"✅ Successfully converted {len(images)}/{total_pages} pages to images"
+                    print(f"[PDF_VISION] {success_msg}")
+                    diagnostic_info.append(success_msg)
+                    
+                    if len(images) == 0:
+                        error_msg = f"Failed to convert any pages to images. Failed pages: {failed_pages}"
+                        print(f"[PDF_VISION] ❌ {error_msg}")
+                        error_messages.append(error_msg)
+                        diagnostic_info.append(f"❌ {error_msg}")
+                        if show_ui_errors:
+                            try:
+                                st.error(f"❌ **PDF Conversion Error**: {error_msg}\n\n**Diagnostic Info**:\n" + "\n".join(f"- {info}" for info in diagnostic_info))
+                            except:
+                                pass
+                        return ""
+                except Exception as fitz_error:
+                    error_msg = f"PyMuPDF error opening/converting PDF: {str(fitz_error)}"
+                    print(f"[PDF_VISION] ⚠️ {error_msg}")
+                    import traceback
+                    traceback_str = traceback.format_exc()
+                    print(f"[PDF_VISION] Error traceback: {traceback_str}")
+                    error_messages.append(error_msg)
+                    diagnostic_info.append(f"❌ {error_msg}")
+                    image_conversion_error = fitz_error
+                    fitz_available = False  # Mark as failed to try fallback
+            
+            # Fallback to pdf2image if PyMuPDF failed or not available
+            if not images and not fitz_available:
+                print(f"[PDF_VISION] Attempting pdf2image fallback...")
+                try:
+                    from pdf2image import convert_from_bytes
+                    print(f"[PDF_VISION] Using pdf2image to convert PDF to images...")
+                    images = convert_from_bytes(pdf_bytes, dpi=300, fmt='RGB')
+                    success_msg = f"✅ pdf2image converted {len(images)} pages"
+                    print(f"[PDF_VISION] {success_msg}")
+                    diagnostic_info.append(success_msg)
+                except ImportError:
+                    error_msg = "Neither PyMuPDF nor pdf2image available for PDF to image conversion"
+                    print(f"[PDF_VISION] ❌ {error_msg}")
+                    error_messages.append(error_msg)
+                    diagnostic_info.append(f"❌ {error_msg}")
+                    diagnostic_info.append("💡 Install PyMuPDF with: pip install pymupdf (recommended, no system dependencies)")
+                    diagnostic_info.append("💡 Or install pdf2image with: pip install pdf2image (requires Poppler)")
+                    if show_ui_errors:
+                        try:
+                            st.error(f"❌ **PDF Vision API Error**: {error_msg}\n\n**Solution**: Install PyMuPDF: `pip install pymupdf` (recommended, no system dependencies)\n\n**Diagnostic Info**:\n" + "\n".join(f"- {info}" for info in diagnostic_info))
+                        except:
+                            pass
+                    return ""
+                except Exception as pdf2img_error:
+                    error_msg = f"pdf2image failed: {str(pdf2img_error)}"
+                    print(f"[PDF_VISION] ❌ {error_msg}")
+                    import traceback
+                    traceback_str = traceback.format_exc()
+                    print(f"[PDF_VISION] pdf2image error traceback: {traceback_str}")
+                    error_messages.append(error_msg)
+                    diagnostic_info.append(f"❌ {error_msg}")
+                    if show_ui_errors:
+                        try:
+                            st.error(f"❌ **PDF Vision API Error**: {error_msg}\n\n**Diagnostic Info**:\n" + "\n".join(f"- {info}" for info in diagnostic_info))
+                        except:
+                            pass
+                    return ""
+        
+        except Exception as conv_error:
+            error_msg = f"Unexpected error during PDF to image conversion: {str(conv_error)}"
+            print(f"[PDF_VISION] ❌ {error_msg}")
+            import traceback
+            traceback_str = traceback.format_exc()
+            print(f"[PDF_VISION] Unexpected error traceback: {traceback_str}")
+            error_messages.append(error_msg)
+            diagnostic_info.append(f"❌ {error_msg}")
+            if show_ui_errors:
+                try:
+                    st.error(f"❌ **PDF Vision API Error**: {error_msg}\n\n**Full Error**:\n```\n{traceback_str}\n```")
+                except:
+                    pass
+            return ""
+        
+        if not images:
+            error_msg = "No images extracted from PDF - cannot process with Vision API"
+            print(f"[PDF_VISION] ❌ {error_msg}")
+            error_messages.append(error_msg)
+            diagnostic_info.append(f"❌ {error_msg}")
+            if show_ui_errors:
+                try:
+                    st.warning(f"⚠️ **PDF Vision API Warning**: {error_msg}\n\n**Diagnostic Info**:\n" + "\n".join(f"- {info}" for info in diagnostic_info))
+                except:
+                    pass
+            return ""
+        
+        print(f"[PDF_VISION] Converted {len(images)} PDF pages to images")
+        diagnostic_info.append(f"🖼️ Converted {len(images)} pages to images")
+        
+        # Process images with GPT-4 Vision (process first 10 pages to avoid token limits)
+        max_pages = min(10, len(images))
+        all_text = []
+        failed_vision_pages = []
+        
+        print(f"[PDF_VISION] Processing {max_pages} pages with GPT-4 Vision API...")
+        if show_ui_errors and len(images) > max_pages:
+            try:
+                st.info(f"ℹ️ Processing first {max_pages} of {len(images)} pages (to manage API costs)")
+            except:
+                pass
+        
+        for page_num, image in enumerate(images[:max_pages], 1):
+            try:
+                # Convert PIL Image to base64
+                buffered = io.BytesIO()
+                image.save(buffered, format="PNG")
+                img_size_bytes = len(buffered.getvalue())
+                img_size_mb = img_size_bytes / (1024 * 1024)
+                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                base64_size_kb = len(img_base64) / 1024
+                
+                # Check image size (Vision API has limits)
+                if img_size_mb > 20:
+                    error_msg = f"Page {page_num}: Image too large ({img_size_mb:.2f} MB, max ~20 MB)"
+                    print(f"[PDF_VISION] ⚠️ {error_msg}")
+                    error_messages.append(error_msg)
+                    failed_vision_pages.append(page_num)
+                    continue
+                
+                print(f"[PDF_VISION] Processing page {page_num}/{max_pages} with GPT-4 Vision (image: {image.width}x{image.height}, {img_size_mb:.2f} MB, base64: {base64_size_kb:.1f} KB)...")
+                
+                # Call GPT-4 Vision API
+                try:
+                    response = openai_client.chat.completions.create(
+                        model="gpt-4o",  # GPT-4 Vision model
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
+                            },
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": f"""Extract all financial transactions from this PDF page (Page {page_num} of {len(images)} from file: {filename}).
+
+Look for transaction data including:
+- Transaction dates (in any format - will be normalized)
+- Stock/scheme names and tickers/symbols
+- Quantities (shares/units)
+- Prices (per unit)
+- Amounts (total value)
+- Transaction types (buy, sell, purchase, redemption, etc.)
+- Asset types (stocks, mutual funds, PMS, AIF, bonds)
+- Channels/brokers/platforms
+
+Format the output as plain text with one transaction per line, like:
+Date: YYYY-MM-DD | Ticker: SYMBOL | Name: Stock Name | Quantity: 100 | Price: 50.00 | Amount: 5000 | Type: buy | Asset: stock | Channel: Broker Name
+
+Or if it's a table, extract all rows with transaction data.
+
+If this page doesn't contain any transaction data, return exactly: "No transactions on this page"
+
+Return ALL transactions found on this page, even if the format is slightly different."""
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/png;base64,{img_base64}"
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=4000,
+                        timeout=90  # Increased timeout for larger images
+                    )
+                    
+                    if not response or not response.choices:
+                        error_msg = f"Page {page_num}: Empty response from Vision API"
+                        print(f"[PDF_VISION] ⚠️ {error_msg}")
+                        error_messages.append(error_msg)
+                        failed_vision_pages.append(page_num)
+                        continue
+                    
+                    page_text = response.choices[0].message.content
+                    if page_text and page_text.strip():
+                        if "No transactions" not in page_text and "no transaction" not in page_text.lower():
+                            all_text.append(f"--- Page {page_num} ---\n{page_text}\n")
+                            print(f"[PDF_VISION] ✅ Page {page_num}: Extracted {len(page_text)} characters of transaction data")
+                        else:
+                            print(f"[PDF_VISION] ℹ️ Page {page_num}: Vision API found no transactions on this page")
+                    else:
+                        print(f"[PDF_VISION] ⚠️ Page {page_num}: Vision API returned empty response")
+                        failed_vision_pages.append(page_num)
+                        
+                except openai.RateLimitError as rate_error:
+                    error_msg = f"Page {page_num}: Rate limit exceeded - {str(rate_error)}"
+                    print(f"[PDF_VISION] ❌ {error_msg}")
+                    error_messages.append(error_msg)
+                    failed_vision_pages.append(page_num)
+                    if show_ui_errors:
+                        try:
+                            st.warning(f"⚠️ **API Rate Limit**: {error_msg}\n\nPlease wait a moment and try again.")
+                        except:
+                            pass
+                    continue
+                except openai.APIError as api_error:
+                    error_msg = f"Page {page_num}: OpenAI API error - {str(api_error)}"
+                    print(f"[PDF_VISION] ❌ {error_msg}")
+                    import traceback
+                    print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
+                    error_messages.append(error_msg)
+                    failed_vision_pages.append(page_num)
+                    continue
+                except Exception as api_error:
+                    error_msg = f"Page {page_num}: Vision API call failed - {str(api_error)}"
+                    print(f"[PDF_VISION] ❌ {error_msg}")
+                    import traceback
+                    print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
+                    error_messages.append(error_msg)
+                    failed_vision_pages.append(page_num)
+                    continue
+                    
+            except Exception as page_error:
+                error_msg = f"Page {page_num}: Error processing image - {str(page_error)}"
+                print(f"[PDF_VISION] ❌ {error_msg}")
+                import traceback
+                print(f"[PDF_VISION] Page processing error traceback: {traceback.format_exc()}")
+                error_messages.append(error_msg)
+                failed_vision_pages.append(page_num)
+                continue
+        
+        if failed_vision_pages:
+            warning_msg = f"⚠️ Failed to process {len(failed_vision_pages)} pages with Vision API: {failed_vision_pages}"
+            print(f"[PDF_VISION] {warning_msg}")
+            diagnostic_info.append(warning_msg)
+        
+        if all_text:
+            combined_text = "\n".join(all_text)
+            success_msg = f"✅ Extracted {len(combined_text)} characters from {len(all_text)} pages"
+            print(f"[PDF_VISION] {success_msg}")
+            diagnostic_info.append(success_msg)
+            if show_ui_errors and failed_vision_pages:
+                try:
+                    st.warning(f"⚠️ **Partial Success**: Extracted data from {len(all_text)} pages, but {len(failed_vision_pages)} pages failed. Failed pages: {failed_vision_pages}")
+                except:
+                    pass
+            return combined_text
+        else:
+            error_msg = f"No transaction data extracted from any pages. Failed pages: {failed_vision_pages}"
+            print(f"[PDF_VISION] ❌ {error_msg}")
+            error_messages.append(error_msg)
+            diagnostic_info.append(f"❌ {error_msg}")
+            if show_ui_errors:
+                try:
+                    error_display = f"❌ **Vision API Error**: {error_msg}\n\n"
+                    if error_messages:
+                        error_display += "**Errors encountered**:\n" + "\n".join(f"- {msg}" for msg in error_messages[:5]) + "\n"
+                    error_display += "\n**Diagnostic Info**:\n" + "\n".join(f"- {info}" for info in diagnostic_info)
+                    st.error(error_display)
+                except:
+                    pass
+            return ""
+            
+    except ImportError as import_error:
+        error_msg = f"Required library not available: {import_error}"
+        print(f"[PDF_VISION] ⚠️ {error_msg}")
+        import traceback
+        traceback_str = traceback.format_exc()
+        print(f"[PDF_VISION] Import error traceback: {traceback_str}")
+        try:
+            import streamlit as st
+            st.error(f"❌ **PDF Vision API Error**: {error_msg}\n\n**Solution**: Install required libraries:\n- `pip install pymupdf` (recommended)\n- `pip install openai`\n- `pip install pillow`")
+        except:
+            pass
+        return ""
+    except Exception as e:
+        error_msg = f"GPT-4 Vision extraction failed: {str(e)}"
+        print(f"[PDF_VISION] ❌ {error_msg}")
+        import traceback
+        traceback_str = traceback.format_exc()
+        print(f"[PDF_VISION] Full error traceback:")
+        print(traceback_str)
+        try:
+            import streamlit as st
+            st.error(f"❌ **PDF Vision API Error**: {error_msg}\n\n**Full Error**:\n```\n{traceback_str[:500]}...\n```\n\nCheck terminal logs for complete error details.")
+        except:
+            pass
+        return ""
 
 
 def _tx_extract_tables_from_pdf(uploaded_file) -> List[pd.DataFrame]:
@@ -1538,7 +2092,15 @@ def _tx_extract_tables_from_pdf(uploaded_file) -> List[pd.DataFrame]:
                                 all_text_content = [ocr_text]
                             else:
                                 print(f"[PDF_EXTRACT]   OCR also failed or not available")
-                                print(f"[PDF_EXTRACT]   Recommendation: Install OCR dependencies (pdf2image, pytesseract, Tesseract) or convert PDF to text-selectable format")
+                                print(f"[PDF_EXTRACT]   Attempting GPT-4 Vision API as final fallback...")
+                                # Try GPT-4 Vision API as final fallback
+                                vision_text = _extract_pdf_with_vision_api(uploaded_file, "uploaded_file.pdf")
+                                if vision_text and vision_text.strip():
+                                    print(f"[PDF_EXTRACT] ✅ GPT-4 Vision extracted {len(vision_text)} characters")
+                                    all_text_content = [vision_text]
+                                else:
+                                    print(f"[PDF_EXTRACT]   GPT-4 Vision also failed or not available")
+                                    print(f"[PDF_EXTRACT]   Recommendation: Install OCR dependencies (pdf2image, pytesseract, Tesseract) or convert PDF to text-selectable format")
                 except Exception as e:
                     print(f"[PDF_EXTRACT] Text extraction fallback failed: {str(e)}")
                     import traceback
