@@ -42,13 +42,10 @@ class AIFileProcessor(BaseAgent):
             "price_handling"
         ]
         
-        # Initialize OpenAI client
-        try:
-            import streamlit as st
-            self.openai_client = openai.OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
-        except Exception as e:
-            self.logger.error(f"Failed to initialize OpenAI client: {e}")
-            self.openai_client = None
+        # Defer OpenAI client initialization until it's actually needed
+        # This avoids issues with st.secrets not being available during import
+        self.openai_client = None
+        self._openai_initialized = False
         
         # Initialize price fetcher for automatic price backfill
         if EnhancedPriceFetcher is not None:
@@ -62,6 +59,33 @@ class AIFileProcessor(BaseAgent):
 
         self._price_cache: Dict[Tuple[str, str, str], Optional[float]] = {}
         self.processed_transactions = []
+    
+    def _get_openai_client(self):
+        """Lazy initialization of OpenAI client - only when needed"""
+        if self._openai_initialized:
+            return self.openai_client
+        
+        self._openai_initialized = True
+        try:
+            import streamlit as st
+            # Check if secrets are available
+            if "api_keys" not in st.secrets:
+                raise KeyError("'api_keys' not found in st.secrets")
+            if "open_ai" not in st.secrets.get("api_keys", {}):
+                raise KeyError("'open_ai' not found in st.secrets['api_keys']")
+            self.openai_client = openai.OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
+            self.logger.info("OpenAI client initialized successfully")
+            return self.openai_client
+        except KeyError as e:
+            self.logger.error(f"Failed to initialize OpenAI client - missing secret key: {e}")
+            self.logger.error("   Please ensure st.secrets['api_keys']['open_ai'] is set in .streamlit/secrets.toml")
+            self.openai_client = None
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to initialize OpenAI client: {e}")
+            self.logger.error(f"   Error type: {type(e).__name__}")
+            self.openai_client = None
+            return None
     
     def process_file(self, file_data: Any, filename: str) -> List[Dict[str, Any]]:
         """
@@ -77,8 +101,11 @@ class AIFileProcessor(BaseAgent):
         
         self.update_status("analyzing")
         
+        # Initialize OpenAI client lazily (only when needed)
+        openai_client = self._get_openai_client()
+        
         try:
-            if not self.openai_client:
+            if not openai_client:
                 self.logger.error("OpenAI client not available")
                 return []
             
@@ -254,7 +281,8 @@ class AIFileProcessor(BaseAgent):
         """
         self.logger.info(f"[VISION_API] Starting GPT-4 Vision extraction for {filename}...")
         
-        if not self.openai_client:
+        openai_client = self._get_openai_client()
+        if not openai_client:
             self.logger.error("[VISION_API] ❌ OpenAI client not available for Vision API")
             self.logger.error("[VISION_API] Check if OpenAI API key is configured in Streamlit secrets")
             return ""
@@ -365,7 +393,10 @@ class AIFileProcessor(BaseAgent):
                     
                     # Call GPT-4 Vision API
                     self.logger.info(f"[VISION_API] Processing page {page_num}/{max_pages} with GPT-4 Vision API...")
-                    response = self.openai_client.chat.completions.create(
+                    openai_client = self._get_openai_client()
+                    if not openai_client:
+                        raise Exception("OpenAI client not available")
+                    response = openai_client.chat.completions.create(
                         model="gpt-4o",  # GPT-4 Vision model
                         messages=[
                             {
@@ -812,7 +843,11 @@ Output ONLY the JSON array—no commentary or explanation.
             print(f"[AI_EXTRACT] Content length: {content_length} chars, processing with AI...")
             
             # Call OpenAI without timeout - let it take as long as needed
-            response = self.openai_client.chat.completions.create(
+            openai_client = self._get_openai_client()
+            if not openai_client:
+                self.logger.error("OpenAI client not available")
+                return []
+            response = openai_client.chat.completions.create(
                 model="gpt-4o",  # GPT-4o for better file processing
                 messages=[
                     {

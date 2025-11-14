@@ -70,6 +70,7 @@ try:
 except ImportError as e:
     import logging
     logging.error(f"❌ AI Agents import failed: {e}")
+    logging.error(f"   Error type: {type(e).__name__}")
     # Try to show more helpful error in Streamlit
     if 'ai_agents' in str(e):
         logging.error(f"   Current directory: {os.getcwd()}")
@@ -77,9 +78,20 @@ except ImportError as e:
         logging.error(f"   ai_agents/__init__.py exists: {os.path.exists('ai_agents/__init__.py')}")
         logging.error(f"   Python path: {sys.path[:5]}")
         logging.error(f"   File directory: {os.path.dirname(os.path.abspath(__file__))}")
+    AI_AGENTS_AVAILABLE = False
+except KeyError as e:
+    import logging
+    logging.error(f"❌ AI Agents KeyError (likely missing secrets): {e}")
+    logging.error(f"   This usually means st.secrets['api_keys']['open_ai'] is missing")
+    AI_AGENTS_AVAILABLE = False
 except Exception as e:
     import logging
     logging.error(f"❌ AI Agents error: {e}")
+    logging.error(f"   Error type: {type(e).__name__}")
+    logging.error(f"   Error args: {e.args if hasattr(e, 'args') else 'N/A'}")
+    import traceback
+    logging.error(f"   Traceback: {traceback.format_exc()}")
+    AI_AGENTS_AVAILABLE = False
 
 # Performance optimization decorators
 @st.cache_data(ttl=300)  # Cache for 5 minutes
@@ -944,14 +956,15 @@ _TX_COLUMN_ALIASES: Dict[str, List[str]] = {
         'type of asset', 'class', 'instrument category'
     ],
     'channel': [
-        'channel', 'platform', 'broker', 'account', 'source', 'portfolio',
-        'through', 'partner', 'advisor', 'exchange'
+        'channel', 'Channel', 'platform', 'broker', 'account', 'source', 'portfolio',
+        'through', 'partner', 'advisor', 'exchange', 'Exchange', 'EXCHANGE'
     ],
     'sector': [
         'sector', 'industry', 'sector name', 'segment'
     ],
     'notes': [
-        'notes', 'remarks', 'comment', 'description', 'order status'
+        'notes', 'Notes', 'remarks', 'comment', 'description', 'order status', 'Order status', 'Order Status', 'ORDER STATUS',
+        'exchange order id', 'Exchange Order Id', 'Exchange Order ID', 'order id', 'Order Id'
     ],
     'folio': [
         'folio', 'folio no', 'folio number'
@@ -2186,20 +2199,20 @@ def _tx_extract_tables_from_pdf(uploaded_file) -> List[pd.DataFrame]:
 
 _TX_COLUMN_ALIASES: Dict[str, List[str]] = {
     'date': [
-        'date', 'transaction date', 'trade date', 'tx date', 'tran date',
+        'date', 'Date', 'transaction date', 'trade date', 'tx date', 'tran date',
         'order date', 'purchase date', 'nav date', 'valuation date',
-        'execution', 'execution date', 'execution date and time', 'deal date',
-        'order datetime', 'order date / time'
+        'execution', 'execution date', 'Execution date', 'execution date and time', 'Execution date and time',
+        'Execution Date and Time', 'deal date', 'order datetime', 'order date / time'
     ],
     'ticker': [
-        'ticker', 'symbol', 'scrip symbol', 'scrip', 'scrip sym',
+        'ticker', 'Ticker', 'symbol', 'Symbol', 'SYMBOL', 'scrip symbol', 'scrip', 'scrip sym',
         'trading symbol', 'script', 'code', 'bse code', 'nse code',
         'security code', 'instrument code', 'scheme code',
-        'isin code', 'isin', 'amfi code', 'amfi',
+        'isin code', 'isin', 'ISIN', 'amfi code', 'amfi',
         'investment code', 'contract symbol', 'security id'
     ],
     'stock_name': [
-        'stock name', 'scrip name', 'security name', 'instrument', 'name', 'scheme name',
+        'stock name', 'Stock name', 'Stock Name', 'STOCK NAME', 'scrip name', 'security name', 'instrument', 'name', 'scheme name',
         'company', 'fund name', 'description', 'asset name', 'holding',
         'product', 'contract description', 'company name'
     ],
@@ -2217,12 +2230,12 @@ _TX_COLUMN_ALIASES: Dict[str, List[str]] = {
         'deal price', 'executed price', 'execution price', 'order price', 'strike price'
     ],
     'amount': [
-        'amount', 'value', 'total value', 'consideration', 'txn amount',
+        'amount', 'Amount', 'value', 'Value', 'VALUE', 'total value', 'Total Value', 'consideration', 'txn amount',
         'gross amount', 'net amount', 'investment amount', 'order value',
         'total', 'investment', 'transaction value', 'contract value', 'turnover'
     ],
     'transaction_type': [
-        'transaction type', 'type', 'action', 'side', 'buy/sell',
+        'transaction type', 'Transaction Type', 'type', 'Type', 'TYPE', 'action', 'side', 'buy/sell',
         'txn type', 'order type', 'direction', 'nature', 'transaction',
         'mode', 'buy/sell/other', 'transaction mode', 'trade type'
     ],
@@ -2231,14 +2244,15 @@ _TX_COLUMN_ALIASES: Dict[str, List[str]] = {
         'type of asset', 'class', 'instrument category'
     ],
     'channel': [
-        'channel', 'platform', 'broker', 'account', 'source', 'portfolio',
-        'through', 'partner', 'advisor', 'exchange'
+        'channel', 'Channel', 'platform', 'broker', 'account', 'source', 'portfolio',
+        'through', 'partner', 'advisor', 'exchange', 'Exchange', 'EXCHANGE'
     ],
     'sector': [
         'sector', 'industry', 'sector name', 'segment'
     ],
     'notes': [
-        'notes', 'remarks', 'comment', 'description', 'order status'
+        'notes', 'Notes', 'remarks', 'comment', 'description', 'order status', 'Order status', 'Order Status', 'ORDER STATUS',
+        'exchange order id', 'Exchange Order Id', 'Exchange Order ID', 'order id', 'Order Id'
     ],
     'folio': [
         'folio', 'folio no', 'folio number'
@@ -2930,9 +2944,17 @@ def _tx_dataframe_to_transactions(
             print(f"[FILE_PARSE]   'price' in columns: {'price' in prepared_df.columns}, value: {raw_price}")
 
         # Check if values are actually present in the row (not just None)
+        # For amount and quantity, also check if the value is 0 (0 is a valid value, not missing)
         quantity_present = raw_quantity is not None and not pd.isna(raw_quantity) and str(raw_quantity).strip() != ''
         amount_present = raw_amount is not None and not pd.isna(raw_amount) and str(raw_amount).strip() != ''
         price_present = raw_price is not None and not pd.isna(raw_price) and str(raw_price).strip() != ''
+        
+        # Debug: Log presence flags for first row
+        if idx == 0:
+            print(f"[FILE_PARSE] Row {idx} presence flags:")
+            print(f"[FILE_PARSE]   quantity_present={quantity_present}, raw_quantity={raw_quantity}")
+            print(f"[FILE_PARSE]   amount_present={amount_present}, raw_amount={raw_amount}")
+            print(f"[FILE_PARSE]   price_present={price_present}, raw_price={raw_price}")
 
         quantity_value = _tx_safe_float(raw_quantity) if quantity_present else 0.0
         amount_value = _tx_safe_float(raw_amount) if amount_present else 0.0
@@ -3035,9 +3057,15 @@ def _tx_dataframe_to_transactions(
         
         # Only recalculate missing values, don't override existing values from file
         # Priority 1: Calculate price if missing (when we have quantity and amount)
-        if not price_present and amount_present and quantity_present and amount_value > 0 and quantity_value > 0:
-            price_value = amount_value / quantity_value
-            print(f"[FILE_PARSE] Row {idx}: ✅ Calculated price from amount/quantity: {price_value} (qty={quantity_value}, amt={amount_value})")
+        # CRITICAL: Always calculate price from amount/quantity if price is missing, even if it's 0
+        if not price_present and amount_present and quantity_present:
+            if amount_value > 0 and quantity_value > 0:
+                price_value = amount_value / quantity_value
+                print(f"[FILE_PARSE] Row {idx}: ✅ Calculated price from amount/quantity: {price_value} (qty={quantity_value}, amt={amount_value})")
+            else:
+                # Even if amount or quantity is 0, set price to 0 (don't leave it unset)
+                price_value = 0.0
+                print(f"[FILE_PARSE] Row {idx}: ⚠️ Cannot calculate price (qty={quantity_value}, amt={amount_value}), setting to 0")
         
         # Priority 2: Only calculate quantity if it's TRULY missing (not present in file)
         # AND we have amount+price, AND quantity was never present
