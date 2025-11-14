@@ -5720,70 +5720,89 @@ def _tx_prepare_preview_row(
             normalized['ticker'] = resolved_code
             normalized['sector'] = normalized['sector'] or 'Mutual Fund'
 
+    # CRITICAL: For file uploads, calculate price from amount/quantity FIRST
+    # This ensures we use the transaction price from the file, not current market prices
+    # NOTE: This logic ONLY applies during file uploads (when use_price_fetcher=True)
+    # Historical price fetching for 52 weeks/live prices works normally in other functions
+    quantity_val = normalized.get('quantity', 0)
+    amount_val = normalized.get('amount', 0)
+    price_val = normalized.get('price', 0)
+    
+    # Check if we have amount and quantity but price is missing/zero
+    # Only do this during file uploads (use_price_fetcher=True means we're processing a file)
+    price_was_calculated = False
+    if use_price_fetcher and price_val <= 0 and quantity_val > 0 and amount_val > 0:
+        # Calculate price from amount/quantity for file uploads
+        calculated_price = amount_val / quantity_val
+        normalized['price'] = round(calculated_price, 4)
+        price_was_calculated = True
+        print(f"[PREVIEW] ✅ Calculated price from amount/quantity: {calculated_price} (qty={quantity_val}, amt={amount_val})")
+    
+    # Only fetch historical price if:
+    # 1. We're in file upload mode (use_price_fetcher=True) AND price wasn't calculated, OR
+    # 2. We're NOT in file upload mode (use_price_fetcher=False) - allow normal fetching
     if normalized['ticker'] and normalized['date'] and use_price_fetcher:
-        key = (
-            normalized['ticker'],
-            normalized['date'],
-            asset_type_lower or 'stock',
-        )
-        fetched_price = _preview_price_cache.get(key)
-        if fetched_price is None and (normalized['price'] <= 0 or normalized['amount'] <= 0):
-            fetcher = price_fetcher or _preview_get_price_fetcher()
-            if fetcher:
-                try:
-                    fetched_price = fetcher.get_historical_price(
-                        normalized['ticker'],
-                        asset_type_lower or 'stock',
-                        normalized['date'],
-                        fund_name=normalized['stock_name'],
-                    )
-                except Exception:
-                    fetched_price = None
-                # CRITICAL: Do NOT fall back to current price if historical price is not available
-                # This would use today's date instead of the transaction date, which is incorrect
-                # If historical price is not available, try these fallbacks in order:
-                # 1. Original price from file
-                # 2. Calculate from quantity and amount (if both available)
-                if not fetched_price:
-                    # Fallback 1: Use original price from transaction if it exists
-                    original_price = _tx_safe_float(tx.get('price') or tx.get('__original_price'))
-                    if original_price and original_price > 0:
-                        fetched_price = original_price
-                        print(f"[PREVIEW] Using original price from file: {fetched_price} (historical price not available for date {normalized['date']})")
-                    else:
-                        # Fallback 2: Calculate price from quantity and amount if both are available
-                        quantity_val = _tx_safe_float(normalized.get('quantity') or tx.get('quantity') or tx.get('__original_quantity'))
-                        amount_val = _tx_safe_float(normalized.get('amount') or tx.get('amount') or tx.get('__original_amount'))
-                        if quantity_val > 0 and amount_val > 0:
-                            calculated_price = amount_val / quantity_val
-                            fetched_price = calculated_price
-                            print(f"[PREVIEW] Calculated price from quantity/amount: {calculated_price} (qty={quantity_val}, amt={amount_val}) - historical price not available for date {normalized['date']}")
+        # During file uploads: only fetch if we couldn't calculate
+        if price_was_calculated:
+            print(f"[PREVIEW] ✅ Using calculated price from file, skipping historical fetch")
+        else:
+            # Fetch historical price (for file uploads when calculation not possible)
+            key = (
+                normalized['ticker'],
+                normalized['date'],
+                asset_type_lower or 'stock',
+            )
+            fetched_price = _preview_price_cache.get(key)
+            if fetched_price is None and normalized['price'] <= 0:
+                fetcher = price_fetcher or _preview_get_price_fetcher()
+                if fetcher:
+                    try:
+                        fetched_price = fetcher.get_historical_price(
+                            normalized['ticker'],
+                            asset_type_lower or 'stock',
+                            normalized['date'],
+                            fund_name=normalized['stock_name'],
+                        )
+                    except Exception:
+                        fetched_price = None
+                    # CRITICAL: Do NOT fall back to current price if historical price is not available
+                    # This would use today's date instead of the transaction date, which is incorrect
+                    # If historical price is not available, try these fallbacks in order:
+                    # 1. Original price from file
+                    # 2. Calculate from quantity and amount (if both available) - but we already did this above
+                    if not fetched_price:
+                        # Fallback: Use original price from transaction if it exists
+                        original_price = _tx_safe_float(tx.get('price') or tx.get('__original_price'))
+                        if original_price and original_price > 0:
+                            fetched_price = original_price
+                            print(f"[PREVIEW] Using original price from file: {fetched_price} (historical price not available for date {normalized['date']})")
                         else:
                             print(f"[PREVIEW] ⚠️ Historical price not available for {normalized['ticker']} on {normalized['date']}, and cannot calculate from quantity/amount. Leaving as 0.")
                             fetched_price = None
-            _preview_price_cache[key] = fetched_price
+                _preview_price_cache[key] = fetched_price
 
-        if fetched_price and fetched_price > 0:
-            normalized['price'] = round(float(fetched_price), 4)
-        
-        # After price is set, calculate missing values:
-        # 1. Calculate amount if missing (when we have quantity and price)
-        # 2. Calculate quantity if missing (when we have amount and price)
-        # But only if the values weren't originally present in the file
-        quantity_was_present = tx.get('__original_quantity_present', False) or (tx.get('quantity') and _tx_safe_float(tx.get('quantity')) > 0)
-        amount_was_present = tx.get('__original_amount_present', False) or (tx.get('amount') and _tx_safe_float(tx.get('amount')) > 0)
-        
-        if normalized['price'] > 0:
-            if normalized['quantity'] > 0 and normalized['amount'] <= 0 and not amount_was_present:
-                # Calculate amount from quantity and price
-                calculated_amount = normalized['quantity'] * normalized['price']
-                normalized['amount'] = round(calculated_amount, 4)
-                print(f"[PREVIEW] Calculated amount from quantity/price: {calculated_amount} (qty={normalized['quantity']}, price={normalized['price']})")
-            elif normalized['amount'] > 0 and normalized['quantity'] <= 0 and not quantity_was_present:
-                # Calculate quantity from amount and price
-                calculated_quantity = normalized['amount'] / normalized['price']
-                normalized['quantity'] = round(calculated_quantity, 4)
-                print(f"[PREVIEW] Calculated quantity from amount/price: {calculated_quantity} (amt={normalized['amount']}, price={normalized['price']})")
+                if fetched_price and fetched_price > 0:
+                    normalized['price'] = round(float(fetched_price), 4)
+                    print(f"[PREVIEW] ✅ Fetched historical price: {normalized['price']} for {normalized['ticker']} on {normalized['date']}")
+    
+    # After price is set, calculate missing values:
+    # 1. Calculate amount if missing (when we have quantity and price)
+    # 2. Calculate quantity if missing (when we have amount and price)
+    # But only if the values weren't originally present in the file
+    quantity_was_present = tx.get('__original_quantity_present', False) or (tx.get('quantity') and _tx_safe_float(tx.get('quantity')) > 0)
+    amount_was_present = tx.get('__original_amount_present', False) or (tx.get('amount') and _tx_safe_float(tx.get('amount')) > 0)
+    
+    if normalized['price'] > 0:
+        if normalized['quantity'] > 0 and normalized['amount'] <= 0 and not amount_was_present:
+            # Calculate amount from quantity and price
+            calculated_amount = normalized['quantity'] * normalized['price']
+            normalized['amount'] = round(calculated_amount, 4)
+            print(f"[PREVIEW] Calculated amount from quantity/price: {calculated_amount} (qty={normalized['quantity']}, price={normalized['price']})")
+        elif normalized['amount'] > 0 and normalized['quantity'] <= 0 and not quantity_was_present:
+            # Calculate quantity from amount and price
+            calculated_quantity = normalized['amount'] / normalized['price']
+            normalized['quantity'] = round(calculated_quantity, 4)
+            print(f"[PREVIEW] Calculated quantity from amount/price: {calculated_quantity} (amt={normalized['amount']}, price={normalized['price']})")
 
     # Get original values to check if they were present
     # Check metadata first (from Python extraction), then fall back to transaction dict
