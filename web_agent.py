@@ -2974,6 +2974,26 @@ def _tx_build_db_transaction(
     if quantity_value == 0:
         quantity_value = _tx_safe_float(tx.get('units'))
     amount_value = _tx_safe_float(tx.get('amount'))
+    price_value = _tx_safe_float(tx.get('price'))
+
+    # Calculate missing values from available data
+    # Priority: Calculate quantity from amount/price if quantity is missing/zero
+    if quantity_value <= 0:
+        if amount_value > 0 and price_value > 0:
+            quantity_value = amount_value / price_value
+            print(f"[TX_BUILD] Calculated quantity from amount/price: {quantity_value}")
+    
+    # Calculate price from amount/quantity if price is missing/zero
+    if price_value <= 0:
+        if amount_value > 0 and quantity_value > 0:
+            price_value = amount_value / quantity_value
+            print(f"[TX_BUILD] Calculated price from amount/quantity: {price_value}")
+    
+    # Calculate amount from quantity/price if amount is missing/zero
+    if amount_value <= 0:
+        if quantity_value > 0 and price_value > 0:
+            amount_value = quantity_value * price_value
+            print(f"[TX_BUILD] Calculated amount from quantity/price: {amount_value}")
 
     transaction_type = _tx_normalize_transaction_type(
         tx.get('transaction_type'),
@@ -2986,10 +3006,6 @@ def _tx_build_db_transaction(
 
     if quantity_value <= 0:
         return None
-
-    price_value = _tx_safe_float(tx.get('price'))
-    if price_value <= 0 and amount_value > 0:
-        price_value = amount_value / quantity_value
     if quantity_value > 0 and price_value > 0:
         computed_amount = quantity_value * price_value
         if amount_value <= 0 or abs(amount_value - computed_amount) > 0.01 * max(1.0, computed_amount):
@@ -5421,11 +5437,27 @@ def _tx_prepare_preview_row(
         if fetched_price and fetched_price > 0:
             normalized['price'] = round(float(fetched_price), 4)
 
-    if normalized['amount'] <= 0 and normalized['quantity'] > 0 and normalized['price'] > 0:
-        normalized['amount'] = round(normalized['quantity'] * normalized['price'], 4)
-    elif normalized['price'] <= 0 and normalized['quantity'] > 0 and normalized['amount'] > 0:
-        normalized['price'] = round(normalized['amount'] / normalized['quantity'], 4)
-    elif normalized['quantity'] > 0 and normalized['price'] > 0:
+    # Calculate missing values from available data
+    # Priority: Calculate quantity from amount/price if quantity is missing/zero
+    if normalized['quantity'] <= 0:
+        if normalized['amount'] > 0 and normalized['price'] > 0:
+            normalized['quantity'] = round(normalized['amount'] / normalized['price'], 4)
+            print(f"[TX_NORMALIZE] Calculated quantity from amount/price: {normalized['quantity']}")
+    
+    # Calculate price from amount/quantity if price is missing/zero
+    if normalized['price'] <= 0:
+        if normalized['amount'] > 0 and normalized['quantity'] > 0:
+            normalized['price'] = round(normalized['amount'] / normalized['quantity'], 4)
+            print(f"[TX_NORMALIZE] Calculated price from amount/quantity: {normalized['price']}")
+    
+    # Calculate amount from quantity/price if amount is missing/zero
+    if normalized['amount'] <= 0:
+        if normalized['quantity'] > 0 and normalized['price'] > 0:
+            normalized['amount'] = round(normalized['quantity'] * normalized['price'], 4)
+            print(f"[TX_NORMALIZE] Calculated amount from quantity/price: {normalized['amount']}")
+    
+    # Validate calculated values
+    if normalized['quantity'] > 0 and normalized['price'] > 0:
         computed_amount = round(normalized['quantity'] * normalized['price'], 4)
         if normalized['amount'] <= 0 or abs(normalized['amount'] - computed_amount) > 0.01 * max(1.0, computed_amount):
             normalized['amount'] = computed_amount

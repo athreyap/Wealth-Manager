@@ -910,16 +910,33 @@ CRITICAL RULES:
                     )
                 }
 
-                if validated_trans['price'] <= 0 and amount_value:
+                # Calculate missing values from available data
+                # Priority: Calculate quantity from amount/price if quantity is missing/zero
+                if validated_trans['quantity'] <= 0:
+                    amount_float = self._safe_float(amount_value)
+                    price_float = self._safe_float(trans.get('price', 0))
+                    if amount_float > 0 and price_float > 0:
+                        validated_trans['quantity'] = amount_float / price_float
+                        print(f"[VALIDATE] Calculated quantity from amount/price: {validated_trans['quantity']}")
+                
+                # Calculate price from amount/quantity if price is missing/zero
+                if validated_trans['price'] <= 0:
                     amount_float = self._safe_float(amount_value)
                     if amount_float > 0 and validated_trans['quantity'] > 0:
                         validated_trans['price'] = amount_float / validated_trans['quantity']
+                        print(f"[VALIDATE] Calculated price from amount/quantity: {validated_trans['price']}")
                 
-                # Validate quantity is positive
+                # Calculate amount from quantity/price if amount is missing/zero
+                if validated_trans.get('amount', 0) <= 0:
+                    if validated_trans['quantity'] > 0 and validated_trans['price'] > 0:
+                        validated_trans['amount'] = validated_trans['quantity'] * validated_trans['price']
+                        print(f"[VALIDATE] Calculated amount from quantity/price: {validated_trans['amount']}")
+                
+                # Validate quantity is positive (after calculations)
                 if validated_trans['quantity'] <= 0:
                     skipped_count += 1
                     if skipped_count <= 3:  # Log first 3 skipped transactions
-                        print(f"[VALIDATE] ⚠️ Skipping transaction (quantity <= 0): {validated_trans}")
+                        print(f"[VALIDATE] ⚠️ Skipping transaction (quantity <= 0 after calculations): {validated_trans}")
                     continue
                 
                 # Ensure price is non-negative
