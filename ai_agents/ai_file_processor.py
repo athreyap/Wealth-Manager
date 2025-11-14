@@ -1003,11 +1003,14 @@ CRITICAL RULES:
                 # Calculate missing values from available data
                 # Only calculate if value is truly missing (None/empty), not if it's zero
                 # Priority 1: Calculate price from amount/quantity if price is missing
+                price_was_calculated = False
                 if not price_present and amount_present and quantity_present:
                     amount_float = self._safe_float(original_amount or 0)
                     if amount_float > 0 and validated_trans['quantity'] > 0:
-                        validated_trans['price'] = amount_float / validated_trans['quantity']
-                        print(f"[VALIDATE] ✅ Calculated price from amount/quantity: {validated_trans['price']}")
+                        calculated_price = amount_float / validated_trans['quantity']
+                        validated_trans['price'] = calculated_price
+                        price_was_calculated = True
+                        print(f"[VALIDATE] ✅ Calculated price from amount/quantity: {calculated_price} (qty={validated_trans['quantity']}, amt={amount_float})")
                 
                 # Priority 2: Only calculate quantity if it's TRULY missing (not present in AI response)
                 if not quantity_present and amount_present and price_present:
@@ -1039,10 +1042,16 @@ CRITICAL RULES:
                 if validated_trans['price'] < 0:
                     validated_trans['price'] = 0
 
-                # Backfill missing price using historical data
-                fetched_price = self._fetch_price_for_transaction(validated_trans)
-                if fetched_price and fetched_price > 0:
-                    validated_trans['price'] = round(float(fetched_price), 4)
+                # CRITICAL: Only fetch historical price if price was NOT calculated from amount/quantity
+                # If we calculated price from amount/quantity, that's the correct transaction price - don't overwrite it!
+                if not price_was_calculated and (validated_trans['price'] <= 0 or not price_present):
+                    # Only fetch if price is still missing/zero and we didn't calculate it
+                    fetched_price = self._fetch_price_for_transaction(validated_trans)
+                    if fetched_price and fetched_price > 0:
+                        validated_trans['price'] = round(float(fetched_price), 4)
+                        print(f"[VALIDATE] ✅ Fetched historical price: {validated_trans['price']} for {validated_trans['ticker']} on {validated_trans['date']}")
+                elif price_was_calculated:
+                    print(f"[VALIDATE] ✅ Using calculated price from amount/quantity: {validated_trans['price']} (NOT fetching historical price)")
                 
                 validated.append(validated_trans)
                 
