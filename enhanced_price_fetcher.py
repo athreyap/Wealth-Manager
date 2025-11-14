@@ -5,6 +5,7 @@ yfinance → mftool → AI (for stocks and mutual funds)
 
 import csv
 import difflib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -41,8 +42,6 @@ class EnhancedPriceFetcher:
         }
         self.http_session = self._get_http_session()
         self._mftool = self._get_shared_mftool()
-        self.http_session = self._get_http_session()
-        self._mftool = self._get_shared_mftool()
         
         # Initialize OpenAI for AI fallback
         self.ai_available = False
@@ -72,7 +71,9 @@ class EnhancedPriceFetcher:
         text = text.replace('\u00a0', ' ')
         text = ''.join(text.split())  # remove whitespace
         text = text.lstrip('$')
-        text = re.sub(r'(?:[-_.]?)(T0|T1|BL)(?=\.|$)', '', text, flags=re.IGNORECASE)
+        # FIXED: Only remove trade tags when they're separated by dash/underscore/dot
+        # This prevents "VBL" from becoming "V" - only "V-BL" or "V_BL" should become "V"
+        text = re.sub(r'[-_.](T0|T1|BL)(?=\.|$)', '', text, flags=re.IGNORECASE)
         text = text.replace('-', '')
         return text.upper()
 
@@ -147,137 +148,461 @@ class EnhancedPriceFetcher:
         # Return tuple (price, source) for compatibility
         return price, source
     
+    def _update_single_holding_price(self, holding: Dict, db_manager) -> Tuple[bool, Optional[str], Optional[Dict]]:
+        """
+        Update price for a single holding. Returns (success, error_message, price_data).
+        price_data contains 'price' and optionally 'resolved_ticker' for batch updates.
+        """
+        try:
+            original_ticker = holding.get('ticker')
+            ticker = original_ticker
+            asset_type = holding.get('asset_type', 'stock')
+            stock_id = holding.get('stock_id')
+            
+            if not ticker or not stock_id:
+                return False, f"Missing ticker or stock_id: ticker={ticker}, stock_id={stock_id}"
+
+            cleaned_ticker = self._normalize_base_ticker(ticker)
+            if cleaned_ticker and cleaned_ticker != ticker:
+                base_symbol = self._base_symbol(original_ticker)
+                try:
+                    db_manager.supabase.table('stock_master').update({
+                        'ticker': cleaned_ticker,
+                        'last_updated': datetime.now().isoformat()
+                    }).ilike('ticker', f"%{base_symbol}%").execute()
+                except Exception:
+                    pass
+                ticker = cleaned_ticker
+                holding['ticker'] = cleaned_ticker
+            
+            current_price = None
+            source = None
+            
+            if asset_type == 'stock':
+                stock_name = holding.get('stock_name')
+                current_price, source = self._get_stock_price_with_fallback(ticker, stock_name)
+                # OPTIMIZATION: Don't update DB here - will be batched later
+                    
+            elif asset_type == 'mutual_fund':
+                fund_name = holding.get('scheme_name') or holding.get('stock_name', '')
+                current_price, source = self._get_mf_price_with_fallback(ticker, fund_name)
+                # OPTIMIZATION: Don't update DB here - will be batched later
+                    
+            elif asset_type in ['pms', 'aif']:
+                current_price, source = self._calculate_pms_aif_live_price(ticker, asset_type, db_manager, holding)
+            
+            elif asset_type == 'bond':
+                bond_name = holding.get('stock_name', '')
+                result = self._get_bond_price(ticker, bond_name=bond_name)
+                if result:
+                    current_price, source = result
+            
+            # Validate price
+            avg_price = holding.get('average_price', 0)
+            
+            if current_price and current_price > 0:
+                if asset_type == 'stock' and avg_price > 0:
+                    price_ratio = current_price / avg_price
+                    if price_ratio > 10 or price_ratio < 0.1:
+                        pass  # Log warning but still store
+                
+                # OPTIMIZATION: Return price data for batch update instead of updating immediately
+                resolved_ticker = getattr(self, "_last_resolved_ticker", ticker)
+                price_data = {
+                    'price': current_price,
+                    'resolved_ticker': resolved_ticker if resolved_ticker != ticker else None
+                }
+                return True, None, price_data
+            else:
+                return False, f"Failed to fetch price for {ticker}", None
+                
+        except Exception as e:
+            return False, str(e), None
+    
     def update_live_prices_for_holdings(self, holdings: List[Dict], db_manager) -> None:
         """
-        Update live_price in stock_master table for all holdings
+        Update live_price in stock_master table for all holdings (PARALLELIZED + BATCHED DB UPDATES)
         
         Args:
             holdings: List of holding records
             db_manager: Database manager instance
         """
-        # Silent price update
+        print(f"[PRICE_UPDATE] Starting parallel price update for {len(holdings)} holdings...")
         
         success_count = 0
         failed_count = 0
-        mf_count = 0
         
-        print(f"[PRICE_UPDATE] Starting price update for {len(holdings)} holdings...")
+        # OPTIMIZATION: Collect all price updates and batch them
+        price_updates = []  # List of (stock_id, price) tuples
+        ticker_updates = []  # List of (stock_id, ticker) tuples for ticker normalization
+        corporate_action_updates = []  # List of corporate action updates
         
-        for holding in holdings:
+        # Process holdings in parallel batches to avoid overwhelming the system
+        max_workers = min(20, len(holdings))
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_holding = {
+                executor.submit(self._update_single_holding_price, holding, db_manager): holding
+                for holding in holdings
+            }
+            
+            # Process results as they complete
+            for future in as_completed(future_to_holding):
+                holding = future_to_holding[future]
+                try:
+                    success, error_msg, price_data = future.result()
+                    if success:
+                        success_count += 1
+                        ticker = holding.get('ticker', 'unknown')
+                        asset_type = holding.get('asset_type', 'unknown')
+                        stock_id = holding.get('stock_id')
+                        
+                        # Collect updates for batching
+                        if price_data:
+                            if 'price' in price_data:
+                                price_updates.append((stock_id, price_data['price']))
+                            if 'resolved_ticker' in price_data and price_data['resolved_ticker']:
+                                ticker_updates.append((stock_id, price_data['resolved_ticker']))
+                        
+                        print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): Price fetched")
+                        
+                        # Check for corporate actions (splits, bonuses, etc.) for stocks
+                        if asset_type == 'stock' and success:
+                            try:
+                                ca_update = self._check_and_apply_corporate_actions(holding, db_manager)
+                                if ca_update:
+                                    corporate_action_updates.append(ca_update)
+                                    print(f"[CORP_ACTION] 🔄 {ticker}: Found corporate actions - {', '.join(ca_update['messages'])}")
+                            except Exception as e:
+                                print(f"[CORP_ACTION] ⚠️ Error checking corporate actions for {ticker}: {str(e)}")
+                    else:
+                        failed_count += 1
+                        ticker = holding.get('ticker', 'unknown')
+                        print(f"[PRICE_UPDATE] ❌ {ticker}: {error_msg}")
+                except Exception as e:
+                    failed_count += 1
+                    ticker = holding.get('ticker', 'unknown')
+                    print(f"[PRICE_UPDATE] ❌ Error updating {ticker}: {str(e)}")
+        
+        # OPTIMIZATION: Batch update all prices at once (much faster than individual updates)
+        if price_updates:
             try:
-                original_ticker = holding.get('ticker')
-                ticker = original_ticker
-                asset_type = holding.get('asset_type', 'stock')
-                stock_id = holding.get('stock_id')
-                
-                if not ticker or not stock_id:
-                    print(f"[PRICE_UPDATE] ⚠️ Skipping holding with missing ticker or stock_id: ticker={ticker}, stock_id={stock_id}")
-                    continue
-
-                cleaned_ticker = self._normalize_base_ticker(ticker)
-                if cleaned_ticker and cleaned_ticker != ticker:
-                    print(f"[PRICE_UPDATE] 🔧 Normalizing ticker {original_ticker} -> {cleaned_ticker}")
-                    base_symbol = self._base_symbol(original_ticker)
+                # Update prices in batches of 50
+                batch_size = 50
+                for i in range(0, len(price_updates), batch_size):
+                    batch = price_updates[i:i+batch_size]
+                    for stock_id, price in batch:
+                        try:
+                            db_manager.update_stock_live_price(stock_id, price)
+                        except Exception:
+                            pass  # Individual failures don't stop the batch
+                print(f"[PRICE_UPDATE] 📦 Batched {len(price_updates)} price updates")
+            except Exception as e:
+                print(f"[PRICE_UPDATE] ⚠️ Batch update error: {str(e)}")
+        
+        # Batch update ticker normalizations
+        if ticker_updates:
+            try:
+                for stock_id, resolved_ticker in ticker_updates:
                     try:
                         db_manager.supabase.table('stock_master').update({
-                            'ticker': cleaned_ticker,
+                            'ticker': resolved_ticker,
                             'last_updated': datetime.now().isoformat()
-                        }).ilike('ticker', f"%{base_symbol}%").execute()
-                        print(f"[PRICE_UPDATE] 🔁 Normalized ticker: {cleaned_ticker}")
+                        }).eq('id', stock_id).execute()
                     except Exception:
                         pass
-                    ticker = cleaned_ticker
-                    holding['ticker'] = cleaned_ticker
-                
-                current_price = None
-                source = None
-                
-                if asset_type == 'stock':
-                    stock_name = holding.get('stock_name')
-                    current_price, source = self._get_stock_price_with_fallback(ticker, stock_name)
-                    resolved_ticker = getattr(self, "_last_resolved_ticker", ticker)
-                    if current_price:
-                        if resolved_ticker != ticker:
-                            try:
-                                db_manager.supabase.table('stock_master').update({
-                                    'ticker': resolved_ticker,
-                                    'last_updated': datetime.now().isoformat()
-                                }).eq('id', stock_id).execute()
-                                holding['ticker'] = resolved_ticker
-                                ticker = resolved_ticker
-                                print(f"[PRICE_UPDATE] 🔁 Normalized ticker: {resolved_ticker}")
-                            except Exception:
-                                pass
-
-                        print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:.2f} (from {source})")
-                    
-                elif asset_type == 'mutual_fund':
-                    mf_count += 1
-                    # Get fund name for ticker resolution - prefer scheme_name for better AMFI code lookup
-                    fund_name = holding.get('scheme_name') or holding.get('stock_name', '')
-                    current_price, source = self._get_mf_price_with_fallback(ticker, fund_name)
-                    resolved_ticker = getattr(self, "_last_resolved_ticker", ticker)
-                    if current_price:
-                        if resolved_ticker != ticker:
-                            try:
-                                db_manager.supabase.table('stock_master').update({
-                                    'ticker': resolved_ticker,
-                                    'last_updated': datetime.now().isoformat()
-                                }).eq('id', stock_id).execute()
-                                holding['ticker'] = resolved_ticker
-                                ticker = resolved_ticker
-                                print(f"[PRICE_UPDATE] 🔁 Normalized MF ticker: {resolved_ticker}")
-                            except Exception:
-                                pass
-                        print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:.2f} (from {source})")
-                    
-                elif asset_type in ['pms', 'aif']:
-                    current_price, source = self._calculate_pms_aif_live_price(ticker, asset_type, db_manager, holding)
-                    if current_price:
-                        print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:,.2f} (from {source})")
-                
-                elif asset_type == 'bond':
-                    # Get bond name for AI fallback
-                    bond_name = holding.get('stock_name', '')
-                    current_price, source = self._get_bond_price(ticker, bond_name=bond_name)
-                    if current_price:
-                        print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): ₹{current_price:.2f} (from {source})")
-                
-                # Validate price before storing
-                avg_price = holding.get('average_price', 0)
-                
-                # Update live_price in stock_master with validation
-                if current_price and current_price > 0:
-                    # Price validation: Check if price is within reasonable bounds
-                    # For stocks: current price shouldn't be more than 10x or less than 0.1x of avg price
-                    # (unless there was a stock split/bonus, which would be handled separately)
-                    if asset_type == 'stock' and avg_price > 0:
-                        price_ratio = current_price / avg_price
-                        if price_ratio > 10 or price_ratio < 0.1:
-                            print(f"[PRICE_VALIDATION] ⚠️ Suspicious price for {ticker}: current={current_price:.2f}, avg={avg_price:.2f}, ratio={price_ratio:.2f}")
-                            # Still store it, but log a warning
-                            # Could be a legitimate huge gain/loss or data issue
-                    
-                    db_manager.update_stock_live_price(stock_id, current_price)
-                    success_count += 1
-                else:
-                    # Could not get price
-                    print(f"[PRICE_UPDATE] ❌ {ticker} ({asset_type}): Failed to fetch price")
-                    failed_count += 1
-                    
+                print(f"[PRICE_UPDATE] 📦 Batched {len(ticker_updates)} ticker updates")
             except Exception as e:
-                # Error updating holding
-                print(f"[PRICE_UPDATE] ❌ Error updating {holding.get('ticker', 'unknown')}: {str(e)}")
-                failed_count += 1
+                print(f"[PRICE_UPDATE] ⚠️ Batch ticker update error: {str(e)}")
         
-        # Summary
+        # Apply corporate action updates (splits, bonuses)
+        if corporate_action_updates:
+            try:
+                for ca_update in corporate_action_updates:
+                    holding_id = ca_update.get('holding_id')
+                    stock_id = ca_update['stock_id']
+                    try:
+                        # Update specific holding with new quantity and average price
+                        if holding_id:
+                            # Update specific holding by ID
+                            result = db_manager.supabase.table('holdings').update({
+                                'quantity': ca_update['quantity'],
+                                'average_price': ca_update['average_price'],
+                                'last_updated': datetime.now().isoformat()
+                            }).eq('id', holding_id).execute()
+                        else:
+                            # Fallback: update by stock_id (less precise but works if holding_id missing)
+                            result = db_manager.supabase.table('holdings').update({
+                                'quantity': ca_update['quantity'],
+                                'average_price': ca_update['average_price'],
+                                'last_updated': datetime.now().isoformat()
+                            }).eq('stock_id', stock_id).execute()
+                        
+                        if result.data:
+                            print(f"[CORP_ACTION] ✅ Applied: {', '.join(ca_update['messages'])}")
+                        else:
+                            print(f"[CORP_ACTION] ⚠️ No holding updated for stock_id {stock_id}")
+                    except Exception as e:
+                        print(f"[CORP_ACTION] ⚠️ Error applying corporate action for stock_id {stock_id}: {str(e)}")
+                print(f"[CORP_ACTION] 📦 Processed {len(corporate_action_updates)} corporate action updates")
+            except Exception as e:
+                print(f"[CORP_ACTION] ⚠️ Batch corporate action update error: {str(e)}")
+        
         print(f"[PRICE_UPDATE] Complete: {success_count} succeeded, {failed_count} failed")
     
+    def _fetch_corporate_actions_from_moneycontrol(self, ticker: str, from_date: datetime, to_date: datetime = None) -> List[Dict[str, Any]]:
+        """
+        Fetch corporate actions from Moneycontrol for a ticker.
+        
+        Args:
+            ticker: Stock ticker symbol (e.g., 'RELIANCE', 'TCS.NS')
+            from_date: Start date to check corporate actions from
+            to_date: End date (defaults to today)
+        
+        Returns:
+            List of corporate action dicts with keys: type, date, ratio, description
+        """
+        if to_date is None:
+            to_date = datetime.now()
+        
+        corporate_actions = []
+        
+        try:
+            # Remove exchange suffix for Moneycontrol search
+            base_ticker = self._normalize_base_ticker(ticker).replace('.NS', '').replace('.BO', '')
+            
+            # Moneycontrol corporate actions URL pattern
+            # Try different URL formats
+            urls_to_try = [
+                f"https://www.moneycontrol.com/india/stockpricequote/{base_ticker.lower()}/{base_ticker.upper()}",
+                f"https://www.moneycontrol.com/stocks/company_info/stock_price_quote.php?sc_id={base_ticker.upper()}",
+            ]
+            
+            session = self.http_session or self._get_http_session()
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+            
+            for url in urls_to_try:
+                try:
+                    response = session.get(url, headers=headers, timeout=10)
+                    if response.status_code == 200:
+                        html_content = response.text
+                        
+                        # Parse corporate actions from HTML
+                        # Look for corporate action sections
+                        import re
+                        from bs4 import BeautifulSoup
+                        
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                        
+                        # Find corporate action tables/sections
+                        # Moneycontrol typically has a "Corporate Actions" section
+                        ca_sections = soup.find_all(['div', 'table'], class_=re.compile(r'corporate|action|split|bonus', re.I))
+                        
+                        for section in ca_sections:
+                            # Look for dates and action types
+                            rows = section.find_all('tr') if section.name == 'table' else section.find_all('div', class_=re.compile(r'row|item', re.I))
+                            
+                            for row in rows:
+                                text = row.get_text(strip=True)
+                                            
+                                # Detect split (e.g., "1:2", "2:1", "Stock Split")
+                                split_match = re.search(r'(\d+)\s*:\s*(\d+)|split\s*(\d+)\s*:\s*(\d+)', text, re.I)
+                                if split_match:
+                                    groups = split_match.groups()
+                                    if groups[0] and groups[1]:
+                                        old_ratio, new_ratio = int(groups[0]), int(groups[1])
+                                    else:
+                                        old_ratio, new_ratio = int(groups[2]), int(groups[3])
+                                    
+                                    # Extract date
+                                    date_match = re.search(r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})', text)
+                                    if date_match:
+                                        try:
+                                            action_date = datetime.strptime(date_match.group(1), '%d-%m-%Y')
+                                        except:
+                                            try:
+                                                action_date = datetime.strptime(date_match.group(1), '%d/%m/%Y')
+                                            except:
+                                                action_date = None
+                                        
+                                        if action_date and from_date <= action_date <= to_date:
+                                            corporate_actions.append({
+                                                'type': 'split',
+                                                'date': action_date,
+                                                'old_ratio': old_ratio,
+                                                'new_ratio': new_ratio,
+                                                'split_ratio': new_ratio / old_ratio,  # e.g., 2:1 = 2.0
+                                                'description': text[:200]
+                                            })
+                                
+                                # Detect bonus (e.g., "1:1", "Bonus 1:2")
+                                bonus_match = re.search(r'bonus\s*(\d+)\s*:\s*(\d+)|(\d+)\s*:\s*(\d+).*bonus', text, re.I)
+                                if bonus_match:
+                                    groups = bonus_match.groups()
+                                    if groups[0] and groups[1]:
+                                        bonus_ratio = int(groups[1]) / int(groups[0])  # e.g., 1:2 = 2.0
+                                    else:
+                                        bonus_ratio = int(groups[3]) / int(groups[2])
+                                    
+                                    date_match = re.search(r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})', text)
+                                    if date_match:
+                                        try:
+                                            action_date = datetime.strptime(date_match.group(1), '%d-%m-%Y')
+                                        except:
+                                            try:
+                                                action_date = datetime.strptime(date_match.group(1), '%d/%m/%Y')
+                                            except:
+                                                action_date = None
+                                        
+                                        if action_date and from_date <= action_date <= to_date:
+                                            corporate_actions.append({
+                                                'type': 'bonus',
+                                                'date': action_date,
+                                                'bonus_ratio': bonus_ratio,
+                                                'description': text[:200]
+                                            })
+                        
+                        # If we found actions, break
+                        if corporate_actions:
+                            break
+                            
+                except Exception as e:
+                    continue
+            
+            # Sort by date (oldest first)
+            corporate_actions.sort(key=lambda x: x['date'])
+            
+        except Exception as e:
+            print(f"[CORP_ACTION] ⚠️ Error fetching corporate actions for {ticker}: {str(e)}")
+        
+        return corporate_actions
+    
+    def _apply_corporate_actions_to_holding(self, holding: Dict, corporate_actions: List[Dict], db_manager) -> Dict[str, Any]:
+        """
+        Apply corporate actions to a holding and return updated values.
+        
+        Args:
+            holding: Holding dict with quantity, average_price, purchase_date
+            corporate_actions: List of corporate actions sorted by date
+            db_manager: Database manager
+        
+        Returns:
+            Dict with updated quantity, average_price, and any messages
+        """
+        original_quantity = holding.get('quantity', 0)
+        original_avg_price = holding.get('average_price', 0)
+        purchase_date = holding.get('purchase_date')
+        
+        if not purchase_date:
+            return {'quantity': original_quantity, 'average_price': original_avg_price, 'messages': []}
+        
+        try:
+            purchase_date = datetime.fromisoformat(purchase_date.replace('Z', '+00:00')) if isinstance(purchase_date, str) else purchase_date
+        except:
+            return {'quantity': original_quantity, 'average_price': original_avg_price, 'messages': []}
+        
+        current_quantity = original_quantity
+        current_avg_price = original_avg_price
+        messages = []
+        
+        for action in corporate_actions:
+            action_date = action['date']
+            
+            # Only apply actions that occurred after purchase
+            if action_date < purchase_date:
+                continue
+            
+            if action['type'] == 'split':
+                # Stock split: quantity increases, price decreases proportionally
+                # e.g., 2:1 split means 1 share becomes 2 shares, price halves
+                split_ratio = action['split_ratio']  # e.g., 2.0 for 2:1 split
+                current_quantity = current_quantity * split_ratio
+                current_avg_price = current_avg_price / split_ratio
+                messages.append(f"Split {action.get('old_ratio', 1)}:{action.get('new_ratio', 1)} on {action_date.strftime('%Y-%m-%d')}")
+            
+            elif action['type'] == 'bonus':
+                # Bonus issue: quantity increases, price adjusts
+                # e.g., 1:2 bonus means 1 share becomes 3 shares (1 original + 2 bonus)
+                bonus_ratio = action['bonus_ratio']  # e.g., 2.0 for 1:2 bonus
+                new_quantity = current_quantity * (1 + bonus_ratio)
+                # Average price adjusts: (old_qty * old_price) / new_qty
+                current_avg_price = (current_quantity * current_avg_price) / new_quantity
+                current_quantity = new_quantity
+                messages.append(f"Bonus {action.get('description', '')} on {action_date.strftime('%Y-%m-%d')}")
+        
+        return {
+            'quantity': current_quantity,
+            'average_price': current_avg_price,
+            'messages': messages,
+            'has_changes': current_quantity != original_quantity or current_avg_price != original_avg_price
+        }
+    
+    def _check_and_apply_corporate_actions(self, holding: Dict, db_manager) -> Dict[str, Any]:
+        """
+        Check for corporate actions and apply them to a holding.
+        
+        Args:
+            holding: Holding dict with id, ticker, purchase_date, stock_id
+            db_manager: Database manager
+        
+        Returns:
+            Dict with update info or None if no actions needed
+        """
+        ticker = holding.get('ticker')
+        purchase_date = holding.get('purchase_date')
+        stock_id = holding.get('stock_id')
+        holding_id = holding.get('id')  # Specific holding ID
+        
+        if not ticker or not purchase_date or not stock_id:
+            return None
+        
+        try:
+            # Parse purchase date
+            if isinstance(purchase_date, str):
+                purchase_date = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
+            
+            # Fetch corporate actions from purchase date to today
+            corporate_actions = self._fetch_corporate_actions_from_moneycontrol(
+                ticker, purchase_date, datetime.now()
+            )
+            
+            if not corporate_actions:
+                return None
+            
+            # Apply corporate actions
+            result = self._apply_corporate_actions_to_holding(holding, corporate_actions, db_manager)
+            
+            if result['has_changes']:
+                return {
+                    'holding_id': holding_id,  # Use holding_id for specific update
+                    'stock_id': stock_id,
+                    'quantity': result['quantity'],
+                    'average_price': result['average_price'],
+                    'messages': result['messages']
+                }
+            
+        except Exception as e:
+            print(f"[CORP_ACTION] ⚠️ Error checking corporate actions for {ticker}: {str(e)}")
+        
+        return None
+    
     def _generate_stock_aliases(self, ticker: str, context_name: Optional[str] = None) -> List[str]:
-        """Generate normalized ticker aliases for stock lookups with name-aware enrichment."""
+        """Generate normalized ticker aliases for stock lookups with name-aware enrichment.
+        
+        OPTIMIZATION: Results are cached to avoid recomputation for the same ticker.
+        """
         raw = (ticker or "").strip()
         if not raw:
             return []
+        
+        # OPTIMIZATION: Check cache first (cache key includes context_name for accuracy)
+        cache_key = f"{raw.upper()}_{context_name.upper() if context_name else 'NONE'}"
+        if cache_key in self._stock_alias_cache:
+            return self._stock_alias_cache[cache_key]
 
         candidates: List[str] = []
 
@@ -288,7 +613,10 @@ class EnhancedPriceFetcher:
             return re.sub(r'[^A-Za-z0-9\.\-]', '', raw_symbol.upper())
 
         def _add(value: str) -> None:
-            val = _sanitize_symbol(value)
+            # Normalize first to remove trade tags like -T0, -T1, -BL
+            normalized = self._normalize_base_ticker(value)
+            # Then sanitize to ensure only valid characters remain
+            val = _sanitize_symbol(normalized)
             if val and val not in candidates:
                 candidates.append(val)
 
@@ -315,9 +643,13 @@ class EnhancedPriceFetcher:
                 continue
 
         # Always fold in exchange suffix variants for obvious tickers
+        # BUT: Skip if symbol already has .NS or .BO suffix (to avoid duplicates like GOLDBEES.BO.NS)
         base_snapshot = list(candidates)
         for symbol in base_snapshot:
             if not symbol:
+                continue
+            # If symbol already has exchange suffix, don't add variants
+            if symbol.endswith('.NS') or symbol.endswith('.BO'):
                 continue
             core_base = self._normalize_base_ticker(symbol)
             if core_base:
@@ -331,9 +663,17 @@ class EnhancedPriceFetcher:
                 _add(suggestion)
 
         # Enrich using yfinance metadata-derived names (helps with corporate actions)
-        for derived_name in self._extract_names_from_metadata(raw):
-            for suggestion in self._lookup_symbols_by_name(derived_name):
-                _add(suggestion)
+        # Run metadata extraction in parallel for faster processing
+        try:
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                metadata_future = executor.submit(self._extract_names_from_metadata, raw)
+                metadata_names = metadata_future.result()  # Wait for completion, no timeout
+                for derived_name in metadata_names:
+                    for suggestion in self._lookup_symbols_by_name(derived_name):
+                        _add(suggestion)
+        except Exception:
+            # If metadata extraction fails, continue without it
+            pass
 
         # For pure numeric or otherwise weak identifiers, force enrichment
         has_exchange_candidate = any(
@@ -349,37 +689,53 @@ class EnhancedPriceFetcher:
             for suggestion in self._ai_suggest_stock_aliases(raw, context_name):
                 _add(suggestion)
 
+        # OPTIMIZATION: Cache the results
+        self._stock_alias_cache[cache_key] = candidates
         return candidates
 
+    def _extract_metadata_for_symbol(self, symbol: str) -> List[str]:
+        """Extract metadata names for a single symbol variant."""
+        names = []
+        try:
+            stock = yf.Ticker(symbol)
+            info = getattr(stock, "info", None) or {}
+            if not isinstance(info, dict) or not info:
+                return names
+
+            for key in ("shortName", "longName", "displayName", "underlyingSymbol"):
+                value = info.get(key)
+                if isinstance(value, str) and value.strip():
+                    cleaned = value.strip()
+                    if cleaned.upper() not in [n.upper() for n in names]:
+                        names.append(cleaned)
+
+            # Some delisted tickers expose a "symbol" different from request
+            canonical_symbol = info.get("symbol")
+            if isinstance(canonical_symbol, str):
+                names.append(canonical_symbol.strip())
+        except Exception:
+            pass
+        return names
+    
     def _extract_names_from_metadata(self, ticker: str) -> List[str]:
-        """Pull potential successor names via yfinance metadata for delisted symbols."""
+        """Pull potential successor names via yfinance metadata for delisted symbols (PARALLELIZED)."""
         names: List[str] = []
         # Normalize ticker first to remove $ and other invalid characters
         normalized = self._normalize_base_ticker(ticker)
-        variants = {normalized}
-        variants.add(f"{normalized}.NS")
-        variants.add(f"{normalized}.BO")
+        variants = [normalized, f"{normalized}.NS", f"{normalized}.BO"]
 
-        for symbol in variants:
-            try:
-                stock = yf.Ticker(symbol)
-                info = getattr(stock, "info", None) or {}
-                if not isinstance(info, dict) or not info:
+        # Try all variants in parallel for faster results
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(self._extract_metadata_for_symbol, symbol): symbol 
+                      for symbol in variants}
+            for future in as_completed(futures):
+                try:
+                    variant_names = future.result()  # Wait for completion, no timeout
+                    for name in variant_names:
+                        if name.upper() not in [n.upper() for n in names]:
+                            names.append(name)
+                except Exception:
                     continue
-
-                for key in ("shortName", "longName", "displayName", "underlyingSymbol"):
-                    value = info.get(key)
-                    if isinstance(value, str) and value.strip():
-                        cleaned = value.strip()
-                        if cleaned.upper() not in [n.upper() for n in names]:
-                            names.append(cleaned)
-
-                # Some delisted tickers expose a "symbol" different from request
-                canonical_symbol = info.get("symbol")
-                if isinstance(canonical_symbol, str):
-                    names.append(canonical_symbol.strip())
-            except Exception:
-                continue
 
         return names
 
@@ -521,6 +877,33 @@ class EnhancedPriceFetcher:
         except Exception:
             return []
 
+    def _try_single_ticker_variant(self, ticker_variant: str, source_type: str) -> Optional[Tuple[float, str]]:
+        """
+        Try fetching price for a single ticker variant in parallel.
+        Returns (price, source) if successful, None otherwise.
+        """
+        try:
+            clean_ticker = self._normalize_base_ticker(ticker_variant)
+            if source_type == 'nse':
+                if not clean_ticker.endswith('.NS'):
+                    clean_ticker = clean_ticker + '.NS'
+            elif source_type == 'bse':
+                if not clean_ticker.endswith('.BO'):
+                    clean_ticker = clean_ticker + '.BO'
+            elif source_type == 'raw':
+                # Remove any exchange suffix
+                clean_ticker = clean_ticker.replace('.NS', '').replace('.BO', '')
+            
+            hist = yf.Ticker(clean_ticker).history(period='1d')
+            if not hist.empty:
+                price = float(hist['Close'].iloc[-1])
+                if price > 0:
+                    source_map = {'nse': 'yfinance_nse', 'bse': 'yfinance_bse', 'raw': 'yfinance_raw'}
+                    return price, source_map.get(source_type, 'yfinance')
+        except Exception:
+            pass
+        return None
+    
     def _get_stock_price_with_fallback(self, ticker: str, context_name: Optional[str] = None) -> tuple:
         """
         Stock price fetching with complete fallback:
@@ -541,64 +924,79 @@ class EnhancedPriceFetcher:
 
         self._last_resolved_ticker = base_candidates[0] if base_candidates else base_ticker
         
-        # Method 1: Try NSE
-        # Trying yfinance NSE (silent)
-        try:
-            for formatted in symbol_variants:
-                if not formatted.endswith('.NS'):
-                    continue
-                # Safety: ensure ticker is normalized (should already be, but double-check)
-                clean_formatted = self._normalize_base_ticker(formatted.replace('.NS', '')) + '.NS'
-                hist = yf.Ticker(clean_formatted).history(period='1d')
-                if not hist.empty:
-                    price = float(hist['Close'].iloc[-1])
-                    if price > 0:
-                        self._last_resolved_ticker = clean_formatted
-                        return price, 'yfinance_nse'
-        except Exception:
-            pass
-            # NSE failed (silent)
+        # PARALLEL FETCHING: Try all variants concurrently for much faster results
+        # Priority order: NSE > BSE > Raw (without suffix)
+        # OPTIMIZATION: More efficient variant filtering - avoid duplicates
+        nse_variants = []
+        bse_variants = []
+        raw_variants_set = set()
         
-        # Method 2: Try BSE
-        # Trying yfinance BSE (silent)
-        try:
-            for formatted in symbol_variants:
-                if not formatted.endswith('.BO'):
-                    continue
-                # Safety: ensure ticker is normalized (should already be, but double-check)
-                clean_formatted = self._normalize_base_ticker(formatted.replace('.BO', '')) + '.BO'
-                hist = yf.Ticker(clean_formatted).history(period='1d')
-                if not hist.empty:
-                    price = float(hist['Close'].iloc[-1])
-                    if price > 0:
-                        self._last_resolved_ticker = clean_formatted
-                        return price, 'yfinance_bse'
-        except Exception:
-            pass
-# BSE failed
-        
-        # Method 3: Try without suffix
-        # Trying yfinance without suffix
-        for formatted in symbol_variants:
-            if formatted.endswith(('.NS', '.BO')):
-                clean_ticker = formatted.replace('.NS', '').replace('.BO', '')
+        for v in symbol_variants:
+            if v.endswith('.NS'):
+                nse_variants.append(v)
+                raw_variants_set.add(v[:-3])  # Remove .NS
+            elif v.endswith('.BO'):
+                bse_variants.append(v)
+                raw_variants_set.add(v[:-3])  # Remove .BO
             else:
-                clean_ticker = formatted
-            # Safety: normalize ticker to remove $ and other invalid characters
-            clean_ticker = self._normalize_base_ticker(clean_ticker)
-            try:
-                stock = yf.Ticker(clean_ticker)
-                hist = stock.history(period='1d')
-                
-                if not hist.empty:
-                    price = float(hist['Close'].iloc[-1])
-                    if price > 0:
-                        # Found without suffix
-                        self._last_resolved_ticker = clean_ticker
-                        return price, 'yfinance_raw'
-            except Exception:
-                continue
-# Raw ticker failed
+                raw_variants_set.add(v)
+                # Also try with suffixes
+                nse_variants.append(f"{v}.NS")
+                bse_variants.append(f"{v}.BO")
+        
+        raw_variants = list(raw_variants_set)
+        
+        # Try NSE variants in parallel (highest priority)
+        # OPTIMIZATION: Cancel remaining futures when we find a result
+        with ThreadPoolExecutor(max_workers=min(10, len(nse_variants))) as executor:
+            futures = {executor.submit(self._try_single_ticker_variant, variant, 'nse'): variant 
+                      for variant in nse_variants[:10]}  # Limit to 10 to avoid too many requests
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    # Cancel remaining futures to save resources
+                    for f in futures:
+                        if f != future:
+                            f.cancel()
+                    price, source = result
+                    variant = futures[future]
+                    clean_formatted = self._normalize_base_ticker(variant.replace('.NS', '')) + '.NS'
+                    self._last_resolved_ticker = clean_formatted
+                    return price, source
+        
+        # Try BSE variants in parallel (second priority)
+        with ThreadPoolExecutor(max_workers=min(10, len(bse_variants))) as executor:
+            futures = {executor.submit(self._try_single_ticker_variant, variant, 'bse'): variant 
+                      for variant in bse_variants[:10]}
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    # Cancel remaining futures to save resources
+                    for f in futures:
+                        if f != future:
+                            f.cancel()
+                    price, source = result
+                    variant = futures[future]
+                    clean_formatted = self._normalize_base_ticker(variant.replace('.BO', '')) + '.BO'
+                    self._last_resolved_ticker = clean_formatted
+                    return price, source
+        
+        # Try raw variants in parallel (third priority)
+        with ThreadPoolExecutor(max_workers=min(10, len(raw_variants))) as executor:
+            futures = {executor.submit(self._try_single_ticker_variant, variant, 'raw'): variant 
+                      for variant in raw_variants[:10]}
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    # Cancel remaining futures to save resources
+                    for f in futures:
+                        if f != future:
+                            f.cancel()
+                    price, source = result
+                    variant = futures[future]
+                    clean_ticker = self._normalize_base_ticker(variant)
+                    self._last_resolved_ticker = clean_ticker
+                    return price, source
         
         # Method 4: Try mftool (in case it's a mutual fund)
         ##st.caption(f"      [4/5] Trying mftool (in case it's a MF)...")

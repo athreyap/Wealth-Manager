@@ -106,6 +106,109 @@ class AIFileProcessor(BaseAgent):
             self.update_status("error")
             return []
     
+    def _extract_pdf_with_ocr(self, file_data: Any) -> str:
+        """
+        Extract text from image-based PDF using OCR.
+        Tries multiple OCR methods:
+        1. Tesseract (if available - works locally)
+        2. EasyOCR (pure Python - works on Streamlit Cloud)
+        
+        Returns extracted text or empty string if OCR fails or is unavailable.
+        """
+        file_data.seek(0)
+        pdf_bytes = file_data.read()
+        
+        # Method 1: Try Tesseract (works locally, may not work on Streamlit Cloud)
+        try:
+            from pdf2image import convert_from_bytes
+            import pytesseract
+            from PIL import Image
+            
+            self.logger.info("Attempting Tesseract OCR...")
+            images = convert_from_bytes(pdf_bytes, dpi=300, fmt='RGB')
+            self.logger.info(f"Converted {len(images)} pages to images")
+            
+            all_text = []
+            for page_num, image in enumerate(images, 1):
+                try:
+                    self.logger.info(f"Processing page {page_num}/{len(images)} with Tesseract...")
+                    page_text = pytesseract.image_to_string(image, lang='eng')
+                    
+                    if page_text and page_text.strip():
+                        all_text.append(f"--- Page {page_num} ---\n{page_text}\n")
+                        self.logger.info(f"Page {page_num}: Extracted {len(page_text)} characters")
+                except Exception as e:
+                    # Tesseract not available or failed - try EasyOCR
+                    self.logger.warning(f"Tesseract failed for page {page_num}: {str(e)}")
+                    break
+            
+            if all_text:
+                combined_text = "\n".join(all_text)
+                if combined_text.strip():
+                    self.logger.info(f"Tesseract extracted {len(combined_text)} total characters")
+                    return combined_text
+        except Exception as e:
+            self.logger.warning(f"Tesseract not available: {str(e)}")
+            self.logger.info("Falling back to EasyOCR (works on Streamlit Cloud)...")
+        
+        # Method 2: Try EasyOCR (pure Python - works on Streamlit Cloud)
+        try:
+            import easyocr
+            import numpy as np
+            
+            # Try to convert PDF to images - may fail on Streamlit Cloud if Poppler not available
+            try:
+                from pdf2image import convert_from_bytes
+                images = convert_from_bytes(pdf_bytes, dpi=300, fmt='RGB')
+            except Exception as pdf_conv_error:
+                self.logger.warning(f"pdf2image failed (may need Poppler): {str(pdf_conv_error)}")
+                self.logger.warning("Note: On Streamlit Cloud, Poppler may not be available")
+                return ""
+            
+            self.logger.info("Attempting EasyOCR (Streamlit Cloud compatible)...")
+            # Initialize EasyOCR reader (English only for speed)
+            # This will download models on first run (~100MB, cached after first use)
+            reader = easyocr.Reader(['en'], gpu=False)
+            self.logger.info(f"Converted {len(images)} pages to images")
+            
+            all_text = []
+            for page_num, image in enumerate(images, 1):
+                try:
+                    self.logger.info(f"Processing page {page_num}/{len(images)} with EasyOCR...")
+                    # Convert PIL image to numpy array
+                    img_array = np.array(image)
+                    # Run OCR
+                    results = reader.readtext(img_array)
+                    # Extract text from results
+                    page_text = '\n'.join([result[1] for result in results])
+                    
+                    if page_text and page_text.strip():
+                        all_text.append(f"--- Page {page_num} ---\n{page_text}\n")
+                        self.logger.info(f"Page {page_num}: Extracted {len(page_text)} characters")
+                    else:
+                        self.logger.warning(f"Page {page_num}: No text extracted")
+                except Exception as e:
+                    self.logger.warning(f"Page {page_num}: EasyOCR failed: {str(e)}")
+                    continue
+            
+            combined_text = "\n".join(all_text)
+            if combined_text.strip():
+                self.logger.info(f"EasyOCR extracted {len(combined_text)} total characters from {len(images)} pages")
+                return combined_text
+            else:
+                self.logger.warning("EasyOCR completed but no text was extracted")
+                return ""
+                
+        except ImportError as e:
+            self.logger.warning(f"EasyOCR not available: {e}")
+            self.logger.warning("Install with: pip install easyocr")
+            return ""
+        except Exception as e:
+            self.logger.error(f"EasyOCR extraction failed: {str(e)}")
+            return ""
+        
+        return ""
+    
     def _extract_file_content(self, file_data: Any, filename: str) -> tuple:
         """Extract content from any file type"""
         
@@ -125,16 +228,69 @@ class AIFileProcessor(BaseAgent):
             
             # PDF Files
             elif file_ext == 'pdf':
-                import PyPDF2
-                import io
+                # Try pdfplumber first (better text extraction)
+                try:
+                    import pdfplumber
+                    file_data.seek(0)
+                    pdf_text = ""
+                    with pdfplumber.open(file_data) as pdf:
+                        for page_num, page in enumerate(pdf.pages, 1):
+                            # Try standard text extraction first
+                            page_text = page.extract_text()
+                            
+                            # If that fails, try extracting from words
+                            if not page_text or not page_text.strip():
+                                words = page.extract_words()
+                                if words:
+                                    page_text = ' '.join([w.get('text', '') for w in words if w.get('text')])
+                            
+                            if page_text and page_text.strip():
+                                pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+                            else:
+                                # Log which pages have no text
+                                words = page.extract_words()
+                                chars = page.chars
+                                self.logger.warning(f"Page {page_num}: No text extracted (words: {len(words) if words else 0}, chars: {len(chars) if chars else 0})")
+                    
+                    if pdf_text.strip():
+                        self.logger.info(f"Successfully extracted {len(pdf_text)} characters from PDF")
+                        return pdf_text, 'pdf'
+                    else:
+                        self.logger.warning("PDF text extraction returned empty - attempting OCR...")
+                        # Try OCR as fallback - use the SAME implementation as AI Assistant
+                        # Both now use identical dual-fallback: Tesseract → EasyOCR
+                        ocr_text = self._extract_pdf_with_ocr(file_data)
+                        
+                        if ocr_text and ocr_text.strip():
+                            self.logger.info(f"OCR successfully extracted {len(ocr_text)} characters")
+                            return ocr_text, 'pdf'
+                        else:
+                            self.logger.warning("OCR also failed or not available - PDF may be image-based")
+                except Exception as e:
+                    self.logger.warning(f"pdfplumber extraction failed: {e}, trying PyPDF2")
                 
-                pdf_reader = PyPDF2.PdfReader(file_data)
-                pdf_text = ""
-                
-                for page in pdf_reader.pages:
-                    pdf_text += page.extract_text() + "\n"
-                
-                return pdf_text, 'pdf'
+                # Fallback to PyPDF2
+                try:
+                    import PyPDF2
+                    import io
+                    file_data.seek(0)
+                    pdf_reader = PyPDF2.PdfReader(file_data)
+                    pdf_text = ""
+                    
+                    for page_num, page in enumerate(pdf_reader.pages, 1):
+                        page_text = page.extract_text()
+                        if page_text and page_text.strip():
+                            pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+                    
+                    if pdf_text.strip():
+                        self.logger.info(f"PyPDF2 extracted {len(pdf_text)} characters from PDF")
+                        return pdf_text, 'pdf'
+                    else:
+                        self.logger.warning("Both pdfplumber and PyPDF2 returned empty - PDF is likely image-based/scanned")
+                        return "⚠️ PDF appears to be image-based (scanned) and has no extractable text. Please use OCR software to convert it to a text-selectable PDF, or provide the original source file (CSV/Excel).", 'pdf'
+                except Exception as e:
+                    self.logger.error(f"PyPDF2 extraction also failed: {e}")
+                    return None, 'error'
             
             # Text Files
             elif file_ext in ['txt', 'text']:

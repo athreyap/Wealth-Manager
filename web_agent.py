@@ -327,7 +327,20 @@ def _build_document_payload_from_file(uploaded_file) -> Tuple[Optional[Dict[str,
                 pdf_text = "\n\n".join(extracted_pages)
 
             if not pdf_text.strip():
-                return None, f"Could not extract readable text from '{filename}'."
+                # Last resort: Try OCR for image-based PDFs
+                print(f"[AI_ASSISTANT_PDF] No text extracted, attempting OCR for {filename}...")
+                uploaded_file.seek(0)
+                ocr_text = _extract_pdf_with_ocr(uploaded_file)
+                if ocr_text and ocr_text.strip():
+                    pdf_text = ocr_text
+                    metadata['extraction_method'] = 'OCR'
+                    metadata['info_message'] = (
+                        f"✅ Extracted {len(pdf_text)} characters using OCR from {page_count} pages"
+                    )
+                    metadata['info_lines'].append("- Extraction: OCR (image-based PDF)")
+                    print(f"[AI_ASSISTANT_PDF] ✅ OCR successfully extracted {len(pdf_text)} characters")
+                else:
+                    return None, f"Could not extract readable text from '{filename}'. PDF appears to be image-based - OCR failed or not available. Please install OCR dependencies (pdf2image, pytesseract, Tesseract) or use a text-selectable PDF."
 
             metadata['pages'] = page_count
             metadata['tables_found'] = len(tables_found)
@@ -1055,41 +1068,355 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
     return 'stock'
 
 
+def _extract_pdf_with_ocr(uploaded_file) -> str:
+    """
+    Extract text from image-based PDF using OCR.
+    Tries multiple OCR methods:
+    1. Tesseract (if available - works locally)
+    2. EasyOCR (pure Python - works on Streamlit Cloud)
+    
+    Returns extracted text or empty string if OCR fails or is unavailable.
+    """
+    uploaded_file.seek(0)
+    pdf_bytes = uploaded_file.read()
+    
+    # Method 1: Try Tesseract (works locally, may not work on Streamlit Cloud)
+    try:
+        from pdf2image import convert_from_bytes
+        import pytesseract
+        from PIL import Image
+        
+        print(f"[PDF_OCR] Attempting Tesseract OCR...")
+        images = convert_from_bytes(pdf_bytes, dpi=300, fmt='RGB')
+        print(f"[PDF_OCR] Converted {len(images)} pages to images")
+        
+        all_text = []
+        for page_num, image in enumerate(images, 1):
+            try:
+                print(f"[PDF_OCR] Processing page {page_num}/{len(images)} with Tesseract...")
+                page_text = pytesseract.image_to_string(image, lang='eng')
+                
+                if page_text and page_text.strip():
+                    all_text.append(f"--- Page {page_num} ---\n{page_text}\n")
+                    char_count = len(page_text)
+                    print(f"[PDF_OCR] Page {page_num}: Extracted {char_count} characters")
+            except Exception as e:
+                # Tesseract not available or failed - try EasyOCR
+                print(f"[PDF_OCR] Tesseract failed for page {page_num}: {str(e)}")
+                break
+        
+        if all_text:
+            combined_text = "\n".join(all_text)
+            if combined_text.strip():
+                print(f"[PDF_OCR] ✅ Tesseract extracted {len(combined_text)} total characters")
+                return combined_text
+    except Exception as e:
+        print(f"[PDF_OCR] Tesseract not available: {str(e)}")
+        print(f"[PDF_OCR] Falling back to EasyOCR (works on Streamlit Cloud)...")
+    
+    # Method 2: Try EasyOCR (pure Python - works on Streamlit Cloud)
+    try:
+        import easyocr
+        import numpy as np
+        
+        # Try to convert PDF to images - may fail on Streamlit Cloud if Poppler not available
+        try:
+            from pdf2image import convert_from_bytes
+            images = convert_from_bytes(pdf_bytes, dpi=300, fmt='RGB')
+        except Exception as pdf_conv_error:
+            print(f"[PDF_OCR] pdf2image failed (may need Poppler): {str(pdf_conv_error)}")
+            print(f"[PDF_OCR] Note: On Streamlit Cloud, Poppler may not be available")
+            print(f"[PDF_OCR] Consider using cloud OCR services or converting PDFs to images first")
+            return ""
+        
+        print(f"[PDF_OCR] Attempting EasyOCR (Streamlit Cloud compatible)...")
+        # Initialize EasyOCR reader (English only for speed)
+        # This will download models on first run (~100MB, cached after first use)
+        reader = easyocr.Reader(['en'], gpu=False)
+        print(f"[PDF_OCR] Converted {len(images)} pages to images")
+        
+        all_text = []
+        for page_num, image in enumerate(images, 1):
+            try:
+                print(f"[PDF_OCR] Processing page {page_num}/{len(images)} with EasyOCR...")
+                # Convert PIL image to numpy array
+                img_array = np.array(image)
+                # Run OCR
+                results = reader.readtext(img_array)
+                # Extract text from results
+                page_text = '\n'.join([result[1] for result in results])
+                
+                if page_text and page_text.strip():
+                    all_text.append(f"--- Page {page_num} ---\n{page_text}\n")
+                    char_count = len(page_text)
+                    print(f"[PDF_OCR] Page {page_num}: Extracted {char_count} characters")
+                else:
+                    print(f"[PDF_OCR] Page {page_num}: No text extracted")
+            except Exception as e:
+                print(f"[PDF_OCR] Page {page_num}: EasyOCR failed: {str(e)}")
+                continue
+        
+        combined_text = "\n".join(all_text)
+        if combined_text.strip():
+            print(f"[PDF_OCR] ✅ EasyOCR extracted {len(combined_text)} total characters from {len(images)} pages")
+            return combined_text
+        else:
+            print(f"[PDF_OCR] ⚠️ EasyOCR completed but no text was extracted")
+            return ""
+            
+    except ImportError as e:
+        print(f"[PDF_OCR] ⚠️ EasyOCR not available: {e}")
+        print(f"[PDF_OCR]   Install with: pip install easyocr")
+        return ""
+    except Exception as e:
+        print(f"[PDF_OCR] ❌ EasyOCR extraction failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return ""
+    
+    return ""
+
+
 def _tx_extract_tables_from_pdf(uploaded_file) -> List[pd.DataFrame]:
     """Extract tables from PDF as DataFrames."""
     try:
         import pdfplumber  # type: ignore
     except ImportError:
+        print("[PDF_EXTRACT] ⚠️ pdfplumber not installed - cannot extract PDF tables")
         return []
 
     tables: List[pd.DataFrame] = []
     try:
         uploaded_file.seek(0)
         with pdfplumber.open(uploaded_file) as pdf:
+            total_pages = len(pdf.pages)
+            print(f"[PDF_EXTRACT] Processing PDF with {total_pages} pages")
+            
             for page_index, page in enumerate(pdf.pages, start=1):
                 try:
                     page_tables = page.extract_tables()
-                except Exception:
+                    print(f"[PDF_EXTRACT] Page {page_index}: Found {len(page_tables or [])} tables")
+                except Exception as e:
+                    print(f"[PDF_EXTRACT] Page {page_index}: Error extracting tables: {str(e)}")
                     continue
+                    
                 for table_index, table in enumerate(page_tables or [], start=1):
                     if not table or len(table) < 2:
+                        print(f"[PDF_EXTRACT] Page {page_index}, Table {table_index}: Skipped (too small: {len(table) if table else 0} rows)")
                         continue
-                    cleaned_rows = [
-                        [cell.strip() if isinstance(cell, str) else cell for cell in row]
-                        for row in table
-                        if row and any(cell not in (None, '') for cell in row)
-                    ]
+                    
+                    # Debug: Check raw cell content before cleaning
+                    if table_index == 1 and page_index <= 2:  # Debug first few tables
+                        print(f"[PDF_EXTRACT] Page {page_index}, Table {table_index}: Raw table sample")
+                        print(f"[PDF_EXTRACT]   First row raw: {table[0] if table else 'None'}")
+                        if len(table) > 1:
+                            print(f"[PDF_EXTRACT]   Second row raw: {table[1] if table else 'None'}")
+                    
+                    # Clean cells but be more lenient - allow rows with some empty cells
+                    # PDF tables often have sparse data where some columns are empty
+                    cleaned_rows = []
+                    for row_idx, row in enumerate(table):
+                        if not row:
+                            continue
+                        # Clean each cell - preserve content even if it looks empty
+                        # PDF extraction might return None or empty strings, but try to get actual content
+                        cleaned_cells = []
+                        for cell in row:
+                            if cell is None:
+                                cleaned_cells.append('')
+                            elif isinstance(cell, str):
+                                # Preserve the string as-is first, then clean
+                                cell_str = cell if cell else ''
+                                # Only strip if there's actual content
+                                if cell_str.strip():
+                                    cleaned_cells.append(cell_str.strip())
+                                else:
+                                    cleaned_cells.append(cell_str)  # Keep original even if empty
+                            else:
+                                # Try to convert to string - might be a number or other type
+                                try:
+                                    cell_str = str(cell) if cell is not None else ''
+                                    cleaned_cells.append(cell_str.strip() if cell_str.strip() else cell_str)
+                                except:
+                                    cleaned_cells.append('')
+                        
+                        # Keep row if it has at least 1 non-empty cell (very lenient for PDFs)
+                        # PDFs can have rows with just one important value
+                        non_empty_count = sum(1 for cell in cleaned_cells if cell and str(cell).strip())
+                        if non_empty_count >= 1:  # At least 1 cell with data (very lenient)
+                            cleaned_rows.append(cleaned_cells)
+                        elif row_idx == 0:
+                            # Always keep first row as potential header, even if mostly empty
+                            cleaned_rows.append(cleaned_cells)
+                    
+                    # More lenient: accept tables with at least 1 data row (header + 1 row minimum)
                     if len(cleaned_rows) < 2:
+                        print(f"[PDF_EXTRACT] Page {page_index}, Table {table_index}: Skipped (only {len(cleaned_rows)} valid rows after cleaning)")
+                        print(f"[PDF_EXTRACT]   Original table had {len(table)} rows")
+                        if table and len(table) > 0:
+                            print(f"[PDF_EXTRACT]   First row sample: {table[0][:5] if len(table[0]) > 5 else table[0]}")
+                            if len(table) > 1:
+                                print(f"[PDF_EXTRACT]   Second row sample: {table[1][:5] if len(table[1]) > 5 else table[1]}")
                         continue
+                    
+                    # Log table info for debugging - show actual cell content
+                    if len(cleaned_rows) >= 2:
+                        print(f"[PDF_EXTRACT] Page {page_index}, Table {table_index}: Keeping table with {len(cleaned_rows)} rows")
+                        # Show first few cells of header and first data row
+                        header_preview = [str(c)[:20] for c in cleaned_rows[0][:5]]  # First 5 columns, first 20 chars
+                        print(f"[PDF_EXTRACT]   Header (first 5 cols): {header_preview}")
+                        if len(cleaned_rows) > 1:
+                            data_preview = [str(c)[:20] for c in cleaned_rows[1][:5]]
+                            print(f"[PDF_EXTRACT]   First data row (first 5 cols): {data_preview}")
+                        
+                        # Check if cells actually have content (not just empty strings)
+                        header_has_content = any(c and str(c).strip() for c in cleaned_rows[0])
+                        data_has_content = any(c and str(c).strip() for c in cleaned_rows[1]) if len(cleaned_rows) > 1 else False
+                        if not header_has_content and not data_has_content:
+                            print(f"[PDF_EXTRACT]   ⚠️ WARNING: Table cells appear to be empty - may need OCR or different extraction method")
+                    
                     header = cleaned_rows[0]
                     body = cleaned_rows[1:]
+                    
+                    # Normalize header: clean up column names for better mapping
+                    # PDF extraction can produce headers with extra spaces, None values, etc.
+                    normalized_header = []
+                    for i, col in enumerate(header):
+                        # Use _tx_safe_str to normalize (handles None, empty, whitespace)
+                        clean_col = _tx_safe_str(col)
+                        # If column is empty/None, create a default name
+                        if not clean_col:
+                            clean_col = f"Column_{i+1}"
+                        normalized_header.append(clean_col)
+                    
                     try:
-                        df = pd.DataFrame(body, columns=header)
+                        df = pd.DataFrame(body, columns=normalized_header)
                         df.attrs['__tx_source'] = f"page_{page_index}_table_{table_index}"
+                        print(f"[PDF_EXTRACT] Page {page_index}, Table {table_index}: Created DataFrame {df.shape}, columns: {list(df.columns)}")
                         tables.append(df)
-                    except Exception:
+                    except Exception as e:
+                        print(f"[PDF_EXTRACT] Page {page_index}, Table {table_index}: Error creating DataFrame: {str(e)}")
                         continue
-    except Exception:
+                        
+            print(f"[PDF_EXTRACT] Total tables extracted: {len(tables)}")
+            
+            # If no tables found, try alternative extraction methods
+            if len(tables) == 0:
+                print(f"[PDF_EXTRACT] No tables found with standard extraction, trying alternative methods...")
+                uploaded_file.seek(0)
+                with pdfplumber.open(uploaded_file) as pdf:
+                    # Try extracting all text and looking for tabular patterns
+                    for page_index, page in enumerate(pdf.pages, start=1):
+                        try:
+                            # Try with different table settings (removed invalid edge_tolerance)
+                            page_tables = page.extract_tables(table_settings={
+                                "vertical_strategy": "lines_strict",
+                                "horizontal_strategy": "lines_strict",
+                                "explicit_vertical_lines": [],
+                                "explicit_horizontal_lines": [],
+                                "snap_tolerance": 3,
+                                "join_tolerance": 3,
+                                "min_words_vertical": 1,
+                                "min_words_horizontal": 1,
+                            })
+                            if page_tables:
+                                print(f"[PDF_EXTRACT] Page {page_index}: Found {len(page_tables)} tables with alternative settings")
+                                # Process these tables with the same logic above
+                                for table_index, table in enumerate(page_tables, start=1):
+                                    if not table or len(table) < 2:
+                                        continue
+                                    cleaned_rows = []
+                                    for row in table:
+                                        if not row:
+                                            continue
+                                        cleaned_cells = [cell.strip() if isinstance(cell, str) else (str(cell).strip() if cell is not None else '') for cell in row]
+                                        non_empty_count = sum(1 for cell in cleaned_cells if cell and str(cell).strip())
+                                        if non_empty_count >= 2:
+                                            cleaned_rows.append(cleaned_cells)
+                                    if len(cleaned_rows) >= 2:
+                                        header = cleaned_rows[0]
+                                        body = cleaned_rows[1:]
+                                        normalized_header = []
+                                        for i, col in enumerate(header):
+                                            clean_col = _tx_safe_str(col)
+                                            if not clean_col:
+                                                clean_col = f"Column_{i+1}"
+                                            normalized_header.append(clean_col)
+                                        try:
+                                            df = pd.DataFrame(body, columns=normalized_header)
+                                            df.attrs['__tx_source'] = f"page_{page_index}_table_{table_index}_alt"
+                                            print(f"[PDF_EXTRACT] Page {page_index}, Table {table_index} (alt): Created DataFrame {df.shape}")
+                                            tables.append(df)
+                                        except Exception as e:
+                                            print(f"[PDF_EXTRACT] Page {page_index}, Table {table_index} (alt): Error creating DataFrame: {str(e)}")
+                                            continue
+                        except Exception as e:
+                            print(f"[PDF_EXTRACT] Page {page_index}: Alternative extraction failed: {str(e)}")
+                            continue
+                            
+                print(f"[PDF_EXTRACT] After alternative extraction: {len(tables)} total tables")
+            
+            # If still no tables, try text-based extraction (for image-based PDFs or when table detection fails)
+            if len(tables) == 0:
+                print(f"[PDF_EXTRACT] Still no tables found, trying text extraction as fallback...")
+                uploaded_file.seek(0)
+                try:
+                    with pdfplumber.open(uploaded_file) as pdf:
+                        all_text_content = []
+                        total_chars = 0
+                        for page_index, page in enumerate(pdf.pages, start=1):
+                            try:
+                                # Try multiple extraction methods
+                                page_text = page.extract_text()
+                                if not page_text or not page_text.strip():
+                                    # Try extracting from words/chars directly
+                                    words = page.extract_words()
+                                    if words:
+                                        page_text = ' '.join([w.get('text', '') for w in words if w.get('text')])
+                                
+                                if page_text and page_text.strip():
+                                    all_text_content.append(f"--- Page {page_index} ---\n{page_text}")
+                                    char_count = len(page_text)
+                                    total_chars += char_count
+                                    print(f"[PDF_EXTRACT] Page {page_index}: Extracted {char_count} characters of text")
+                                    # Show sample of extracted text
+                                    sample = page_text[:200].replace('\n', ' ')
+                                    print(f"[PDF_EXTRACT]   Sample: {sample}...")
+                                else:
+                                    print(f"[PDF_EXTRACT] Page {page_index}: No text found - may be image-based/scanned PDF")
+                                    # Check if page has any words/chars at all
+                                    words = page.extract_words()
+                                    chars = page.chars
+                                    print(f"[PDF_EXTRACT]   Words found: {len(words) if words else 0}, Chars found: {len(chars) if chars else 0}")
+                            except Exception as e:
+                                print(f"[PDF_EXTRACT] Page {page_index}: Text extraction failed: {str(e)}")
+                                continue
+                        
+                        if all_text_content:
+                            print(f"[PDF_EXTRACT] ✅ Extracted text from {len(all_text_content)}/{len(pdf.pages)} pages ({total_chars} total characters)")
+                            print(f"[PDF_EXTRACT]   AI fallback should be able to process this text content")
+                        else:
+                            print(f"[PDF_EXTRACT] ⚠️ No extractable text found - PDF appears to be image-based/scanned")
+                            print(f"[PDF_EXTRACT]   Attempting OCR extraction (same method as AI Assistant uses)...")
+                            # Try OCR as last resort - same approach as AI Assistant
+                            ocr_text = _extract_pdf_with_ocr(uploaded_file)
+                            if ocr_text and ocr_text.strip():
+                                print(f"[PDF_EXTRACT] ✅ OCR extracted {len(ocr_text)} characters")
+                                # Store OCR text for AI processing
+                                # The AI fallback will process this OCR text
+                                all_text_content = [ocr_text]
+                            else:
+                                print(f"[PDF_EXTRACT]   OCR also failed or not available")
+                                print(f"[PDF_EXTRACT]   Recommendation: Install OCR dependencies (pdf2image, pytesseract, Tesseract) or convert PDF to text-selectable format")
+                except Exception as e:
+                    print(f"[PDF_EXTRACT] Text extraction fallback failed: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                
+    except Exception as e:
+        print(f"[PDF_EXTRACT] Error processing PDF: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return []
     finally:
         try:
@@ -1556,8 +1883,10 @@ def _tx_dataframe_to_transactions(
     print(f"[FILE_PARSE] After _tx_auto_map_missing_columns columns: {list(prepared_df.columns)}")
 
     if debug_log is not None:
+        # Extract just the filename from path (handles full paths and hyphens correctly)
+        sheet_name = sheet_label or Path(filename).stem
         debug_log.append({
-            'sheet': sheet_label or Path(filename).stem,
+            'sheet': sheet_name,
             'rows': int(prepared_df.shape[0]),
             'columns': list(prepared_df.columns),
             'original_columns': prepared_df.attrs.get('__tx_original_columns', []),
@@ -1733,6 +2062,8 @@ def _tx_dataframe_to_transactions(
 
         channel = _tx_safe_str(row.get('channel'))
         if not channel:
+            # Extract just the filename from path (handles full paths like E:\kalyan\Files_checked\deepak.pdf)
+            # Path().stem correctly handles hyphens in filenames (e.g., deepak-2.pdf -> deepak-2)
             base = Path(filename).stem
             if sheet_label:
                 channel = f"{base} - {sheet_label}"
@@ -1765,7 +2096,7 @@ def _tx_dataframe_to_transactions(
     # Debug logging
     if rows_processed > 0:
         print(f"[FILE_PARSE] Processed {rows_processed} rows: {rows_added} added, {rows_skipped_date} skipped (date), {rows_skipped_ticker} skipped (ticker/name)")
-    
+
     return transactions
 
 
@@ -1803,11 +2134,19 @@ def extract_transactions_python(uploaded_file, filename: str) -> Tuple[List[Dict
             transactions = rows
         elif suffix == '.pdf':
             tables = _tx_extract_tables_from_pdf(uploaded_file)
+            print(f"[FILE_PARSE] PDF {filename}: Extracted {len(tables)} tables")
             rows: List[Dict[str, Any]] = []
-            for table in tables:
+            for table_idx, table in enumerate(tables):
                 label = table.attrs.get('__tx_source')
-                rows.extend(_tx_dataframe_to_transactions(table, filename, sheet_label=label, debug_log=debug_log))
+                print(f"[FILE_PARSE] Processing table {table_idx + 1}/{len(tables)}: {label}")
+                print(f"[FILE_PARSE]   Table shape: {table.shape}, columns: {list(table.columns)}")
+                if not table.empty:
+                    print(f"[FILE_PARSE]   First row sample: {table.iloc[0].to_dict() if len(table) > 0 else 'Empty'}")
+                table_transactions = _tx_dataframe_to_transactions(table, filename, sheet_label=label, debug_log=debug_log)
+                print(f"[FILE_PARSE]   Extracted {len(table_transactions)} transactions from this table")
+                rows.extend(table_transactions)
             transactions = rows
+            print(f"[FILE_PARSE] PDF {filename}: Total {len(transactions)} transactions from all tables")
         else:
             transactions = []
     except Exception as exc:
@@ -1820,6 +2159,11 @@ def extract_transactions_python(uploaded_file, filename: str) -> Tuple[List[Dict
             pass
 
     filtered = [tx for tx in transactions if tx.get('quantity') or tx.get('amount')]
+    print(f"[FILE_PARSE] {filename}: {len(transactions)} total transactions, {len(filtered)} after filtering (must have quantity or amount)")
+    if len(transactions) > 0 and len(filtered) == 0:
+        print(f"[FILE_PARSE] ⚠️ All transactions filtered out - showing sample:")
+        for i, tx in enumerate(transactions[:3]):
+            print(f"[FILE_PARSE]   Transaction {i+1}: quantity={tx.get('quantity')}, amount={tx.get('amount')}, ticker={tx.get('ticker')}, date={tx.get('date')}")
     return filtered, debug_log
 
 
@@ -2006,7 +2350,7 @@ if not hasattr(st.session_state.db, "get_channel_weekly_history") or not hasattr
     st.session_state.db = SharedDatabaseManager()
 
 # Function to detect corporate actions (splits/bonus)
-def detect_corporate_actions(user_id, db):
+def detect_corporate_actions(user_id, db, holdings=None):
     """
     Detect stock splits and bonus shares by comparing CSV prices with current prices
     Returns list of stocks with likely corporate actions
@@ -2014,7 +2358,9 @@ def detect_corporate_actions(user_id, db):
     try:
         import yfinance as yf
 
-        holdings = db.get_user_holdings(user_id)
+        # Use provided holdings or fetch if not provided
+        if holdings is None:
+            holdings = db.get_user_holdings(user_id)
         corporate_actions: List[Dict[str, Any]] = []
 
         @functools.lru_cache(maxsize=128)
@@ -2141,12 +2487,13 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db):
         return 0
 
 # Function to update bond prices using AI
-def update_bond_prices_with_ai(user_id, db):
+def update_bond_prices_with_ai(user_id, db, bonds=None):
     """Update bond prices using AI (called automatically on login)"""
     try:
-        # Get all bond holdings for this user
-        all_holdings = db.get_user_holdings(user_id)
-        bonds = [h for h in all_holdings if h.get('asset_type') == 'bond']
+        # Use provided bonds or fetch if not provided
+        if bonds is None:
+            all_holdings = db.get_user_holdings(user_id)
+            bonds = [h for h in all_holdings if h.get('asset_type') == 'bond']
         
         if not bonds:
             return  # No bonds to update
@@ -2318,27 +2665,42 @@ def login_page():
             if user:
                 st.session_state.user = user
                 
-                # Update bond prices automatically on login (AI-powered)
-                try:
-                    update_bond_prices_with_ai(user['id'], db)
-                except:
-                    pass  # Silent failure - don't break login
-                
-                # Recalculate holdings on login (ensures MFs show up)
+                # OPTIMIZATION: Recalculate first, then fetch holdings ONCE and reuse
+                # This avoids multiple separate database calls (was 3+ calls, now 2 max)
                 try:
                     db.recalculate_holdings(user['id'])
                 except:
                     pass  # Silent failure
+                
+                # Fetch holdings ONCE after recalculation and reuse for all operations
+                try:
+                    holdings = db.get_user_holdings(user['id'])
+                except:
+                    holdings = []
+                
+                # Update bond prices automatically on login (AI-powered)
+                # Pass holdings to avoid another fetch
+                try:
+                    if holdings:
+                        bonds = [h for h in holdings if h.get('asset_type') == 'bond']
+                        if bonds:
+                            update_bond_prices_with_ai(user['id'], db, bonds=bonds)
+                except:
+                    pass  # Silent failure - don't break login
                 
                 st.session_state.needs_initial_refresh = True
                 st.session_state.missing_weeks_fetched = False
                 st.session_state.last_fetch_time = None
                 
                 # Detect corporate actions (splits/bonus) on login
+                # Pass holdings to avoid another fetch
                 try:
-                    corporate_actions = detect_corporate_actions(user['id'], db)
-                    if corporate_actions:
-                        st.session_state.corporate_actions_detected = corporate_actions
+                    if holdings:
+                        corporate_actions = detect_corporate_actions(user['id'], db, holdings=holdings)
+                        if corporate_actions:
+                            st.session_state.corporate_actions_detected = corporate_actions
+                        else:
+                            st.session_state.corporate_actions_detected = None
                     else:
                         st.session_state.corporate_actions_detected = None
                 except:
@@ -2378,7 +2740,16 @@ def login_page():
                             csv_rows.extend(rows)
                             summary_messages.append(f"📄 {uploaded_file.name}: {len(rows)} rows ({method_used.upper()})")
                         else:
-                            summary_messages.append(f"⚠️ {uploaded_file.name}: No transactions detected.")
+                            # Provide more helpful error message
+                            if uploaded_file.name.lower().endswith('.pdf'):
+                                error_msg = f"⚠️ {uploaded_file.name}: Image-based PDF detected. Use OCR or provide text-selectable PDF/CSV/Excel."
+                            else:
+                                error_msg = f"⚠️ {uploaded_file.name}: No transactions detected."
+                                if method_used == 'python':
+                                    error_msg += " Check terminal logs for extraction details."
+                                if not AI_AGENTS_AVAILABLE:
+                                    error_msg += " AI fallback unavailable - check AI agents configuration."
+                            summary_messages.append(error_msg)
 
                 if csv_rows:
                     df_preview = pd.DataFrame(csv_rows)
@@ -4302,13 +4673,36 @@ def extract_transactions_for_csv(uploaded_file, file_name: str, user_id: Optiona
     transactions = python_transactions or []
 
     # Fall back to AI only when Python parser finds nothing
-    if not transactions and AI_AGENTS_AVAILABLE:
-        method_used = 'ai'
-        try:
-            uploaded_file.seek(0)
-        except Exception:
-            pass
-        transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
+    if not transactions:
+        if AI_AGENTS_AVAILABLE:
+            method_used = 'ai'
+            print(f"[FILE_PARSE] Python extraction found no transactions, trying AI extraction for {file_name}...")
+            try:
+                uploaded_file.seek(0)
+            except Exception:
+                pass
+            transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
+            if transactions:
+                print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions")
+            else:
+                print(f"[FILE_PARSE] ⚠️ AI extraction also found no transactions")
+                # Check if this is a PDF that might be image-based
+                if file_name.lower().endswith('.pdf'):
+                    st.warning("""
+                    **⚠️ PDF Processing Issue**
+                    
+                    The PDF file appears to be **image-based (scanned)** and contains no extractable text.
+                    
+                    **Solutions:**
+                    1. **Use OCR software** (e.g., Adobe Acrobat, online OCR tools) to convert the PDF to text-selectable format
+                    2. **Provide the original source file** (CSV, Excel, or text-selectable PDF) instead
+                    3. **Check terminal logs** for detailed extraction diagnostics
+                    
+                    The system detected table structures but all cells were empty, and text extraction returned no content.
+                    """)
+        else:
+            print(f"[FILE_PARSE] ⚠️ Python extraction found no transactions and AI agents are not available")
+            print(f"[FILE_PARSE]   Check terminal logs above for details on why extraction failed")
 
     normalized_rows = [
         _tx_prepare_preview_row(tx, file_name, method_used, use_price_fetcher=True)
@@ -4435,7 +4829,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                 else:
                     python_transactions = extraction_result or []
                     python_debug_log = []
-                transactions = python_transactions
+                transactions = python_transactions or []
             
             # Fallback to AI only if Python found nothing (or for PDFs)
             if not transactions:
@@ -9650,7 +10044,7 @@ def upload_files_page():
         
         col1, col2, col3 = st.columns([3, 1, 1])
         convert_to_csv_clicked = False
-
+        
         with col1:
             if st.button("🚀 Process Files", type="primary", use_container_width=True):
                 st.info(f"🚀 Processing {len(uploaded_files)} file(s) for portfolio: {portfolio['portfolio_name']}")
@@ -9687,7 +10081,11 @@ def upload_files_page():
                         csv_rows.extend(rows)
                         summary_messages.append(f"📄 {uploaded_file.name}: {len(rows)} rows ({method_used.upper()})")
                     else:
-                        summary_messages.append(f"⚠️ {uploaded_file.name}: No transactions detected.")
+                        # Check if it's an image-based PDF
+                        if uploaded_file.name.lower().endswith('.pdf'):
+                            summary_messages.append(f"⚠️ {uploaded_file.name}: Image-based PDF detected. Use OCR or provide text-selectable PDF/CSV/Excel.")
+                        else:
+                            summary_messages.append(f"⚠️ {uploaded_file.name}: No transactions detected.")
 
             if csv_rows:
                 df_preview = pd.DataFrame(csv_rows)

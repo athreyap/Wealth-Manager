@@ -16,6 +16,11 @@ scipy
 # File Processing
 PyPDF2
 pdfplumber
+pdf2image
+pytesseract
+Pillow
+# Pure Python OCR (works on Streamlit Cloud without system dependencies)
+easyocr
 
 # Financial Data
 yfinance
