@@ -16,11 +16,35 @@ scipy
 # File Processing
 PyPDF2
 pdfplumber
-pdf2image
-pytesseract
+pdf2image  # Requires Poppler (system dependency - see installation below)
+pytesseract  # Requires Tesseract OCR (system dependency - see installation below)
 Pillow
 # Pure Python OCR (works on Streamlit Cloud without system dependencies)
 easyocr
+
+# ============================================================================
+# SYSTEM DEPENDENCIES (Required for OCR functionality)
+# ============================================================================
+# 
+# 1. POPPLER (Required for pdf2image):
+#    Windows: Download from https://github.com/oschwartz10612/poppler-windows/releases/
+#             Extract and add to PATH, or install via:
+#             - Chocolatey: choco install poppler
+#             - Scoop: scoop install poppler
+#    
+#    Linux: sudo apt-get install poppler-utils
+#    Mac: brew install poppler
+#
+# 2. TESSERACT OCR (Optional, for Tesseract OCR):
+#    Windows: Download from https://github.com/UB-Mannheim/tesseract/wiki
+#             Install and add to PATH
+#    
+#    Linux: sudo apt-get install tesseract-ocr
+#    Mac: brew install tesseract
+#
+# Note: EasyOCR works without system dependencies (pure Python)
+#       but still needs pdf2image (which needs Poppler) to convert PDF to images
+# ============================================================================
 
 # Financial Data
 yfinance

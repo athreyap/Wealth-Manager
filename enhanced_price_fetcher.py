@@ -903,7 +903,7 @@ class EnhancedPriceFetcher:
         except Exception:
             pass
         return None
-    
+
     def _get_stock_price_with_fallback(self, ticker: str, context_name: Optional[str] = None) -> tuple:
         """
         Stock price fetching with complete fallback:

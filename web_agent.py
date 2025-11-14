@@ -292,39 +292,77 @@ def _build_document_payload_from_file(uploaded_file) -> Tuple[Optional[Dict[str,
                 return None, f"PDF processing libraries missing: {exc}"
 
             uploaded_file.seek(0)
+            
+            # Convert uploaded_file to BytesIO for pdfplumber compatibility
+            import io
+            if hasattr(uploaded_file, 'read'):
+                pdf_bytes = uploaded_file.read()
+            elif hasattr(uploaded_file, 'getvalue'):
+                pdf_bytes = uploaded_file.getvalue()
+                if isinstance(pdf_bytes, str):
+                    pdf_bytes = pdf_bytes.encode('utf-8')
+            else:
+                pdf_bytes = uploaded_file
+            
+            # Ensure we have bytes
+            if isinstance(pdf_bytes, str):
+                pdf_bytes = pdf_bytes.encode('latin-1')
+            
             pdf_text = ""
             tables_found: List[Dict[str, Any]] = []
             page_count = 0
 
-            with pdfplumber.open(uploaded_file) as pdf:
-                for page_num, page in enumerate(pdf.pages, 1):
-                    page_count += 1
-                    page_text = page.extract_text()
-                    if page_text:
-                        pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+            try:
+                with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                    page_count = len(pdf.pages)
+                    print(f"[AI_ASSISTANT_PDF] PDF opened successfully with {page_count} pages")
+                    
+                    for page_num, page in enumerate(pdf.pages, 1):
+                        try:
+                            page_text = page.extract_text()
+                            if page_text:
+                                pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+                                print(f"[AI_ASSISTANT_PDF] Page {page_num}: Extracted {len(page_text)} characters")
 
-                    tables = page.extract_tables()
-                    if tables:
-                        for table_idx, table in enumerate(tables, 1):
-                            tables_found.append(
-                                {
-                                    'page': page_num,
-                                    'table': table_idx,
-                                    'rows': len(table),
-                                }
-                            )
+                            tables = page.extract_tables()
+                            if tables:
+                                for table_idx, table in enumerate(tables, 1):
+                                    tables_found.append(
+                                        {
+                                            'page': page_num,
+                                            'table': table_idx,
+                                            'rows': len(table),
+                                        }
+                                    )
+                        except Exception as page_error:
+                            print(f"[AI_ASSISTANT_PDF] Page {page_num}: Error during extraction: {str(page_error)}")
+                            continue
+            except Exception as pdf_error:
+                print(f"[AI_ASSISTANT_PDF] pdfplumber failed: {str(pdf_error)}")
+                pdf_text = ""  # Reset to trigger fallback
 
             if not pdf_text.strip():
                 # Fallback to PyPDF2 if pdfplumber couldn't extract text
-                uploaded_file.seek(0)
-                reader = PyPDF2.PdfReader(uploaded_file)
-                page_count = len(reader.pages)
-                extracted_pages = []
-                for page in reader.pages:
-                    page_content = page.extract_text()
-                    if page_content:
-                        extracted_pages.append(page_content)
-                pdf_text = "\n\n".join(extracted_pages)
+                print(f"[AI_ASSISTANT_PDF] pdfplumber returned no text, trying PyPDF2...")
+                try:
+                    reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+                    page_count = len(reader.pages)
+                    extracted_pages = []
+                    for page_num, page in enumerate(reader.pages, 1):
+                        try:
+                            page_content = page.extract_text()
+                            if page_content:
+                                extracted_pages.append(page_content)
+                                print(f"[AI_ASSISTANT_PDF] PyPDF2 Page {page_num}: Extracted {len(page_content)} characters")
+                        except Exception as page_error:
+                            print(f"[AI_ASSISTANT_PDF] PyPDF2 Page {page_num}: Error: {str(page_error)}")
+                            continue
+                    pdf_text = "\n\n".join(extracted_pages)
+                    if pdf_text.strip():
+                        print(f"[AI_ASSISTANT_PDF] PyPDF2 successfully extracted {len(pdf_text)} characters")
+                except Exception as pypdf_error:
+                    print(f"[AI_ASSISTANT_PDF] PyPDF2 also failed: {str(pypdf_error)}")
+                    pdf_text = ""  # Will trigger OCR fallback
 
             if not pdf_text.strip():
                 # Last resort: Try OCR for image-based PDFs
@@ -1118,22 +1156,67 @@ def _extract_pdf_with_ocr(uploaded_file) -> str:
     try:
         import easyocr
         import numpy as np
+        from PIL import Image
+        import io
+        
+        images = []
         
         # Try to convert PDF to images - may fail on Streamlit Cloud if Poppler not available
         try:
             from pdf2image import convert_from_bytes
             images = convert_from_bytes(pdf_bytes, dpi=300, fmt='RGB')
+            print(f"[PDF_OCR] pdf2image converted {len(images)} pages to images")
         except Exception as pdf_conv_error:
             print(f"[PDF_OCR] pdf2image failed (may need Poppler): {str(pdf_conv_error)}")
-            print(f"[PDF_OCR] Note: On Streamlit Cloud, Poppler may not be available")
-            print(f"[PDF_OCR] Consider using cloud OCR services or converting PDFs to images first")
+            print(f"[PDF_OCR] Trying alternative: Extract images directly from PDF using PyPDF2...")
+            
+            # Alternative: Try to extract images directly from PDF using PyPDF2
+            try:
+                import PyPDF2
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+                
+                for page_num, page in enumerate(pdf_reader.pages, 1):
+                    try:
+                        # Try to get page as image (if PDF has embedded images)
+                        if '/XObject' in page.get('/Resources', {}):
+                            xObject = page['/Resources']['/XObject'].get_object()
+                            for obj in xObject:
+                                if xObject[obj]['/Subtype'] == '/Image':
+                                    # Extract image from PDF
+                                    img_obj = xObject[obj]
+                                    # This is complex - pdf2image is much easier
+                                    pass
+                    except:
+                        pass
+                
+                # If we couldn't extract images, try rendering page as image using pdfplumber
+                try:
+                    import pdfplumber
+                    pdf_plumber = pdfplumber.open(io.BytesIO(pdf_bytes))
+                    for page in pdf_plumber.pages:
+                        # pdfplumber doesn't directly render to image, but we can try
+                        # Actually, pdfplumber also needs Poppler for image rendering
+                        pass
+                    pdf_plumber.close()
+                except:
+                    pass
+                
+                print(f"[PDF_OCR] ⚠️ Cannot extract images without Poppler (pdf2image dependency)")
+                print(f"[PDF_OCR]   Install Poppler: https://github.com/oschwartz10612/poppler-windows/releases/")
+                print(f"[PDF_OCR]   Or use a text-selectable PDF")
+                return ""
+            except Exception as alt_error:
+                print(f"[PDF_OCR] Alternative extraction also failed: {str(alt_error)}")
+                return ""
+        
+        if not images:
+            print(f"[PDF_OCR] ⚠️ No images extracted - cannot proceed with OCR")
             return ""
         
         print(f"[PDF_OCR] Attempting EasyOCR (Streamlit Cloud compatible)...")
         # Initialize EasyOCR reader (English only for speed)
         # This will download models on first run (~100MB, cached after first use)
         reader = easyocr.Reader(['en'], gpu=False)
-        print(f"[PDF_OCR] Converted {len(images)} pages to images")
         
         all_text = []
         for page_num, image in enumerate(images, 1):
@@ -1188,7 +1271,23 @@ def _tx_extract_tables_from_pdf(uploaded_file) -> List[pd.DataFrame]:
     tables: List[pd.DataFrame] = []
     try:
         uploaded_file.seek(0)
-        with pdfplumber.open(uploaded_file) as pdf:
+        
+        # Convert uploaded_file to BytesIO for pdfplumber compatibility
+        import io
+        if hasattr(uploaded_file, 'read'):
+            pdf_bytes = uploaded_file.read()
+        elif hasattr(uploaded_file, 'getvalue'):
+            pdf_bytes = uploaded_file.getvalue()
+            if isinstance(pdf_bytes, str):
+                pdf_bytes = pdf_bytes.encode('utf-8')
+        else:
+            pdf_bytes = uploaded_file
+        
+        # Ensure we have bytes
+        if isinstance(pdf_bytes, str):
+            pdf_bytes = pdf_bytes.encode('latin-1')
+        
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             total_pages = len(pdf.pages)
             print(f"[PDF_EXTRACT] Processing PDF with {total_pages} pages")
             
@@ -1304,7 +1403,23 @@ def _tx_extract_tables_from_pdf(uploaded_file) -> List[pd.DataFrame]:
             if len(tables) == 0:
                 print(f"[PDF_EXTRACT] No tables found with standard extraction, trying alternative methods...")
                 uploaded_file.seek(0)
-                with pdfplumber.open(uploaded_file) as pdf:
+                
+                # Convert uploaded_file to BytesIO for pdfplumber compatibility
+                import io
+                if hasattr(uploaded_file, 'read'):
+                    pdf_bytes = uploaded_file.read()
+                elif hasattr(uploaded_file, 'getvalue'):
+                    pdf_bytes = uploaded_file.getvalue()
+                    if isinstance(pdf_bytes, str):
+                        pdf_bytes = pdf_bytes.encode('utf-8')
+                else:
+                    pdf_bytes = uploaded_file
+                
+                # Ensure we have bytes
+                if isinstance(pdf_bytes, str):
+                    pdf_bytes = pdf_bytes.encode('latin-1')
+                
+                with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                     # Try extracting all text and looking for tabular patterns
                     for page_index, page in enumerate(pdf.pages, start=1):
                         try:
@@ -1360,8 +1475,24 @@ def _tx_extract_tables_from_pdf(uploaded_file) -> List[pd.DataFrame]:
             if len(tables) == 0:
                 print(f"[PDF_EXTRACT] Still no tables found, trying text extraction as fallback...")
                 uploaded_file.seek(0)
+                
+                # Convert uploaded_file to BytesIO for pdfplumber compatibility
+                import io
+                if hasattr(uploaded_file, 'read'):
+                    pdf_bytes = uploaded_file.read()
+                elif hasattr(uploaded_file, 'getvalue'):
+                    pdf_bytes = uploaded_file.getvalue()
+                    if isinstance(pdf_bytes, str):
+                        pdf_bytes = pdf_bytes.encode('utf-8')
+                else:
+                    pdf_bytes = uploaded_file
+                
+                # Ensure we have bytes
+                if isinstance(pdf_bytes, str):
+                    pdf_bytes = pdf_bytes.encode('latin-1')
+                
                 try:
-                    with pdfplumber.open(uploaded_file) as pdf:
+                    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                         all_text_content = []
                         total_chars = 0
                         for page_index, page in enumerate(pdf.pages, start=1):
@@ -4823,13 +4954,13 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                 except Exception:
                     pass
                 
-                extraction_result = extract_transactions_python(uploaded_file, file_name)
-                if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
-                    python_transactions, python_debug_log = extraction_result
-                else:
-                    python_transactions = extraction_result or []
-                    python_debug_log = []
-                transactions = python_transactions or []
+            extraction_result = extract_transactions_python(uploaded_file, file_name)
+            if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+                python_transactions, python_debug_log = extraction_result
+            else:
+                python_transactions = extraction_result or []
+                python_debug_log = []
+            transactions = python_transactions or []
             
             # Fallback to AI only if Python found nothing (or for PDFs)
             if not transactions:

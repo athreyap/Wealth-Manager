@@ -231,26 +231,52 @@ class AIFileProcessor(BaseAgent):
                 # Try pdfplumber first (better text extraction)
                 try:
                     import pdfplumber
+                    import io
+                    
+                    # Convert file_data to BytesIO for pdfplumber compatibility
                     file_data.seek(0)
+                    if hasattr(file_data, 'read'):
+                        # If it's a file-like object, read bytes
+                        pdf_bytes = file_data.read()
+                    elif hasattr(file_data, 'getvalue'):
+                        # If it's a BytesIO/StringIO, get value
+                        pdf_bytes = file_data.getvalue()
+                        if isinstance(pdf_bytes, str):
+                            pdf_bytes = pdf_bytes.encode('utf-8')
+                    else:
+                        pdf_bytes = file_data
+                    
+                    # Ensure we have bytes
+                    if isinstance(pdf_bytes, str):
+                        pdf_bytes = pdf_bytes.encode('latin-1')
+                    
                     pdf_text = ""
-                    with pdfplumber.open(file_data) as pdf:
+                    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                        total_pages = len(pdf.pages)
+                        self.logger.info(f"PDF opened successfully with {total_pages} pages")
+                        
                         for page_num, page in enumerate(pdf.pages, 1):
-                            # Try standard text extraction first
-                            page_text = page.extract_text()
-                            
-                            # If that fails, try extracting from words
-                            if not page_text or not page_text.strip():
-                                words = page.extract_words()
-                                if words:
-                                    page_text = ' '.join([w.get('text', '') for w in words if w.get('text')])
-                            
-                            if page_text and page_text.strip():
-                                pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
-                            else:
-                                # Log which pages have no text
-                                words = page.extract_words()
-                                chars = page.chars
-                                self.logger.warning(f"Page {page_num}: No text extracted (words: {len(words) if words else 0}, chars: {len(chars) if chars else 0})")
+                            try:
+                                # Try standard text extraction first
+                                page_text = page.extract_text()
+                                
+                                # If that fails, try extracting from words
+                                if not page_text or not page_text.strip():
+                                    words = page.extract_words()
+                                    if words:
+                                        page_text = ' '.join([w.get('text', '') for w in words if w.get('text')])
+                                
+                                if page_text and page_text.strip():
+                                    pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+                                    self.logger.info(f"Page {page_num}: Extracted {len(page_text)} characters")
+                                else:
+                                    # Log which pages have no text
+                                    words = page.extract_words()
+                                    chars = page.chars if hasattr(page, 'chars') else []
+                                    self.logger.warning(f"Page {page_num}: No text extracted (words: {len(words) if words else 0}, chars: {len(chars) if chars else 0})")
+                            except Exception as page_error:
+                                self.logger.warning(f"Page {page_num}: Error during extraction: {str(page_error)}")
+                                continue
                     
                     if pdf_text.strip():
                         self.logger.info(f"Successfully extracted {len(pdf_text)} characters from PDF")
@@ -259,6 +285,7 @@ class AIFileProcessor(BaseAgent):
                         self.logger.warning("PDF text extraction returned empty - attempting OCR...")
                         # Try OCR as fallback - use the SAME implementation as AI Assistant
                         # Both now use identical dual-fallback: Tesseract → EasyOCR
+                        file_data.seek(0)
                         ocr_text = self._extract_pdf_with_ocr(file_data)
                         
                         if ocr_text and ocr_text.strip():
@@ -266,21 +293,45 @@ class AIFileProcessor(BaseAgent):
                             return ocr_text, 'pdf'
                         else:
                             self.logger.warning("OCR also failed or not available - PDF may be image-based")
+                except ImportError as import_error:
+                    self.logger.error(f"pdfplumber not installed: {import_error}")
+                    self.logger.warning("Falling back to PyPDF2")
                 except Exception as e:
                     self.logger.warning(f"pdfplumber extraction failed: {e}, trying PyPDF2")
+                    import traceback
+                    self.logger.debug(f"pdfplumber error traceback: {traceback.format_exc()}")
                 
                 # Fallback to PyPDF2
                 try:
                     import PyPDF2
                     import io
+                    
+                    # Convert file_data to BytesIO for PyPDF2 compatibility
                     file_data.seek(0)
-                    pdf_reader = PyPDF2.PdfReader(file_data)
+                    if hasattr(file_data, 'read'):
+                        pdf_bytes = file_data.read()
+                    elif hasattr(file_data, 'getvalue'):
+                        pdf_bytes = file_data.getvalue()
+                        if isinstance(pdf_bytes, str):
+                            pdf_bytes = pdf_bytes.encode('utf-8')
+                    else:
+                        pdf_bytes = file_data
+                    
+                    # Ensure we have bytes
+                    if isinstance(pdf_bytes, str):
+                        pdf_bytes = pdf_bytes.encode('latin-1')
+                    
+                    pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
                     pdf_text = ""
                     
                     for page_num, page in enumerate(pdf_reader.pages, 1):
-                        page_text = page.extract_text()
-                        if page_text and page_text.strip():
-                            pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+                        try:
+                            page_text = page.extract_text()
+                            if page_text and page_text.strip():
+                                pdf_text += f"\n--- Page {page_num} ---\n{page_text}\n"
+                        except Exception as page_error:
+                            self.logger.warning(f"PyPDF2: Page {page_num} extraction failed: {str(page_error)}")
+                            continue
                     
                     if pdf_text.strip():
                         self.logger.info(f"PyPDF2 extracted {len(pdf_text)} characters from PDF")
@@ -290,6 +341,8 @@ class AIFileProcessor(BaseAgent):
                         return "⚠️ PDF appears to be image-based (scanned) and has no extractable text. Please use OCR software to convert it to a text-selectable PDF, or provide the original source file (CSV/Excel).", 'pdf'
                 except Exception as e:
                     self.logger.error(f"PyPDF2 extraction also failed: {e}")
+                    import traceback
+                    self.logger.debug(f"PyPDF2 error traceback: {traceback.format_exc()}")
                     return None, 'error'
             
             # Text Files
