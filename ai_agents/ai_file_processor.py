@@ -894,13 +894,18 @@ CRITICAL RULES:
                 )
                 amount_value = trans.get('amount', trans.get('value', 0))
 
+                # Check original values to see if they were actually present (not just zero)
+                original_quantity = trans.get('quantity') or trans.get('units')
+                original_price = trans.get('price')
+                original_amount = trans.get('amount') or trans.get('value')
+                
                 validated_trans = {
                     'date': self._normalize_date(trans.get('date', '')),
                     'ticker': str(trans.get('ticker', '')).strip(),
                     'stock_name': trans.get('stock_name', trans.get('ticker', 'Unknown')),
                     'scheme_name': trans.get('scheme_name'),
-                    'quantity': self._safe_float(trans.get('quantity', 0)),
-                    'price': self._safe_float(trans.get('price', 0)),  # 0 if missing - will be fetched
+                    'quantity': self._safe_float(original_quantity or 0),
+                    'price': self._safe_float(original_price or 0),  # 0 if missing - will be fetched
                     'transaction_type': str(transaction_type_raw or 'buy').lower(),
                     'asset_type': self._detect_asset_type(trans),
                     'sector': trans.get('sector') or 'Unknown',
@@ -911,23 +916,24 @@ CRITICAL RULES:
                 }
 
                 # Calculate missing values from available data
-                # Priority: Calculate quantity from amount/price if quantity is missing/zero
-                if validated_trans['quantity'] <= 0:
-                    amount_float = self._safe_float(amount_value)
-                    price_float = self._safe_float(trans.get('price', 0))
+                # Only calculate if value is truly missing (None/empty), not if it's zero
+                # Priority: Calculate quantity from amount/price if quantity is missing
+                if (original_quantity is None or original_quantity == ''):
+                    amount_float = self._safe_float(original_amount or 0)
+                    price_float = self._safe_float(original_price or 0)
                     if amount_float > 0 and price_float > 0:
                         validated_trans['quantity'] = amount_float / price_float
                         print(f"[VALIDATE] Calculated quantity from amount/price: {validated_trans['quantity']}")
                 
-                # Calculate price from amount/quantity if price is missing/zero
-                if validated_trans['price'] <= 0:
-                    amount_float = self._safe_float(amount_value)
+                # Calculate price from amount/quantity if price is missing
+                if (original_price is None or original_price == ''):
+                    amount_float = self._safe_float(original_amount or 0)
                     if amount_float > 0 and validated_trans['quantity'] > 0:
                         validated_trans['price'] = amount_float / validated_trans['quantity']
                         print(f"[VALIDATE] Calculated price from amount/quantity: {validated_trans['price']}")
                 
-                # Calculate amount from quantity/price if amount is missing/zero
-                if validated_trans.get('amount', 0) <= 0:
+                # Calculate amount from quantity/price if amount is missing
+                if (original_amount is None or original_amount == ''):
                     if validated_trans['quantity'] > 0 and validated_trans['price'] > 0:
                         validated_trans['amount'] = validated_trans['quantity'] * validated_trans['price']
                         print(f"[VALIDATE] Calculated amount from quantity/price: {validated_trans['amount']}")

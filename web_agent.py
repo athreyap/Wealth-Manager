@@ -2367,6 +2367,15 @@ def _tx_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     if mapping_entries:
         df.attrs.setdefault('__tx_column_mapping', [])
         df.attrs['__tx_column_mapping'].extend(mapping_entries)
+        # Log the mappings for debugging
+        print(f"[COLUMN_MAP] Column mappings applied:")
+        for entry in mapping_entries:
+            print(f"[COLUMN_MAP]   '{entry['source']}' → '{entry['target']}' ({entry['reason']})")
+    
+    # Log final column names after mapping
+    if rename_map and any(old != new for old, new in rename_map.items()):
+        print(f"[COLUMN_MAP] Final columns after mapping: {list(df.columns)}")
+    
     return df
 
 
@@ -2536,6 +2545,142 @@ def _tx_auto_map_missing_columns(df: pd.DataFrame) -> pd.DataFrame:
     if mapping_entries:
         df.attrs.setdefault('__tx_column_mapping', [])
         df.attrs['__tx_column_mapping'].extend(mapping_entries)
+        # Log the auto-mappings for debugging
+        print(f"[COLUMN_MAP] Auto-mapped columns (heuristic):")
+        for entry in mapping_entries:
+            print(f"[COLUMN_MAP]   '{entry['source']}' → '{entry['target']}' (score: {entry.get('score', 'N/A')})")
+    
+    return df
+
+
+def _tx_ai_map_columns(df: pd.DataFrame, filename: str) -> pd.DataFrame:
+    """
+    Use AI to intelligently map columns to canonical names.
+    This is used when standard mapping fails to identify columns.
+    """
+    if df is None or df.empty:
+        return df
+    
+    try:
+        import openai
+        openai_client = openai.OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
+    except Exception as e:
+        print(f"[COLUMN_MAP] ⚠️ Cannot use AI mapping: {e}")
+        return df
+    
+    # Get sample data to help AI understand the columns
+    sample_rows = min(5, len(df))
+    sample_data = df.head(sample_rows).to_dict('records')
+    
+    # Prepare column information for AI
+    column_info = []
+    for col in df.columns:
+        sample_values = [str(row.get(col, ''))[:50] for row in sample_data[:3] if row.get(col) is not None]
+        column_info.append({
+            'name': col,
+            'sample_values': sample_values[:3]  # First 3 non-null values
+        })
+    
+    prompt = f"""You are a financial data expert. Analyze the columns in this transaction file and map them to standard column names.
+
+File: {filename}
+Columns found: {[col['name'] for col in column_info]}
+
+Column details:
+{chr(10).join([f"- '{col['name']}': {col['sample_values']}" for col in column_info])}
+
+Standard column names we need:
+- 'date': Transaction date (any date format)
+- 'ticker': Stock/symbol identifier (e.g., RELIANCE.NS, ISIN codes, mutual fund codes)
+- 'stock_name': Full name of the security/stock
+- 'quantity': Number of shares/units (numeric)
+- 'price': Price per unit (numeric)
+- 'amount': Total transaction value/amount (numeric)
+- 'transaction_type': Buy/Sell indicator
+- 'scheme_name': Mutual fund scheme name (if applicable)
+
+Your task:
+1. Analyze each column name and its sample values
+2. Map each column to the most appropriate standard name
+3. Return ONLY a JSON object with mappings: {{"original_column_name": "standard_name"}}
+
+Example output:
+{{"Execution date and time": "date", "Symbol": "ticker", "Stock name": "stock_name", "Quantity": "quantity", "Value": "amount"}}
+
+IMPORTANT:
+- Map based on meaning, not just name similarity
+- If a column clearly represents quantity (has numeric values that look like share counts), map to "quantity"
+- If a column represents total value/amount, map to "amount"
+- If price column is missing but we have quantity and amount, that's OK (we'll calculate it)
+- Return ONLY the JSON mapping, no explanation
+"""
+    
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",  # Use cheaper model for column mapping
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert at analyzing financial transaction files and mapping columns to standard names. Return only valid JSON."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            max_completion_tokens=500
+        )
+        
+        ai_response = response.choices[0].message.content.strip()
+        
+        # Extract JSON from response
+        import json
+        import re
+        
+        # Find JSON object in response (handle nested objects)
+        # Try to find the JSON object by looking for { ... }
+        json_start = ai_response.find('{')
+        json_end = ai_response.rfind('}')
+        if json_start >= 0 and json_end > json_start:
+            json_str = ai_response[json_start:json_end + 1]
+            try:
+                mapping_json = json.loads(json_str)
+            except json.JSONDecodeError:
+                # Try to extract just the mapping part
+                mapping_json = None
+        else:
+            mapping_json = None
+        
+        if mapping_json:
+            
+            # Apply mappings
+            rename_map = {}
+            mapping_entries = []
+            for original_col, standard_col in mapping_json.items():
+                if original_col in df.columns and standard_col in _TX_COLUMN_ALIASES:
+                    rename_map[original_col] = standard_col
+                    mapping_entries.append({
+                        'source': original_col,
+                        'target': standard_col,
+                        'reason': 'ai_mapping'
+                    })
+            
+            if rename_map:
+                df = df.rename(columns=rename_map)
+                df.attrs.setdefault('__tx_column_mapping', [])
+                df.attrs['__tx_column_mapping'].extend(mapping_entries)
+                print(f"[COLUMN_MAP] ✅ AI mapped columns:")
+                for entry in mapping_entries:
+                    print(f"[COLUMN_MAP]   '{entry['source']}' → '{entry['target']}' (AI)")
+                return df
+            else:
+                print(f"[COLUMN_MAP] ⚠️ AI returned mappings but none were valid")
+        else:
+            print(f"[COLUMN_MAP] ⚠️ Could not extract JSON from AI response: {ai_response[:200]}")
+    
+    except Exception as e:
+        print(f"[COLUMN_MAP] ⚠️ AI column mapping failed: {e}")
+    
     return df
 
 
@@ -2639,6 +2784,15 @@ def _tx_dataframe_to_transactions(
     
     prepared_df = _tx_auto_map_missing_columns(prepared_df)
     print(f"[FILE_PARSE] After _tx_auto_map_missing_columns columns: {list(prepared_df.columns)}")
+    
+    # If critical columns are still missing, use AI to intelligently map them
+    critical_columns = ['quantity', 'amount', 'date', 'ticker']
+    missing_critical = [col for col in critical_columns if col not in [c.lower() for c in prepared_df.columns]]
+    if missing_critical and not prepared_df.empty:
+        print(f"[COLUMN_MAP] ⚠️ Missing critical columns after standard mapping: {missing_critical}")
+        print(f"[COLUMN_MAP] Attempting AI-powered column mapping...")
+        prepared_df = _tx_ai_map_columns(prepared_df, filename)
+        print(f"[FILE_PARSE] After _tx_ai_map_columns columns: {list(prepared_df.columns)}")
 
     if debug_log is not None:
         # Extract just the filename from path (handles full paths and hyphens correctly)
@@ -2712,12 +2866,28 @@ def _tx_dataframe_to_transactions(
         # Convert to string for processing (normalization happens later)
         date_str = str(raw_date).strip()
         
+        # Get values from mapped columns (after standardization)
+        # These should be the canonical names: 'quantity', 'amount', 'price'
         raw_quantity = row.get('quantity') if 'quantity' in prepared_df.columns else None
         raw_amount = row.get('amount') if 'amount' in prepared_df.columns else None
+        raw_price = row.get('price') if 'price' in prepared_df.columns else None
+
+        # Debug: Log what we found
+        if idx == 0:  # Only log for first row to avoid spam
+            print(f"[FILE_PARSE] Row {idx}: Checking for columns in prepared_df")
+            print(f"[FILE_PARSE]   Available columns: {list(prepared_df.columns)}")
+            print(f"[FILE_PARSE]   'quantity' in columns: {'quantity' in prepared_df.columns}, value: {raw_quantity}")
+            print(f"[FILE_PARSE]   'amount' in columns: {'amount' in prepared_df.columns}, value: {raw_amount}")
+            print(f"[FILE_PARSE]   'price' in columns: {'price' in prepared_df.columns}, value: {raw_price}")
+
+        # Check if values are actually present in the row (not just None)
+        quantity_present = raw_quantity is not None and not pd.isna(raw_quantity) and str(raw_quantity).strip() != ''
+        amount_present = raw_amount is not None and not pd.isna(raw_amount) and str(raw_amount).strip() != ''
+        price_present = raw_price is not None and not pd.isna(raw_price) and str(raw_price).strip() != ''
 
         quantity_value = _tx_safe_float(raw_quantity)
         amount_value = _tx_safe_float(raw_amount)
-        price_value = _tx_safe_float(row.get('price'))
+        price_value = _tx_safe_float(raw_price)
 
         # Only check for swapped values if column names are ambiguous or missing
         # If file has proper column names ('quantity' and 'amount'), trust them!
@@ -2800,9 +2970,10 @@ def _tx_dataframe_to_transactions(
             scheme_name = stock_name  # Use stock_name as fallback
 
         # Only recalculate missing values, don't override existing values from file
-        # Calculate price if missing
-        if price_value == 0 and amount_value > 0 and quantity_value > 0:
+        # Calculate price if missing (only if price column was not present in file)
+        if not price_present and amount_present and quantity_present and amount_value > 0 and quantity_value > 0:
             price_value = amount_value / quantity_value
+            print(f"[FILE_PARSE] Row {idx}: Calculated price from amount/quantity: {price_value}")
         
         # Calculate amount if missing or significantly wrong (but only if we have quantity and price)
         if quantity_value > 0 and price_value > 0:
@@ -2970,27 +3141,35 @@ def _tx_build_db_transaction(
     if not stock_name:
         stock_name = ticker
 
-    quantity_value = _tx_safe_float(tx.get('quantity'))
-    if quantity_value == 0:
-        quantity_value = _tx_safe_float(tx.get('units'))
-    amount_value = _tx_safe_float(tx.get('amount'))
-    price_value = _tx_safe_float(tx.get('price'))
+    # Check if values are actually present (not just zero)
+    quantity_raw = tx.get('quantity')
+    units_raw = tx.get('units')
+    amount_raw = tx.get('amount')
+    price_raw = tx.get('price')
+    
+    quantity_value = _tx_safe_float(quantity_raw)
+    # Only use units if quantity is truly missing (None), not if it's zero
+    if quantity_raw is None or quantity_raw == '':
+        quantity_value = _tx_safe_float(units_raw)
+    amount_value = _tx_safe_float(amount_raw)
+    price_value = _tx_safe_float(price_raw)
 
     # Calculate missing values from available data
-    # Priority: Calculate quantity from amount/price if quantity is missing/zero
-    if quantity_value <= 0:
+    # Only calculate if value is truly missing (None/empty), not if it's zero
+    # Priority: Calculate quantity from amount/price if quantity is missing
+    if (quantity_raw is None or quantity_raw == '') and (units_raw is None or units_raw == ''):
         if amount_value > 0 and price_value > 0:
             quantity_value = amount_value / price_value
             print(f"[TX_BUILD] Calculated quantity from amount/price: {quantity_value}")
     
-    # Calculate price from amount/quantity if price is missing/zero
-    if price_value <= 0:
+    # Calculate price from amount/quantity if price is missing
+    if price_raw is None or price_raw == '':
         if amount_value > 0 and quantity_value > 0:
             price_value = amount_value / quantity_value
             print(f"[TX_BUILD] Calculated price from amount/quantity: {price_value}")
     
-    # Calculate amount from quantity/price if amount is missing/zero
-    if amount_value <= 0:
+    # Calculate amount from quantity/price if amount is missing
+    if amount_raw is None or amount_raw == '':
         if quantity_value > 0 and price_value > 0:
             amount_value = quantity_value * price_value
             print(f"[TX_BUILD] Calculated amount from quantity/price: {amount_value}")
@@ -5437,21 +5616,27 @@ def _tx_prepare_preview_row(
         if fetched_price and fetched_price > 0:
             normalized['price'] = round(float(fetched_price), 4)
 
+    # Get original values to check if they were present
+    original_quantity = tx.get('quantity') or tx.get('units')
+    original_price = tx.get('price')
+    original_amount = tx.get('amount') or tx.get('value')
+    
     # Calculate missing values from available data
-    # Priority: Calculate quantity from amount/price if quantity is missing/zero
-    if normalized['quantity'] <= 0:
+    # Only calculate if value is truly missing (None/empty), not if it's zero
+    # Priority: Calculate quantity from amount/price if quantity is missing
+    if (original_quantity is None or original_quantity == ''):
         if normalized['amount'] > 0 and normalized['price'] > 0:
             normalized['quantity'] = round(normalized['amount'] / normalized['price'], 4)
             print(f"[TX_NORMALIZE] Calculated quantity from amount/price: {normalized['quantity']}")
     
-    # Calculate price from amount/quantity if price is missing/zero
-    if normalized['price'] <= 0:
+    # Calculate price from amount/quantity if price is missing
+    if (original_price is None or original_price == ''):
         if normalized['amount'] > 0 and normalized['quantity'] > 0:
             normalized['price'] = round(normalized['amount'] / normalized['quantity'], 4)
             print(f"[TX_NORMALIZE] Calculated price from amount/quantity: {normalized['price']}")
     
-    # Calculate amount from quantity/price if amount is missing/zero
-    if normalized['amount'] <= 0:
+    # Calculate amount from quantity/price if amount is missing
+    if (original_amount is None or original_amount == ''):
         if normalized['quantity'] > 0 and normalized['price'] > 0:
             normalized['amount'] = round(normalized['quantity'] * normalized['price'], 4)
             print(f"[TX_NORMALIZE] Calculated amount from quantity/price: {normalized['amount']}")
