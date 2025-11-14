@@ -505,9 +505,16 @@ def _build_document_payload_from_file(uploaded_file) -> Tuple[Optional[Dict[str,
         if extension in ('.xlsx', '.xls'):
             uploaded_file.seek(0)
             try:
-                sheets = pd.read_excel(uploaded_file, sheet_name=None)
+                engine = 'openpyxl' if extension == '.xlsx' else None
+                sheets = pd.read_excel(uploaded_file, sheet_name=None, engine=engine)
+            except ImportError as e:
+                return None, f"Missing Excel dependency for '{filename}'. Install with: pip install openpyxl xlrd"
             except ValueError as exc:
                 return None, f"Failed to read Excel file '{filename}': {exc}"
+            except Exception as e:
+                if 'openpyxl' in str(e).lower() or 'xlrd' in str(e).lower():
+                    return None, f"Missing Excel dependency for '{filename}'. Install with: pip install openpyxl xlrd"
+                return None, f"Failed to read Excel file '{filename}': {e}"
 
             if not sheets:
                 return None, f"No sheets found in Excel file '{filename}'."
@@ -2879,11 +2886,23 @@ def extract_transactions_python(uploaded_file, filename: str) -> Tuple[List[Dict
                 print(f"[FILE_PARSE] No transactions extracted from {filename} after processing {len(df)} rows")
         elif suffix in {'.xlsx', '.xls'}:
             uploaded_file.seek(0)
-            workbook = pd.read_excel(uploaded_file, sheet_name=None)
-            rows: List[Dict[str, Any]] = []
-            for sheet_name, sheet_df in (workbook or {}).items():
-                rows.extend(_tx_dataframe_to_transactions(sheet_df, filename, sheet_label=sheet_name, debug_log=debug_log))
-            transactions = rows
+            try:
+                # Use appropriate engine for Excel files
+                engine = 'openpyxl' if suffix == '.xlsx' else None
+                workbook = pd.read_excel(uploaded_file, sheet_name=None, engine=engine)
+                rows: List[Dict[str, Any]] = []
+                for sheet_name, sheet_df in (workbook or {}).items():
+                    rows.extend(_tx_dataframe_to_transactions(sheet_df, filename, sheet_label=sheet_name, debug_log=debug_log))
+                transactions = rows
+            except ImportError as e:
+                print(f"[FILE_PARSE] ❌ Missing Excel dependency for {filename}: {e}")
+                print(f"[FILE_PARSE] 💡 Install with: pip install openpyxl xlrd")
+                transactions = []
+            except Exception as e:
+                print(f"[FILE_PARSE] ❌ Error reading Excel file {filename}: {e}")
+                if 'openpyxl' in str(e).lower() or 'xlrd' in str(e).lower():
+                    print(f"[FILE_PARSE] 💡 Install missing dependency: pip install openpyxl xlrd")
+                transactions = []
         elif suffix == '.pdf':
             tables = _tx_extract_tables_from_pdf(uploaded_file)
             print(f"[FILE_PARSE] PDF {filename}: Extracted {len(tables)} tables")
@@ -4440,7 +4459,18 @@ def _legacy_process_uploaded_files(uploaded_files, user_id, portfolio_id):
                 if file_ext == 'csv':
                     df = pd.read_csv(uploaded_file)
                 else:  # xlsx or xls
-                    df = pd.read_excel(uploaded_file)
+                    try:
+                        engine = 'openpyxl' if file_ext == 'xlsx' else None
+                        df = pd.read_excel(uploaded_file, engine=engine)
+                    except ImportError as e:
+                        st.error(f"❌ Missing Excel dependency. Install with: `pip install openpyxl xlrd`")
+                        return
+                    except Exception as e:
+                        if 'openpyxl' in str(e).lower() or 'xlrd' in str(e).lower():
+                            st.error(f"❌ Missing Excel dependency. Install with: `pip install openpyxl xlrd`")
+                        else:
+                            st.error(f"❌ Error reading Excel file: {e}")
+                        return
                 
                 st.caption(f"   ✅ Read {len(df)} rows from {file_ext.upper()}")
                 

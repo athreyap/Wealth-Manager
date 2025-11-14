@@ -105,6 +105,7 @@ class AIFileProcessor(BaseAgent):
             
             if not file_content:
                 self.logger.error(f"Could not extract content from {filename} (file_type: {file_type})")
+                print(f"[AI_FILE_PROCESSOR] ❌ Could not extract content from {filename} (file_type: {file_type})")
                 # If it's a PDF that failed, try Vision API directly as last resort
                 if filename.lower().endswith('.pdf') and file_type == 'error':
                     self.logger.info("Attempting direct Vision API call for PDF...")
@@ -118,7 +119,13 @@ class AIFileProcessor(BaseAgent):
                         self.logger.error("Vision API also failed - cannot process this PDF")
                         return []
                 else:
+                    print(f"[AI_FILE_PROCESSOR] ❌ File content extraction failed for {filename}")
                     return []
+            
+            # Log content preview for debugging
+            content_preview = file_content[:200] if len(file_content) > 200 else file_content
+            print(f"[AI_FILE_PROCESSOR] ✅ Extracted {len(file_content)} characters from {filename}")
+            print(f"[AI_FILE_PROCESSOR]   Content preview: {content_preview}...")
             
             # Use AI to extract transactions
             transactions = self._ai_extract_transactions(file_content, filename, file_type)
@@ -450,9 +457,65 @@ Return ALL transactions found on this page, even if the format is slightly diffe
             
             # Excel Files
             elif file_ext in ['xlsx', 'xls']:
-                df = pd.read_excel(file_data)
-                content = df.to_csv(index=False)
-                return content, 'excel'
+                # Read all sheets from Excel file
+                try:
+                    # Check if openpyxl is available for .xlsx files
+                    if file_ext == 'xlsx':
+                        try:
+                            import openpyxl
+                        except ImportError:
+                            error_msg = "Missing dependency 'openpyxl'. Install with: pip install openpyxl"
+                            self.logger.error(f"{error_msg} (for {filename})")
+                            print(f"[AI_FILE_PROCESSOR] ❌ {error_msg}")
+                            # Try to read anyway - pandas might have a fallback
+                    
+                    # Check if xlrd is available for .xls files
+                    if file_ext == 'xls':
+                        try:
+                            import xlrd
+                        except ImportError:
+                            error_msg = "Missing dependency 'xlrd'. Install with: pip install xlrd"
+                            self.logger.warning(f"{error_msg} (for {filename})")
+                            print(f"[AI_FILE_PROCESSOR] ⚠️ {error_msg}")
+                    
+                    all_sheets = pd.read_excel(file_data, sheet_name=None, engine='openpyxl' if file_ext == 'xlsx' else None)
+                    if not all_sheets:
+                        self.logger.warning(f"Excel file {filename} has no sheets")
+                        print(f"[AI_FILE_PROCESSOR] ⚠️ Excel file {filename} has no sheets")
+                        return None, 'error'
+                    
+                    # Combine all sheets into CSV format
+                    sheet_contents = []
+                    for sheet_name, df in all_sheets.items():
+                        if df.empty:
+                            self.logger.warning(f"Sheet '{sheet_name}' in {filename} is empty")
+                            continue
+                        # Add sheet name as header comment
+                        sheet_contents.append(f"=== Sheet: {sheet_name} ===")
+                        sheet_contents.append(df.to_csv(index=False))
+                    
+                    if not sheet_contents:
+                        self.logger.warning(f"Excel file {filename} has no data in any sheet")
+                        print(f"[AI_FILE_PROCESSOR] ⚠️ Excel file {filename} has no data in any sheet")
+                        return None, 'error'
+                    
+                    content = "\n".join(sheet_contents)
+                    self.logger.info(f"Excel file {filename}: Extracted {len(all_sheets)} sheet(s), {len(content)} characters")
+                    print(f"[AI_FILE_PROCESSOR] ✅ Excel file {filename}: Extracted {len(all_sheets)} sheet(s), {len(content)} characters")
+                    return content, 'excel'
+                except ImportError as e:
+                    error_msg = f"Missing Excel dependency. For .xlsx files, install: pip install openpyxl. For .xls files, install: pip install xlrd"
+                    self.logger.error(f"{error_msg} (error: {e})")
+                    print(f"[AI_FILE_PROCESSOR] ❌ {error_msg}")
+                    return None, 'error'
+                except Exception as e:
+                    error_msg = f"Error reading Excel file {filename}: {e}"
+                    self.logger.error(error_msg)
+                    print(f"[AI_FILE_PROCESSOR] ❌ {error_msg}")
+                    # If it's a dependency error, provide helpful message
+                    if 'openpyxl' in str(e).lower() or 'xlrd' in str(e).lower():
+                        print(f"[AI_FILE_PROCESSOR] 💡 Install missing dependency: pip install openpyxl xlrd")
+                    return None, 'error'
             
             # PDF Files
             elif file_ext == 'pdf':
@@ -718,8 +781,8 @@ Validation:
 
 Output ONLY the JSON array—no commentary.
 
-File excerpt (comma-separated rows):
-{file_content[:6000]}
+File content (comma-separated rows from Excel/CSV):
+{file_content[:10000] if len(file_content) <= 10000 else file_content[:8000] + '\n... (truncated, showing first 8000 chars) ...'}
 """
 
             content_length = len(file_content)
@@ -766,9 +829,20 @@ CRITICAL RULES:
             
             # Extract JSON from response
             ai_response = response.choices[0].message.content
+            print(f"[AI_EXTRACT] AI response length: {len(ai_response)} chars")
+            print(f"[AI_EXTRACT] AI response preview: {ai_response[:500]}...")
+            
             transactions = self._extract_json(ai_response)
             
-            print(f"[AI_EXTRACT] ✅ Successfully extracted {len(transactions)} transactions")
+            if not transactions:
+                print(f"[AI_EXTRACT] ⚠️ No transactions extracted from AI response")
+                print(f"[AI_EXTRACT]   Full AI response: {ai_response}")
+            else:
+                print(f"[AI_EXTRACT] ✅ Successfully extracted {len(transactions)} transactions")
+                # Log first transaction as sample
+                if transactions:
+                    print(f"[AI_EXTRACT]   Sample transaction: {transactions[0]}")
+            
             return transactions
             
         except Exception as e:
@@ -802,10 +876,14 @@ CRITICAL RULES:
         """Validate and enhance transaction data"""
         
         validated = []
+        skipped_count = 0
         for trans in transactions:
             try:
                 # Skip if missing critical fields
                 if not trans.get('ticker') or not trans.get('date'):
+                    skipped_count += 1
+                    if skipped_count <= 3:  # Log first 3 skipped transactions
+                        print(f"[VALIDATE] ⚠️ Skipping transaction (missing ticker or date): {trans}")
                     continue
                 
                 # Normalize and validate fields
@@ -840,6 +918,9 @@ CRITICAL RULES:
                 
                 # Validate quantity is positive
                 if validated_trans['quantity'] <= 0:
+                    skipped_count += 1
+                    if skipped_count <= 3:  # Log first 3 skipped transactions
+                        print(f"[VALIDATE] ⚠️ Skipping transaction (quantity <= 0): {validated_trans}")
                     continue
                 
                 # Ensure price is non-negative
@@ -855,8 +936,12 @@ CRITICAL RULES:
                 
             except Exception as e:
                 self.logger.error(f"Validation error: {e}")
+                print(f"[VALIDATE] ❌ Validation error: {e}")
                 continue
         
+        if skipped_count > 0:
+            print(f"[VALIDATE] ⚠️ Skipped {skipped_count} transactions during validation")
+        print(f"[VALIDATE] ✅ Validated {len(validated)} transactions from {len(transactions)} raw transactions")
         return validated
     
     def _detect_asset_type(self, trans: Dict[str, Any]) -> str:
