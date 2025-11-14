@@ -3044,6 +3044,13 @@ def _tx_dataframe_to_transactions(
             'channel': channel,
             'sector': sector,
             'notes': notes,
+            # Store metadata about which fields were originally present in the file
+            '__original_quantity_present': quantity_present,
+            '__original_amount_present': amount_present,
+            '__original_price_present': price_present,
+            '__original_quantity': original_quantity if quantity_present else None,
+            '__original_amount': raw_amount if amount_present else None,
+            '__original_price': raw_price if price_present else None,
         }
         transactions.append(transaction)
         rows_added += 1
@@ -3168,37 +3175,64 @@ def _tx_build_db_transaction(
         stock_name = ticker
 
     # Check if values are actually present (not just zero)
-    quantity_raw = tx.get('quantity')
+    # First check metadata (from Python extraction), then fall back to transaction dict
+    quantity_present = tx.get('__original_quantity_present', False)
+    amount_present = tx.get('__original_amount_present', False)
+    price_present = tx.get('__original_price_present', False)
+    
+    # Get original raw values if stored, otherwise get from transaction dict
+    quantity_raw = tx.get('__original_quantity')
+    if quantity_raw is None:
+        quantity_raw = tx.get('quantity')
     units_raw = tx.get('units')
-    amount_raw = tx.get('amount')
-    price_raw = tx.get('price')
+    
+    amount_raw = tx.get('__original_amount')
+    if amount_raw is None:
+        amount_raw = tx.get('amount') or tx.get('value')
+    
+    price_raw = tx.get('__original_price')
+    if price_raw is None:
+        price_raw = tx.get('price')
+    
+    # If metadata not available, infer presence from raw values
+    if not quantity_present and quantity_raw is not None and str(quantity_raw).strip() != '':
+        quantity_present = True
+    if not amount_present and amount_raw is not None and str(amount_raw).strip() != '':
+        amount_present = True
+    if not price_present and price_raw is not None and str(price_raw).strip() != '':
+        price_present = True
     
     quantity_value = _tx_safe_float(quantity_raw)
     # Only use units if quantity is truly missing (None), not if it's zero
-    if quantity_raw is None or quantity_raw == '':
+    if (quantity_raw is None or quantity_raw == '') and (units_raw is None or units_raw == ''):
         quantity_value = _tx_safe_float(units_raw)
     amount_value = _tx_safe_float(amount_raw)
     price_value = _tx_safe_float(price_raw)
 
+    # CRITICAL: Never recalculate quantity if it was present in the file
+    original_quantity = quantity_value  # Store before any calculations
+    
     # Calculate missing values from available data
     # Only calculate if value is truly missing (None/empty), not if it's zero
-    # Priority: Calculate quantity from amount/price if quantity is missing
-    if (quantity_raw is None or quantity_raw == '') and (units_raw is None or units_raw == ''):
-        if amount_value > 0 and price_value > 0:
-            quantity_value = amount_value / price_value
-            print(f"[TX_BUILD] Calculated quantity from amount/price: {quantity_value}")
+    # Priority 1: Calculate price from amount/quantity if price is missing
+    if not price_present and amount_present and quantity_present and amount_value > 0 and quantity_value > 0:
+        price_value = amount_value / quantity_value
+        print(f"[TX_BUILD] ✅ Calculated price from amount/quantity: {price_value} (qty={quantity_value}, amt={amount_value})")
     
-    # Calculate price from amount/quantity if price is missing
-    if price_raw is None or price_raw == '':
-        if amount_value > 0 and quantity_value > 0:
-            price_value = amount_value / quantity_value
-            print(f"[TX_BUILD] Calculated price from amount/quantity: {price_value}")
+    # Priority 2: Only calculate quantity if it's TRULY missing (not present in file)
+    if not quantity_present and amount_present and price_present and amount_value > 0 and price_value > 0:
+        quantity_value = amount_value / price_value
+        print(f"[TX_BUILD] ✅ Calculated quantity from amount/price: {quantity_value} (amt={amount_value}, price={price_value})")
     
-    # Calculate amount from quantity/price if amount is missing
-    if amount_raw is None or amount_raw == '':
-        if quantity_value > 0 and price_value > 0:
-            amount_value = quantity_value * price_value
-            print(f"[TX_BUILD] Calculated amount from quantity/price: {amount_value}")
+    # Priority 3: Calculate amount from quantity/price if amount is missing
+    if not amount_present and quantity_present and price_present and quantity_value > 0 and price_value > 0:
+        amount_value = quantity_value * price_value
+        print(f"[TX_BUILD] ✅ Calculated amount from quantity/price: {amount_value}")
+    
+    # Safety check: If quantity was present, never override it
+    if quantity_present and quantity_value != original_quantity:
+        print(f"[TX_BUILD] ⚠️ WARNING: Quantity was present ({original_quantity}) but got changed to {quantity_value}. Restoring original.")
+        quantity_value = original_quantity
 
     transaction_type = _tx_normalize_transaction_type(
         tx.get('transaction_type'),
@@ -5643,26 +5677,49 @@ def _tx_prepare_preview_row(
             normalized['price'] = round(float(fetched_price), 4)
 
     # Get original values to check if they were present
-    original_quantity = tx.get('quantity') or tx.get('units')
-    original_price = tx.get('price')
-    original_amount = tx.get('amount') or tx.get('value')
+    # Check metadata first (from Python extraction), then fall back to transaction dict
+    quantity_present = tx.get('__original_quantity_present', False)
+    amount_present = tx.get('__original_amount_present', False)
+    price_present = tx.get('__original_price_present', False)
     
-    # Calculate missing values from available data
-    # Only calculate if value is truly missing (None/empty), not if it's zero
-    # Priority: Calculate quantity from amount/price if quantity is missing
-    if (original_quantity is None or original_quantity == ''):
+    # Get original values if stored, otherwise check transaction dict
+    original_quantity = tx.get('__original_quantity')
+    if original_quantity is None:
+        original_quantity = tx.get('quantity') or tx.get('units')
+        # If not explicitly marked as present, check if it's a valid value
+        if not quantity_present and original_quantity and _tx_safe_float(original_quantity) > 0:
+            quantity_present = True
+    
+    original_price = tx.get('__original_price')
+    if original_price is None:
+        original_price = tx.get('price')
+        if not price_present and original_price and _tx_safe_float(original_price) > 0:
+            price_present = True
+    
+    original_amount = tx.get('__original_amount')
+    if original_amount is None:
+        original_amount = tx.get('amount') or tx.get('value')
+        if not amount_present and original_amount and _tx_safe_float(original_amount) > 0:
+            amount_present = True
+    
+    # CRITICAL: Never recalculate quantity if it was present in the file
+    if quantity_present:
+        # Quantity was in the file - use it as-is, don't recalculate
+        pass
+    elif not quantity_present and amount_present and price_present:
+        # Only calculate quantity if it's truly missing AND we have amount+price
         if normalized['amount'] > 0 and normalized['price'] > 0:
             normalized['quantity'] = round(normalized['amount'] / normalized['price'], 4)
             print(f"[TX_NORMALIZE] Calculated quantity from amount/price: {normalized['quantity']}")
     
     # Calculate price from amount/quantity if price is missing
-    if (original_price is None or original_price == ''):
+    if not price_present and amount_present and quantity_present:
         if normalized['amount'] > 0 and normalized['quantity'] > 0:
             normalized['price'] = round(normalized['amount'] / normalized['quantity'], 4)
             print(f"[TX_NORMALIZE] Calculated price from amount/quantity: {normalized['price']}")
     
     # Calculate amount from quantity/price if amount is missing
-    if (original_amount is None or original_amount == ''):
+    if not amount_present and quantity_present and price_present:
         if normalized['quantity'] > 0 and normalized['price'] > 0:
             normalized['amount'] = round(normalized['quantity'] * normalized['price'], 4)
             print(f"[TX_NORMALIZE] Calculated amount from quantity/price: {normalized['amount']}")

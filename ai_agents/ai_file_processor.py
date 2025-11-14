@@ -899,6 +899,11 @@ CRITICAL RULES:
                 original_price = trans.get('price')
                 original_amount = trans.get('amount') or trans.get('value')
                 
+                # Determine which fields were originally present
+                quantity_present = original_quantity is not None and str(original_quantity).strip() != ''
+                price_present = original_price is not None and str(original_price).strip() != ''
+                amount_present = original_amount is not None and str(original_amount).strip() != ''
+                
                 validated_trans = {
                     'date': self._normalize_date(trans.get('date', '')),
                     'ticker': str(trans.get('ticker', '')).strip(),
@@ -912,31 +917,46 @@ CRITICAL RULES:
                     'channel': self._infer_channel_from_filename(
                         source_filename,
                         trans.get('channel')
-                    )
+                    ),
+                    # Store metadata about which fields were originally present
+                    '__original_quantity_present': quantity_present,
+                    '__original_amount_present': amount_present,
+                    '__original_price_present': price_present,
+                    '__original_quantity': original_quantity if quantity_present else None,
+                    '__original_amount': original_amount if amount_present else None,
+                    '__original_price': original_price if price_present else None,
                 }
 
+                # CRITICAL: Never recalculate quantity if it was present in the AI response
+                original_quantity_value = validated_trans['quantity']
+                
                 # Calculate missing values from available data
                 # Only calculate if value is truly missing (None/empty), not if it's zero
-                # Priority: Calculate quantity from amount/price if quantity is missing
-                if (original_quantity is None or original_quantity == ''):
+                # Priority 1: Calculate price from amount/quantity if price is missing
+                if not price_present and amount_present and quantity_present:
+                    amount_float = self._safe_float(original_amount or 0)
+                    if amount_float > 0 and validated_trans['quantity'] > 0:
+                        validated_trans['price'] = amount_float / validated_trans['quantity']
+                        print(f"[VALIDATE] ✅ Calculated price from amount/quantity: {validated_trans['price']}")
+                
+                # Priority 2: Only calculate quantity if it's TRULY missing (not present in AI response)
+                if not quantity_present and amount_present and price_present:
                     amount_float = self._safe_float(original_amount or 0)
                     price_float = self._safe_float(original_price or 0)
                     if amount_float > 0 and price_float > 0:
                         validated_trans['quantity'] = amount_float / price_float
-                        print(f"[VALIDATE] Calculated quantity from amount/price: {validated_trans['quantity']}")
+                        print(f"[VALIDATE] ✅ Calculated quantity from amount/price: {validated_trans['quantity']}")
                 
-                # Calculate price from amount/quantity if price is missing
-                if (original_price is None or original_price == ''):
-                    amount_float = self._safe_float(original_amount or 0)
-                    if amount_float > 0 and validated_trans['quantity'] > 0:
-                        validated_trans['price'] = amount_float / validated_trans['quantity']
-                        print(f"[VALIDATE] Calculated price from amount/quantity: {validated_trans['price']}")
-                
-                # Calculate amount from quantity/price if amount is missing
-                if (original_amount is None or original_amount == ''):
+                # Priority 3: Calculate amount from quantity/price if amount is missing
+                if not amount_present and quantity_present and price_present:
                     if validated_trans['quantity'] > 0 and validated_trans['price'] > 0:
                         validated_trans['amount'] = validated_trans['quantity'] * validated_trans['price']
-                        print(f"[VALIDATE] Calculated amount from quantity/price: {validated_trans['amount']}")
+                        print(f"[VALIDATE] ✅ Calculated amount from quantity/price: {validated_trans['amount']}")
+                
+                # Safety check: If quantity was present, never override it
+                if quantity_present and validated_trans['quantity'] != original_quantity_value:
+                    print(f"[VALIDATE] ⚠️ WARNING: Quantity was present ({original_quantity_value}) but got changed to {validated_trans['quantity']}. Restoring original.")
+                    validated_trans['quantity'] = original_quantity_value
                 
                 # Validate quantity is positive (after calculations)
                 if validated_trans['quantity'] <= 0:
