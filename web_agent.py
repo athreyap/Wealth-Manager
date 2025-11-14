@@ -2207,7 +2207,7 @@ _TX_COLUMN_ALIASES: Dict[str, List[str]] = {
         'scheme name', 'fund scheme', 'scheme', 'schemename', 'plan name'
     ],
     'quantity': [
-        'quantity', 'qty', 'units', 'shares', 'quantity/unit',
+        'quantity', 'Quantity', 'QTY', 'qty', 'units', 'shares', 'quantity/unit',
         'no. of units', 'no of units', 'units/qty', 'units (credit)',
         'units (debit)', 'lot size', 'filled quantity', 'executed quantity'
     ],
@@ -2364,6 +2364,29 @@ def _tx_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
             rename_map[col] = col
 
     df = df.rename(columns=rename_map)
+    
+    # CRITICAL: Normalize all column names to lowercase after mapping
+    # This ensures "Quantity" becomes "quantity" so checks like 'quantity' in df.columns work
+    column_normalization = {}
+    for col in df.columns:
+        col_lower = col.lower()
+        if col != col_lower:
+            column_normalization[col] = col_lower
+    
+    if column_normalization:
+        df = df.rename(columns=column_normalization)
+        print(f"[COLUMN_MAP] Normalized column names to lowercase: {column_normalization}")
+    else:
+        # Double-check: if we still have "Quantity" or other capitalized canonical names, force normalize
+        canonical_lowercase = {'quantity', 'amount', 'price', 'date', 'ticker', 'stock_name', 'transaction_type'}
+        force_normalize = {}
+        for col in df.columns:
+            if col.lower() in canonical_lowercase and col != col.lower():
+                force_normalize[col] = col.lower()
+        if force_normalize:
+            df = df.rename(columns=force_normalize)
+            print(f"[COLUMN_MAP] Force normalized canonical columns: {force_normalize}")
+    
     if mapping_entries:
         df.attrs.setdefault('__tx_column_mapping', [])
         df.attrs['__tx_column_mapping'].extend(mapping_entries)
@@ -2373,8 +2396,7 @@ def _tx_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
             print(f"[COLUMN_MAP]   '{entry['source']}' → '{entry['target']}' ({entry['reason']})")
     
     # Log final column names after mapping
-    if rename_map and any(old != new for old, new in rename_map.items()):
-        print(f"[COLUMN_MAP] Final columns after mapping: {list(df.columns)}")
+    print(f"[COLUMN_MAP] Final columns after mapping: {list(df.columns)}")
     
     return df
 
@@ -2868,9 +2890,36 @@ def _tx_dataframe_to_transactions(
         
         # Get values from mapped columns (after standardization)
         # These should be the canonical names: 'quantity', 'amount', 'price'
-        raw_quantity = row.get('quantity') if 'quantity' in prepared_df.columns else None
-        raw_amount = row.get('amount') if 'amount' in prepared_df.columns else None
-        raw_price = row.get('price') if 'price' in prepared_df.columns else None
+        # Check for both lowercase and any case variations
+        raw_quantity = None
+        raw_amount = None
+        raw_price = None
+        
+        # Try lowercase first (canonical name)
+        if 'quantity' in prepared_df.columns:
+            raw_quantity = row.get('quantity')
+        else:
+            # Try case variations
+            for col in prepared_df.columns:
+                if col.lower() == 'quantity':
+                    raw_quantity = row.get(col)
+                    break
+        
+        if 'amount' in prepared_df.columns:
+            raw_amount = row.get('amount')
+        else:
+            for col in prepared_df.columns:
+                if col.lower() == 'amount':
+                    raw_amount = row.get(col)
+                    break
+        
+        if 'price' in prepared_df.columns:
+            raw_price = row.get('price')
+        else:
+            for col in prepared_df.columns:
+                if col.lower() == 'price':
+                    raw_price = row.get(col)
+                    break
 
         # Debug: Log what we found
         if idx == 0:  # Only log for first row to avoid spam
@@ -5662,19 +5711,51 @@ def _tx_prepare_preview_row(
                     )
                 except Exception:
                     fetched_price = None
+                # CRITICAL: Do NOT fall back to current price if historical price is not available
+                # This would use today's date instead of the transaction date, which is incorrect
+                # If historical price is not available, try these fallbacks in order:
+                # 1. Original price from file
+                # 2. Calculate from quantity and amount (if both available)
                 if not fetched_price:
-                    try:
-                        fetched_price, _ = fetcher.get_current_price(
-                            normalized['ticker'],
-                            asset_type_lower or 'stock',
-                            fund_name=normalized['stock_name'],
-                        )
-                    except Exception:
-                        fetched_price = None
+                    # Fallback 1: Use original price from transaction if it exists
+                    original_price = _tx_safe_float(tx.get('price') or tx.get('__original_price'))
+                    if original_price and original_price > 0:
+                        fetched_price = original_price
+                        print(f"[PREVIEW] Using original price from file: {fetched_price} (historical price not available for date {normalized['date']})")
+                    else:
+                        # Fallback 2: Calculate price from quantity and amount if both are available
+                        quantity_val = _tx_safe_float(normalized.get('quantity') or tx.get('quantity') or tx.get('__original_quantity'))
+                        amount_val = _tx_safe_float(normalized.get('amount') or tx.get('amount') or tx.get('__original_amount'))
+                        if quantity_val > 0 and amount_val > 0:
+                            calculated_price = amount_val / quantity_val
+                            fetched_price = calculated_price
+                            print(f"[PREVIEW] Calculated price from quantity/amount: {calculated_price} (qty={quantity_val}, amt={amount_val}) - historical price not available for date {normalized['date']}")
+                        else:
+                            print(f"[PREVIEW] ⚠️ Historical price not available for {normalized['ticker']} on {normalized['date']}, and cannot calculate from quantity/amount. Leaving as 0.")
+                            fetched_price = None
             _preview_price_cache[key] = fetched_price
 
         if fetched_price and fetched_price > 0:
             normalized['price'] = round(float(fetched_price), 4)
+        
+        # After price is set, calculate missing values:
+        # 1. Calculate amount if missing (when we have quantity and price)
+        # 2. Calculate quantity if missing (when we have amount and price)
+        # But only if the values weren't originally present in the file
+        quantity_was_present = tx.get('__original_quantity_present', False) or (tx.get('quantity') and _tx_safe_float(tx.get('quantity')) > 0)
+        amount_was_present = tx.get('__original_amount_present', False) or (tx.get('amount') and _tx_safe_float(tx.get('amount')) > 0)
+        
+        if normalized['price'] > 0:
+            if normalized['quantity'] > 0 and normalized['amount'] <= 0 and not amount_was_present:
+                # Calculate amount from quantity and price
+                calculated_amount = normalized['quantity'] * normalized['price']
+                normalized['amount'] = round(calculated_amount, 4)
+                print(f"[PREVIEW] Calculated amount from quantity/price: {calculated_amount} (qty={normalized['quantity']}, price={normalized['price']})")
+            elif normalized['amount'] > 0 and normalized['quantity'] <= 0 and not quantity_was_present:
+                # Calculate quantity from amount and price
+                calculated_quantity = normalized['amount'] / normalized['price']
+                normalized['quantity'] = round(calculated_quantity, 4)
+                print(f"[PREVIEW] Calculated quantity from amount/price: {calculated_quantity} (amt={normalized['amount']}, price={normalized['price']})")
 
     # Get original values to check if they were present
     # Check metadata first (from Python extraction), then fall back to transaction dict

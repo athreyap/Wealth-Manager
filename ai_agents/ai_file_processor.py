@@ -813,7 +813,7 @@ Output ONLY the JSON array—no commentary or explanation.
             
             # Call OpenAI without timeout - let it take as long as needed
             response = self.openai_client.chat.completions.create(
-                model="gpt-5",  # GPT-5 for better file processing
+                model="gpt-4o",  # GPT-4o for better file processing
                 messages=[
                     {
                         "role": "system",
@@ -851,15 +851,26 @@ CRITICAL RULES:
             )
             
             # Extract JSON from response
-            ai_response = response.choices[0].message.content
+            ai_response = response.choices[0].message.content.strip()
             print(f"[AI_EXTRACT] AI response length: {len(ai_response)} chars")
             print(f"[AI_EXTRACT] AI response preview: {ai_response[:500]}...")
+            
+            # Check if response is empty or just whitespace
+            if not ai_response or len(ai_response.strip()) == 0:
+                print(f"[AI_EXTRACT] ❌ AI returned empty response")
+                print(f"[AI_EXTRACT]   Response object: {response}")
+                print(f"[AI_EXTRACT]   Response choices: {response.choices if hasattr(response, 'choices') else 'N/A'}")
+                return []
             
             transactions = self._extract_json(ai_response)
             
             if not transactions:
                 print(f"[AI_EXTRACT] ⚠️ No transactions extracted from AI response")
                 print(f"[AI_EXTRACT]   Full AI response: {ai_response}")
+                print(f"[AI_EXTRACT]   Trying to parse response as-is...")
+                # Try to see if there's any content that might be JSON
+                if '[' in ai_response or '{' in ai_response:
+                    print(f"[AI_EXTRACT]   Response contains JSON-like characters, but extraction failed")
             else:
                 print(f"[AI_EXTRACT] ✅ Successfully extracted {len(transactions)} transactions")
                 # Log first transaction as sample
