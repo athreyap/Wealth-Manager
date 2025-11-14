@@ -5761,54 +5761,88 @@ def extract_transactions_for_csv(uploaded_file, file_name: str, user_id: Optiona
     except Exception:
         pass  # Skip validation if can't check size
 
-    # Always try deterministic parsing first so we avoid AI warnings for structured CSV/XLSX
-    try:
-        uploaded_file.seek(0)
-    except Exception:
-        pass
-    extraction_result = extract_transactions_python(uploaded_file, file_name)
-    if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
-        python_transactions, _python_log = extraction_result
-    else:
-        python_transactions = extraction_result or []
-    transactions = python_transactions or []
-
-    # Fall back to AI only when Python parser finds nothing
-    if not transactions:
-        if AI_AGENTS_AVAILABLE:
-            method_used = 'ai'
-            print(f"[FILE_PARSE] Python extraction found no transactions, trying AI extraction for {file_name}...")
-            # Check if Vision API text was pre-extracted
-            if hasattr(uploaded_file, '_vision_api_text'):
-                print(f"[FILE_PARSE] ✅ Pre-extracted Vision API text found ({len(uploaded_file._vision_api_text)} characters) - will reuse it")
-            else:
-                print(f"[FILE_PARSE] ⚠️ No pre-extracted Vision API text found")
+    # For Excel files, use AI extraction first (better column mapping)
+    # For CSV/PDF, try Python first then AI
+    file_ext = Path(file_name).suffix.lower()
+    is_excel = file_ext in {'.xlsx', '.xls'}
+    
+    if is_excel and AI_AGENTS_AVAILABLE:
+        # Excel files: Use AI extraction first for better column mapping
+        method_used = 'ai'
+        print(f"[FILE_PARSE] Excel file detected - using AI extraction first for better column mapping: {file_name}")
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
+        if transactions:
+            print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions from Excel file")
+        else:
+            print(f"[FILE_PARSE] ⚠️ AI extraction found no transactions, trying Python extraction as fallback...")
+            # Fallback to Python if AI fails
             try:
                 uploaded_file.seek(0)
             except Exception:
                 pass
-            transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
-            if transactions:
-                print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions")
+            extraction_result = extract_transactions_python(uploaded_file, file_name)
+            if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+                python_transactions, _python_log = extraction_result
             else:
-                print(f"[FILE_PARSE] ⚠️ AI extraction also found no transactions")
-                # Check if this is a PDF that might be image-based
-                if file_name.lower().endswith('.pdf'):
-                    st.warning("""
-                    **⚠️ PDF Processing Issue**
-                    
-                    The PDF file appears to be **image-based (scanned)** and contains no extractable text.
-                    
-                    **Solutions:**
-                    1. **Use OCR software** (e.g., Adobe Acrobat, online OCR tools) to convert the PDF to text-selectable format
-                    2. **Provide the original source file** (CSV, Excel, or text-selectable PDF) instead
-                    3. **Check terminal logs** for detailed extraction diagnostics
-                    
-                    The system detected table structures but all cells were empty, and text extraction returned no content.
-                    """)
+                python_transactions = extraction_result or []
+            if python_transactions:
+                method_used = 'python'
+                transactions = python_transactions
+                print(f"[FILE_PARSE] ✅ Python extraction found {len(transactions)} transactions as fallback")
+    else:
+        # CSV/PDF: Try Python first, then AI
+        method_used = 'python'
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        extraction_result = extract_transactions_python(uploaded_file, file_name)
+        if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+            python_transactions, _python_log = extraction_result
         else:
-            print(f"[FILE_PARSE] ⚠️ Python extraction found no transactions and AI agents are not available")
-            print(f"[FILE_PARSE]   Check terminal logs above for details on why extraction failed")
+            python_transactions = extraction_result or []
+        transactions = python_transactions or []
+
+        # Fall back to AI only when Python parser finds nothing
+        if not transactions:
+            if AI_AGENTS_AVAILABLE:
+                method_used = 'ai'
+                print(f"[FILE_PARSE] Python extraction found no transactions, trying AI extraction for {file_name}...")
+                # Check if Vision API text was pre-extracted
+                if hasattr(uploaded_file, '_vision_api_text'):
+                    print(f"[FILE_PARSE] ✅ Pre-extracted Vision API text found ({len(uploaded_file._vision_api_text)} characters) - will reuse it")
+                else:
+                    print(f"[FILE_PARSE] ⚠️ No pre-extracted Vision API text found")
+                try:
+                    uploaded_file.seek(0)
+                except Exception:
+                    pass
+                transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
+                if transactions:
+                    print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions")
+                else:
+                    print(f"[FILE_PARSE] ⚠️ AI extraction also found no transactions")
+                    # Check if this is a PDF that might be image-based
+                    if file_name.lower().endswith('.pdf'):
+                        st.warning("""
+                        **⚠️ PDF Processing Issue**
+                        
+                        The PDF file appears to be **image-based (scanned)** and contains no extractable text.
+                        
+                        **Solutions:**
+                        1. **Use OCR software** (e.g., Adobe Acrobat, online OCR tools) to convert the PDF to text-selectable format
+                        2. **Provide the original source file** (CSV, Excel, or text-selectable PDF) instead
+                        3. **Check terminal logs** for detailed extraction diagnostics
+                        
+                        The system detected table structures but all cells were empty, and text extraction returned no content.
+                        """)
+            else:
+                print(f"[FILE_PARSE] ⚠️ Python extraction found no transactions and AI agents are not available")
+                print(f"[FILE_PARSE]   Check terminal logs above for details on why extraction failed")
 
     normalized_rows = [
         _tx_prepare_preview_row(tx, file_name, method_used, use_price_fetcher=True)
@@ -5920,33 +5954,66 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
             transactions = []
             python_debug_log: List[Dict[str, Any]] = []
             
-            # Try Python parser first for CSV/Excel (more reliable for structured data)
+            # For Excel files, use AI extraction first (better column mapping)
+            # For CSV/PDF, try Python first then AI
             file_ext = Path(file_name).suffix.lower()
-            if file_ext in {'.csv', '.tsv', '.xlsx', '.xls'}:
+            is_excel = file_ext in {'.xlsx', '.xls'}
+            
+            if is_excel and AI_AGENTS_AVAILABLE:
+                # Excel files: Use AI extraction first for better column mapping
+                method_used = 'ai'
+                print(f"[FILE_PARSE] Excel file detected - using AI extraction first for better column mapping: {file_name}")
+                try:
+                    uploaded_file.seek(0)
+                except Exception:
+                    pass
+                ai_transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
+                if ai_transactions:
+                    transactions = ai_transactions
+                    print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions from Excel file")
+                else:
+                    print(f"[FILE_PARSE] ⚠️ AI extraction found no transactions, trying Python extraction as fallback...")
+                    # Fallback to Python if AI fails
+                    try:
+                        uploaded_file.seek(0)
+                    except Exception:
+                        pass
+                    extraction_result = extract_transactions_python(uploaded_file, file_name)
+                    if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+                        python_transactions, python_debug_log = extraction_result
+                    else:
+                        python_transactions = extraction_result or []
+                        python_debug_log = []
+                    if python_transactions:
+                        method_used = 'python'
+                        transactions = python_transactions
+                        print(f"[FILE_PARSE] ✅ Python extraction found {len(transactions)} transactions as fallback")
+            else:
+                # CSV/PDF: Try Python first, then AI
                 method_used = 'python'
                 try:
                     uploaded_file.seek(0)
                 except Exception:
                     pass
                 
-            extraction_result = extract_transactions_python(uploaded_file, file_name)
-            if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
-                python_transactions, python_debug_log = extraction_result
-            else:
-                python_transactions = extraction_result or []
-                python_debug_log = []
-            transactions = python_transactions or []
-            
-            # Fallback to AI only if Python found nothing (or for PDFs)
-            if not transactions:
-                method_used = 'ai'
-                try:
-                    uploaded_file.seek(0)
-                except Exception:
-                    pass
+                extraction_result = extract_transactions_python(uploaded_file, file_name)
+                if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+                    python_transactions, python_debug_log = extraction_result
+                else:
+                    python_transactions = extraction_result or []
+                    python_debug_log = []
+                transactions = python_transactions or []
                 
-                ai_transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
-                transactions = ai_transactions
+                # Fallback to AI only if Python found nothing (or for PDFs)
+                if not transactions:
+                    method_used = 'ai'
+                    try:
+                        uploaded_file.seek(0)
+                    except Exception:
+                        pass
+                    
+                    ai_transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
+                    transactions = ai_transactions
 
             if not transactions:
                 st.error(f"   ❌ Could not extract transactions from {file_name}.")

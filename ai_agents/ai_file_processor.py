@@ -483,15 +483,24 @@ Return ALL transactions found on this page, even if the format is slightly diffe
                         print(f"[AI_FILE_PROCESSOR] ⚠️ Excel file {filename} has no sheets")
                         return None, 'error'
                     
-                    # Combine all sheets into CSV format
+                    # Combine all sheets into CSV format with clear structure
                     sheet_contents = []
                     for sheet_name, df in all_sheets.items():
                         if df.empty:
                             self.logger.warning(f"Sheet '{sheet_name}' in {filename} is empty")
                             continue
+                        
+                        # Log column names for debugging
+                        print(f"[AI_FILE_PROCESSOR] Sheet '{sheet_name}' columns: {list(df.columns)}")
+                        print(f"[AI_FILE_PROCESSOR] Sheet '{sheet_name}' shape: {df.shape}")
+                        if not df.empty:
+                            print(f"[AI_FILE_PROCESSOR] Sheet '{sheet_name}' first row sample: {df.iloc[0].to_dict()}")
+                        
                         # Add sheet name as header comment
                         sheet_contents.append(f"=== Sheet: {sheet_name} ===")
-                        sheet_contents.append(df.to_csv(index=False))
+                        # Convert to CSV with headers - this is what AI will see
+                        csv_content = df.to_csv(index=False)
+                        sheet_contents.append(csv_content)
                     
                     if not sheet_contents:
                         self.logger.warning(f"Excel file {filename} has no data in any sheet")
@@ -501,6 +510,7 @@ Return ALL transactions found on this page, even if the format is slightly diffe
                     content = "\n".join(sheet_contents)
                     self.logger.info(f"Excel file {filename}: Extracted {len(all_sheets)} sheet(s), {len(content)} characters")
                     print(f"[AI_FILE_PROCESSOR] ✅ Excel file {filename}: Extracted {len(all_sheets)} sheet(s), {len(content)} characters")
+                    print(f"[AI_FILE_PROCESSOR] CSV content preview (first 500 chars): {content[:500]}")
                     return content, 'excel'
                 except ImportError as e:
                     error_msg = f"Missing Excel dependency. For .xlsx files, install: pip install openpyxl. For .xls files, install: pip install xlrd"
@@ -736,52 +746,66 @@ Extracted text:
 {file_content}
 """
             else:
-                # CSV/Excel format
+                # CSV/Excel format - AI needs to intelligently map columns
                 prompt = f"""
-You are parsing an IndMoney transaction report. The first row of each sheet is the header and matches one of these patterns:
-- "Scrip Symbol", "Scrip Name", "Txn Date", "Quantity", "Price", "Amount", "Transaction Type", etc.
+You are an expert at analyzing financial transaction files. The file below is in CSV format (converted from Excel).
 
-Map the file into JSON using the canonical schema below. Every row that represents a buy or sell transaction must appear in the output.
+YOUR TASK:
+1. **Analyze the column headers** in the first row
+2. **Understand what each column represents** by looking at column names AND sample data
+3. **Map columns intelligently** to the standard schema below
+4. **Extract ALL transactions** from the data
 
-Schema (JSON array of objects):
+IMPORTANT COLUMN MAPPING RULES:
+- **Date columns**: Look for "Date", "Execution date", "Txn Date", "Transaction Date", "Trade Date", etc. → map to `"date"`
+- **Ticker/Symbol columns**: Look for "Symbol", "Ticker", "Scrip Symbol", "Trading Symbol", "ISIN" (use ISIN if no symbol) → map to `"ticker"`
+- **Stock Name columns**: Look for "Stock name", "Stock Name", "Security Name", "Scrip Name", "Name" → map to `"stock_name"`
+- **Quantity columns**: Look for "Quantity", "Qty", "Units", "No. of Units" → map to `"quantity"` (THIS IS CRITICAL - quantity must be extracted correctly!)
+- **Amount/Value columns**: Look for "Value", "Amount", "Total Value", "Consideration", "Trade Value" → map to `"amount"`
+- **Price columns**: Look for "Price", "Rate", "NAV", "Per Unit Price" → map to `"price"` (if missing, we'll calculate from amount/quantity)
+- **Transaction Type**: Look for "Type", "Transaction Type", "Action", "Buy/Sell" → map to `"transaction_type"` ("BUY" → "buy", "SELL" → "sell")
+- **Exchange**: Look for "Exchange", "Exchange Name" → use for context
+- **Channel**: Use filename `{filename}` or any "Broker"/"Platform" column
+
+CRITICAL INSTRUCTIONS:
+- **Quantity is the MOST IMPORTANT field** - if the file has a "Quantity" column, extract it EXACTLY as shown, do NOT calculate it
+- If quantity is present in the file, use it as-is (even if it's 0)
+- Only calculate quantity if it's completely missing AND you have amount+price
+- If you see "Quantity" column with values like 5, 3000, 1, etc. - extract those EXACT values
+- If you see "Value" column - that's the total amount, map it to `"amount"`
+- If price column is missing but quantity and amount exist, set price to 0 (we'll calculate it later)
+
+OUTPUT SCHEMA (JSON array):
 [
   {{
     "date": "YYYY-MM-DD",
     "ticker": "exchange-ready ticker",
     "stock_name": "full security name",
     "scheme_name": null,
-    "quantity": 0.0,
-    "price": 0.0,
-    "amount": 0.0,
+    "quantity": <EXACT VALUE FROM FILE IF PRESENT, OR 0>,
+    "price": <VALUE FROM FILE OR 0>,
+    "amount": <VALUE FROM FILE OR 0>,
     "transaction_type": "buy" | "sell",
     "asset_type": "stock" | "mutual_fund" | "bond" | "pms" | "aif",
     "sector": "Sector name or Unknown",
-    "channel": "Broker/platform or filename"
+    "channel": "{filename}"
   }}
 ]
 
-Column rules:
-- `Scrip Symbol`, `Trading Symbol`, or similar → `"ticker"`. Normalize to a trading code (e.g., RELIANCE → RELIANCE.NS if needed). Never return ISINs or descriptive names in `"ticker"`.
-- `Scrip Name`, `Security Name`, `Scheme Name` → `"stock_name"`.
-- `Txn Date`, `Transaction Date`, `Trade Date` → `"date"` (normalize to YYYY-MM-DD).
-- `Quantity`, `Qty`, `Units` → `"quantity"`.
-- `Price`, `Rate`, `NAV` → `"price"` (use 0 if missing).
-- `Amount`, `Value`, `Consideration` → `"amount"` (use 0 if missing).
-- Transaction verb columns (`Transaction Type`, `Action`, `Side`) → `"transaction_type"` (map all buy-like terms to `"buy"`; sell/redemption/switch-out to `"sell"`).
-- Identify `"asset_type"` heuristically: numeric ticker → mutual_fund; `.NS`/`.BO` suffix or a typical stock symbol → stock; contains "bond"/"debenture"/"SGB" → bond; contains "PMS" → pms; contains "AIF" → aif.
-- `"channel"`: prefer columns named `Channel`, `Broker`, `Platform`. If none exist, use the filename `{filename}`.
-- `"sector"`: use any explicit sector column; otherwise default to `"Unknown"` unless you can infer from the company name.
-- `"scheme_name"`: only set for mutual funds; otherwise null.
+EXAMPLE MAPPING:
+If CSV has: "Stock name, Symbol, Quantity, Value, Execution date and time, Type"
+Map to:
+- "Stock name" → stock_name
+- "Symbol" → ticker  
+- "Quantity" → quantity (EXTRACT EXACT VALUE!)
+- "Value" → amount
+- "Execution date and time" → date
+- "Type" → transaction_type
 
-Validation:
-- Skip rows whose quantity and amount are both blank or zero.
-- Ensure quantity is positive. If a row shows negative quantity/amount for a sell, output a positive quantity and mark `"transaction_type": "sell"`.
-- If price is absent, set it to 0 (downstream logic will backfill).
+File content (CSV format with headers):
+{file_content[:12000] if len(file_content) <= 12000 else file_content[:10000] + '\n... (truncated) ...'}
 
-Output ONLY the JSON array—no commentary.
-
-File content (comma-separated rows from Excel/CSV):
-{file_content[:10000] if len(file_content) <= 10000 else file_content[:8000] + '\n... (truncated, showing first 8000 chars) ...'}
+Output ONLY the JSON array—no commentary or explanation.
 """
 
             content_length = len(file_content)
