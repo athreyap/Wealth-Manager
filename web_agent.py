@@ -1420,15 +1420,58 @@ def _extract_pdf_with_vision_api(uploaded_file, filename: str = "uploaded_file.p
         print(f"[PDF_VISION] Read {len(pdf_bytes)} bytes ({pdf_size_mb:.2f} MB) from PDF file: {filename}")
         diagnostic_info.append(f"📄 PDF size: {pdf_size_mb:.2f} MB")
         
+        # File size validation for Streamlit Cloud
+        MAX_FILE_SIZE_MB = 10  # Streamlit Cloud limit
+        if pdf_size_mb > MAX_FILE_SIZE_MB:
+            error_msg = f"File too large: {pdf_size_mb:.2f} MB. Maximum allowed: {MAX_FILE_SIZE_MB} MB for Streamlit Cloud."
+            print(f"[PDF_VISION] ❌ {error_msg}")
+            error_messages.append(error_msg)
+            diagnostic_info.append(f"❌ {error_msg}")
+            if show_ui_errors:
+                try:
+                    st.error(f"❌ **File Size Error**: {error_msg}\n\nPlease use a smaller PDF file or split it into multiple files.")
+                except:
+                    pass
+            return ""
+        
         images = []
         image_conversion_error = None
         try:
+            # Try to use PyMuPDF (even if diagnostic check failed, retry import here)
+            fitz_module = None
             if fitz_available:
-                import fitz  # PyMuPDF
+                # Already imported in diagnostic check
+                fitz_module = fitz
+            else:
+                # Retry import - sometimes modules load differently at runtime
+                try:
+                    import fitz
+                    fitz_module = fitz
+                    print(f"[PDF_VISION] PyMuPDF import succeeded on retry!")
+                    fitz_available = True
+                except ImportError:
+                    pass
+            
+            if fitz_module:
                 print(f"[PDF_VISION] Using PyMuPDF to convert PDF to images...")
                 try:
-                    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                    pdf_doc = fitz_module.open(stream=pdf_bytes, filetype="pdf")
                     total_pages = len(pdf_doc)
+                    
+                    # Page count validation for Streamlit Cloud
+                    MAX_PDF_PAGES = 50  # Reasonable limit for Streamlit Cloud
+                    if total_pages > MAX_PDF_PAGES:
+                        error_msg = f"PDF too large: {total_pages} pages. Maximum allowed: {MAX_PDF_PAGES} pages for Streamlit Cloud."
+                        print(f"[PDF_VISION] ❌ {error_msg}")
+                        error_messages.append(error_msg)
+                        diagnostic_info.append(f"❌ {error_msg}")
+                        pdf_doc.close()
+                        if show_ui_errors:
+                            try:
+                                st.error(f"❌ **PDF Size Error**: {error_msg}\n\nPlease split the PDF into smaller files (max {MAX_PDF_PAGES} pages each).")
+                            except:
+                                pass
+                        return ""
                     
                     # Check if PDF is encrypted
                     is_encrypted = pdf_doc.is_encrypted
@@ -1459,18 +1502,15 @@ def _extract_pdf_with_vision_api(uploaded_file, filename: str = "uploaded_file.p
                     diagnostic_info.append(f"✅ PDF opened successfully")
                     
                     failed_pages = []
+                    # Process pages incrementally to save memory (don't store all images)
+                    # Images will be processed immediately with Vision API
                     for page_num in range(total_pages):
                         try:
                             page = pdf_doc[page_num]
                             
-                            # Check page properties
-                            page_rect = page.rect
-                            page_width = page_rect.width
-                            page_height = page_rect.height
-                            
-                            # Try to render page to image (300 DPI for good quality)
+                            # Try to render page to image (150 DPI optimized for Streamlit Cloud - 4x less memory)
                             try:
-                                mat = fitz.Matrix(300/72, 300/72)  # 300 DPI
+                                mat = fitz_module.Matrix(150/72, 150/72)  # 150 DPI (reduced from 300 for memory optimization)
                                 pix = page.get_pixmap(matrix=mat)
                                 
                                 # Check if pixmap is valid
@@ -1498,10 +1538,24 @@ def _extract_pdf_with_vision_api(uploaded_file, filename: str = "uploaded_file.p
                                     failed_pages.append(page_num + 1)
                                     continue
                                 
+                                # Compress image if too large (max 2048px dimension)
+                                max_dimension = 2048
+                                if img.width > max_dimension or img.height > max_dimension:
+                                    ratio = min(max_dimension / img.width, max_dimension / img.height)
+                                    new_size = (int(img.width * ratio), int(img.height * ratio))
+                                    img = img.resize(new_size, Image.Resampling.LANCZOS)
+                                    print(f"[PDF_VISION] ⚠️ Page {page_num + 1}: Resized from {img.width}x{img.height} to {new_size[0]}x{new_size[1]}")
+                                
+                                # Store image for processing (will be processed immediately after conversion)
                                 images.append(img)
+                                
                                 if (page_num + 1) % 3 == 0 or page_num == 0 or page_num == total_pages - 1:
                                     img_size_kb = len(img_data) / 1024
                                     print(f"[PDF_VISION] ✅ Page {page_num + 1}/{total_pages}: Converted to image ({img.width}x{img.height}, {img_size_kb:.1f} KB)")
+                                
+                                # Free pixmap memory immediately
+                                pix = None
+                                
                             except Exception as render_error:
                                 error_msg = f"Page {page_num + 1}: Render error - {str(render_error)}"
                                 print(f"[PDF_VISION] ⚠️ {error_msg}")
@@ -1558,7 +1612,7 @@ def _extract_pdf_with_vision_api(uploaded_file, filename: str = "uploaded_file.p
                 try:
                     from pdf2image import convert_from_bytes
                     print(f"[PDF_VISION] Using pdf2image to convert PDF to images...")
-                    images = convert_from_bytes(pdf_bytes, dpi=300, fmt='RGB')
+                    images = convert_from_bytes(pdf_bytes, dpi=150, fmt='RGB')  # Reduced from 300 for memory optimization
                     success_msg = f"✅ pdf2image converted {len(images)} pages"
                     print(f"[PDF_VISION] {success_msg}")
                     diagnostic_info.append(success_msg)
@@ -1634,9 +1688,10 @@ def _extract_pdf_with_vision_api(uploaded_file, filename: str = "uploaded_file.p
         
         for page_num, image in enumerate(images[:max_pages], 1):
             try:
-                # Convert PIL Image to base64
+                # Convert PIL Image to base64 with compression
                 buffered = io.BytesIO()
-                image.save(buffered, format="PNG")
+                # Use optimize=True and compress_level for smaller file size
+                image.save(buffered, format="PNG", optimize=True, compress_level=6)
                 img_size_bytes = len(buffered.getvalue())
                 img_size_mb = img_size_bytes / (1024 * 1024)
                 img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
@@ -2098,6 +2153,10 @@ def _tx_extract_tables_from_pdf(uploaded_file) -> List[pd.DataFrame]:
                                 if vision_text and vision_text.strip():
                                     print(f"[PDF_EXTRACT] ✅ GPT-4 Vision extracted {len(vision_text)} characters")
                                     all_text_content = [vision_text]
+                                    # Store the extracted text for AI processing
+                                    # This will be used by the AI extraction function
+                                    uploaded_file._vision_api_text = vision_text
+                                    print(f"[PDF_EXTRACT] ✅ Stored Vision API text on file object (attribute set: {hasattr(uploaded_file, '_vision_api_text')})")
                                 else:
                                     print(f"[PDF_EXTRACT]   GPT-4 Vision also failed or not available")
                                     print(f"[PDF_EXTRACT]   Recommendation: Install OCR dependencies (pdf2image, pytesseract, Tesseract) or convert PDF to text-selectable format")
@@ -5353,6 +5412,26 @@ def extract_transactions_for_csv(uploaded_file, file_name: str, user_id: Optiona
     transactions: List[Dict[str, Any]] = []
     method_used = 'python'
 
+    # File size validation for Streamlit Cloud
+    try:
+        uploaded_file.seek(0, 2)  # Seek to end
+        file_size = uploaded_file.tell()
+        uploaded_file.seek(0)  # Reset
+        
+        file_size_mb = file_size / (1024 * 1024)
+        MAX_FILE_SIZE_MB = 10  # Streamlit Cloud limit
+        
+        if file_size_mb > MAX_FILE_SIZE_MB:
+            error_msg = f"File too large: {file_size_mb:.2f} MB. Maximum allowed: {MAX_FILE_SIZE_MB} MB for Streamlit Cloud."
+            print(f"[FILE_PARSE] ❌ {error_msg}")
+            try:
+                st.error(f"❌ **File Size Error**: {error_msg}\n\nPlease use a smaller file or split it into multiple files.")
+            except:
+                pass
+            return [], 'error'
+    except Exception:
+        pass  # Skip validation if can't check size
+
     # Always try deterministic parsing first so we avoid AI warnings for structured CSV/XLSX
     try:
         uploaded_file.seek(0)
@@ -5370,6 +5449,11 @@ def extract_transactions_for_csv(uploaded_file, file_name: str, user_id: Optiona
         if AI_AGENTS_AVAILABLE:
             method_used = 'ai'
             print(f"[FILE_PARSE] Python extraction found no transactions, trying AI extraction for {file_name}...")
+            # Check if Vision API text was pre-extracted
+            if hasattr(uploaded_file, '_vision_api_text'):
+                print(f"[FILE_PARSE] ✅ Pre-extracted Vision API text found ({len(uploaded_file._vision_api_text)} characters) - will reuse it")
+            else:
+                print(f"[FILE_PARSE] ⚠️ No pre-extracted Vision API text found")
             try:
                 uploaded_file.seek(0)
             except Exception:

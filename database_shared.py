@@ -341,23 +341,69 @@ class SharedDatabaseManager:
         """
         Get existing stock or create new one in stock_master
         Returns stock_id (UUID)
+        FIXED: Now matches by ticker AND stock_name to prevent mismatches
         """
         try:
-            # Try to find existing by ticker only (more flexible)
             normalised_ticker = _tx_normalize_ticker(ticker)
+            normalised_name = (stock_name or '').strip()
+            
+            # First, try to find exact match by ticker AND stock_name
+            if normalised_name and normalised_name != 'Unknown':
+                response = self.supabase.table('stock_master').select('*').eq(
+                    'ticker', normalised_ticker
+                ).eq('stock_name', normalised_name).execute()
+                
+                if response.data and len(response.data) > 0:
+                    # Exact match found - use it
+                    existing_stock = response.data[0]
+                    return existing_stock['id']
+            
+            # If no exact match, try to find by ticker only
             response = self.supabase.table('stock_master').select('*').eq(
                 'ticker', normalised_ticker
             ).execute()
             
             if response.data and len(response.data) > 0:
-                existing_stock = response.data[0]
+                # Multiple entries with same ticker - prefer one with matching name or best match
+                existing_stocks = response.data
+                
+                # If we have a name, try to find best match
+                if normalised_name and normalised_name != 'Unknown':
+                    # Try to find one with similar name (fuzzy match)
+                    best_match = None
+                    for stock in existing_stocks:
+                        existing_name = (stock.get('stock_name') or '').strip().lower()
+                        if existing_name == normalised_name.lower():
+                            best_match = stock
+                            break
+                        # Partial match (contains)
+                        if normalised_name.lower() in existing_name or existing_name in normalised_name.lower():
+                            if not best_match:
+                                best_match = stock
+                    
+                    if best_match:
+                        existing_stock = best_match
+                    else:
+                        # No good match - use first one but update name if better
+                        existing_stock = existing_stocks[0]
+                else:
+                    # No name provided - use first match
+                    existing_stock = existing_stocks[0]
                 
                 # Update stock info if we have better data
                 update_data = {}
                 if existing_stock.get('ticker') != normalised_ticker:
                     update_data['ticker'] = normalised_ticker
-                if stock_name and stock_name != 'Unknown' and (not existing_stock.get('stock_name') or existing_stock.get('stock_name') == 'Unknown'):
-                    update_data['stock_name'] = stock_name
+                
+                # Update name if we have a better one
+                if normalised_name and normalised_name != 'Unknown':
+                    existing_name = (existing_stock.get('stock_name') or '').strip()
+                    # Update if existing is Unknown/empty OR if new name is more specific
+                    if not existing_name or existing_name == 'Unknown':
+                        update_data['stock_name'] = normalised_name
+                    elif len(normalised_name) > len(existing_name) and existing_name.lower() in normalised_name.lower():
+                        # New name is more complete
+                        update_data['stock_name'] = normalised_name
                 
                 # For bonds, always set sector to "bond"
                 if asset_type == 'bond':

@@ -82,8 +82,26 @@ class AIFileProcessor(BaseAgent):
                 self.logger.error("OpenAI client not available")
                 return []
             
+            # Check if Vision API text was already extracted (to avoid re-extraction)
+            vision_text_pre_extracted = None
+            if hasattr(file_data, '_vision_api_text'):
+                vision_text_pre_extracted = file_data._vision_api_text
+                print(f"[AI_FILE_PROCESSOR] ✅ Found pre-extracted Vision API text ({len(vision_text_pre_extracted)} characters)")
+                self.logger.info(f"Using pre-extracted Vision API text ({len(vision_text_pre_extracted)} characters)")
+            else:
+                print(f"[AI_FILE_PROCESSOR] ⚠️ No pre-extracted Vision API text found on file_data object")
+                print(f"[AI_FILE_PROCESSOR]   file_data type: {type(file_data)}, hasattr check: {hasattr(file_data, '_vision_api_text')}")
+            
             # Detect file type and extract content
-            file_content, file_type = self._extract_file_content(file_data, filename)
+            if vision_text_pre_extracted:
+                # Use the already-extracted Vision API text
+                file_content = vision_text_pre_extracted
+                file_type = 'pdf'
+                print(f"[AI_FILE_PROCESSOR] ✅ Using pre-extracted Vision API text for {filename}")
+                self.logger.info(f"Using pre-extracted Vision API text for {filename}")
+            else:
+                print(f"[AI_FILE_PROCESSOR] ⚠️ No pre-extracted text, calling _extract_file_content...")
+                file_content, file_type = self._extract_file_content(file_data, filename)
             
             if not file_content:
                 self.logger.error(f"Could not extract content from {filename} (file_type: {file_type})")
@@ -284,13 +302,24 @@ class AIFileProcessor(BaseAgent):
                     for page_num in range(total_pages):
                         try:
                             page = pdf_doc[page_num]
-                            # Render page to image (300 DPI for good quality)
-                            mat = fitz.Matrix(300/72, 300/72)  # 300 DPI
+                            # Render page to image (150 DPI optimized for Streamlit Cloud - 4x less memory)
+                            mat = fitz.Matrix(150/72, 150/72)  # 150 DPI (reduced from 300 for memory optimization)
                             pix = page.get_pixmap(matrix=mat)
                             # Convert to PIL Image
                             img_data = pix.tobytes("png")
                             img = Image.open(io.BytesIO(img_data))
+                            
+                            # Compress image if too large (max 2048px dimension)
+                            max_dimension = 2048
+                            if img.width > max_dimension or img.height > max_dimension:
+                                ratio = min(max_dimension / img.width, max_dimension / img.height)
+                                new_size = (int(img.width * ratio), int(img.height * ratio))
+                                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                                self.logger.info(f"[VISION_API] Page {page_num + 1}: Resized from {img.width}x{img.height} to {new_size[0]}x{new_size[1]}")
+                            
                             images.append(img)
+                            # Free pixmap memory immediately
+                            pix = None
                             if (page_num + 1) % 3 == 0 or page_num == 0:  # Log every 3rd page or first page
                                 self.logger.info(f"[VISION_API] Converted page {page_num + 1}/{total_pages} to image")
                         except Exception as page_error:
@@ -301,7 +330,7 @@ class AIFileProcessor(BaseAgent):
                 else:
                     # Use pdf2image
                     self.logger.info("[VISION_API] Converting PDF to images using pdf2image...")
-                    images = convert_from_bytes(pdf_bytes, dpi=300, fmt='RGB')
+                    images = convert_from_bytes(pdf_bytes, dpi=150, fmt='RGB')  # Reduced from 300 for memory optimization
                     self.logger.info(f"[VISION_API] ✅ pdf2image converted {len(images)} pages")
             except Exception as conv_error:
                 self.logger.error(f"[VISION_API] ❌ Failed to convert PDF to images: {str(conv_error)}")
@@ -321,9 +350,10 @@ class AIFileProcessor(BaseAgent):
             
             for page_num, image in enumerate(images[:max_pages], 1):
                 try:
-                    # Convert PIL Image to base64
+                    # Convert PIL Image to base64 with compression
                     buffered = io.BytesIO()
-                    image.save(buffered, format="PNG")
+                    # Use optimize=True and compress_level for smaller file size
+                    image.save(buffered, format="PNG", optimize=True, compress_level=6)
                     img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
                     
                     # Call GPT-4 Vision API
@@ -580,8 +610,72 @@ Return ALL transactions found on this page, even if the format is slightly diffe
         """Use AI to extract transactions from any file format"""
         
         try:
-            # Create intelligent prompt based on file type
-            prompt = f"""
+            # Detect if this is Vision API extracted text (has pipe separators or structured format)
+            # Only treat as Vision API text if it's from a PDF and has the characteristic format
+            # CSV/Excel content will have commas/tabs as delimiters, not pipes with "Date:" labels
+            # Check first 500 chars to avoid false positives
+            sample = file_content[:500] if len(file_content) > 500 else file_content
+            is_vision_api_text = (
+                file_type == 'pdf' and 
+                (
+                    ('Date:' in sample and 'Ticker:' in sample and '|' in sample) or
+                    ('Date:' in sample and 'Quantity:' in sample and '|' in sample)
+                ) and
+                # CSV/Excel would have comma or tab delimiters, not pipe with labels
+                not (',' in sample and sample.count(',') > sample.count('|'))
+            )
+            
+            if is_vision_api_text:
+                # Vision API format: "Date: YYYY-MM-DD | Ticker: SYMBOL | Name: ... | Quantity: ..."
+                prompt = f"""
+You are extracting financial transactions from Vision API extracted text. The text may be in structured format with pipe separators or line-by-line format.
+
+Extract ALL transactions from the following text and convert to JSON array. The text may contain:
+- Structured lines like: "Date: 2024-01-15 | Ticker: RELIANCE.NS | Name: Reliance Industries | Quantity: 100 | Price: 2500 | Amount: 250000 | Type: buy"
+- Or table-like text with headers and rows
+- Or unstructured transaction descriptions
+
+Schema (JSON array of objects):
+[
+  {{
+    "date": "YYYY-MM-DD",
+    "ticker": "exchange-ready ticker",
+    "stock_name": "full security name",
+    "scheme_name": null,
+    "quantity": 0.0,
+    "price": 0.0,
+    "amount": 0.0,
+    "transaction_type": "buy" | "sell",
+    "asset_type": "stock" | "mutual_fund" | "bond" | "pms" | "aif",
+    "sector": "Sector name or Unknown",
+    "channel": "{filename}"
+  }}
+]
+
+Rules:
+- Extract date in any format and normalize to YYYY-MM-DD
+- Extract ticker/symbol (normalize to exchange format like RELIANCE.NS if needed)
+- Extract stock name/security name
+- Extract quantity (shares/units)
+- Extract price per unit
+- Extract amount (total value)
+- Determine transaction_type: "buy" for purchases/buys, "sell" for sales/redemptions
+- Infer asset_type: numeric codes → mutual_fund, .NS/.BO → stock, etc.
+- Set sector to "Unknown" if not found
+- Set channel to filename: "{filename}"
+
+IMPORTANT:
+- Extract EVERY transaction you find, even if some fields are missing
+- If quantity or amount is missing, try to calculate from other fields
+- If date is missing, skip that transaction
+- Return empty array [] ONLY if NO transactions are found
+
+Extracted text:
+{file_content}
+"""
+            else:
+                # CSV/Excel format
+                prompt = f"""
 You are parsing an IndMoney transaction report. The first row of each sheet is the header and matches one of these patterns:
 - "Scrip Symbol", "Scrip Name", "Txn Date", "Quantity", "Price", "Amount", "Transaction Type", etc.
 
@@ -628,7 +722,10 @@ File excerpt (comma-separated rows):
 {file_content[:6000]}
 """
 
-            # Call OpenAI
+            content_length = len(file_content)
+            print(f"[AI_EXTRACT] Content length: {content_length} chars, processing with AI...")
+            
+            # Call OpenAI without timeout - let it take as long as needed
             response = self.openai_client.chat.completions.create(
                 model="gpt-5",  # GPT-5 for better file processing
                 messages=[
@@ -663,19 +760,20 @@ CRITICAL RULES:
                         "content": prompt
                     }
                 ],
-                max_completion_tokens=4000,
-                # Note: GPT-5 only supports default temperature (1)
-                timeout=90
+                max_completion_tokens=4000
+                # Note: No timeout - let the API take as long as needed
             )
             
             # Extract JSON from response
             ai_response = response.choices[0].message.content
             transactions = self._extract_json(ai_response)
             
+            print(f"[AI_EXTRACT] ✅ Successfully extracted {len(transactions)} transactions")
             return transactions
             
         except Exception as e:
             self.logger.error(f"AI extraction failed: {e}")
+            print(f"[AI_EXTRACT] ❌ AI extraction failed: {e}")
             # Try fallback parsing
             return self._fallback_extraction(file_content, file_type)
     
