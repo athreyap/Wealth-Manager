@@ -1055,7 +1055,9 @@ class SharedDatabaseManager:
             for stock_id, calc in holdings_calc.items():
                 total_quantity = calc['buy_qty'] - calc['sell_qty']
                 
-                if total_quantity > 0:  # Only store holdings with positive quantity
+                # Use a small epsilon to handle floating point precision issues
+                # Treat anything <= 0.0001 as effectively zero (fully sold position)
+                if total_quantity > 0.0001:  # Only store holdings with positive quantity
                     average_price = calc['total_cost'] / calc['buy_qty'] if calc['buy_qty'] > 0 else 0
                     
                     # Upsert (update if exists, insert if not)
@@ -1095,7 +1097,18 @@ class SharedDatabaseManager:
 
             # CRITICAL: Filter out holdings with zero or negative quantity (fully sold positions)
             # These shouldn't appear in holdings list at all
-            holdings = [h for h in holdings if float(h.get('total_quantity', 0)) > 0]
+            # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
+            filtered_holdings = []
+            for h in holdings:
+                quantity_raw = h.get('total_quantity', 0)
+                try:
+                    quantity = float(quantity_raw) if quantity_raw is not None else 0.0
+                except (ValueError, TypeError):
+                    quantity = 0.0
+                # Treat anything <= 0.0001 as effectively zero
+                if quantity > 0.0001:
+                    filtered_holdings.append(h)
+            holdings = filtered_holdings
 
             latest_channels = self._prefetch_latest_channels(user_id)
             
@@ -1135,7 +1148,18 @@ class SharedDatabaseManager:
 
             # CRITICAL: Filter out holdings with zero or negative quantity (fully sold positions)
             # These shouldn't appear in holdings list at all
-            holdings = [h for h in holdings if float(h.get('total_quantity', 0)) > 0]
+            # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
+            filtered_holdings = []
+            for h in holdings:
+                quantity_raw = h.get('total_quantity', 0)
+                try:
+                    quantity = float(quantity_raw) if quantity_raw is not None else 0.0
+                except (ValueError, TypeError):
+                    quantity = 0.0
+                # Treat anything <= 0.0001 as effectively zero
+                if quantity > 0.0001:
+                    filtered_holdings.append(h)
+            holdings = filtered_holdings
 
             latest_channels = self._prefetch_latest_channels(user_id)
             

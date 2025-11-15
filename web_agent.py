@@ -148,8 +148,9 @@ def get_cached_portfolio_summary(holdings: List[Dict]) -> str:
     
     for holding in holdings:
         # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
         quantity = safe_float(holding.get('total_quantity'), 0)
-        if quantity <= 0:
+        if quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
             continue  # Skip fully sold positions - they shouldn't count in invested amount or P&L
         
         current_price = holding.get('current_price')
@@ -220,8 +221,9 @@ def get_cached_portfolio_summary(holdings: List[Dict]) -> str:
     holdings_with_pnl = []
     for holding in holdings:
         # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
         quantity = safe_float(holding.get('total_quantity'), 0)
-        if quantity <= 0:
+        if quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
             continue  # Skip fully sold positions
         
         current_price = holding.get('current_price')
@@ -6395,8 +6397,9 @@ def get_portfolio_metrics(holdings: List[Dict]) -> Dict[str, Any]:
     
     for holding in holdings:
         # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
         quantity = float(holding.get('total_quantity', 0))
-        if quantity <= 0:
+        if quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
             continue  # Skip fully sold positions - they shouldn't count in invested amount or P&L
         
         current_price = holding.get('current_price')
@@ -6659,8 +6662,9 @@ def portfolio_overview_page():
     
     for holding in holdings:
         # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
         quantity = float(holding.get('total_quantity', 0))
-        if quantity <= 0:
+        if quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
             continue  # Skip fully sold positions - they shouldn't count in invested amount or P&L
         
         # Calculate investment value
@@ -6707,8 +6711,15 @@ def portfolio_overview_page():
     holdings_data = []
     for holding in holdings:
         # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
-        quantity = float(holding.get('total_quantity', 0))
-        if quantity <= 0:
+        # Handle both string and numeric quantities, and account for floating point precision
+        quantity_raw = holding.get('total_quantity', 0)
+        try:
+            quantity = float(quantity_raw) if quantity_raw is not None else 0.0
+        except (ValueError, TypeError):
+            quantity = 0.0
+        
+        # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
+        if quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
             continue  # Skip fully sold positions - they shouldn't appear in holdings table
         
         # Handle None current_price - check both current_price and live_price fields
@@ -6907,8 +6918,9 @@ def portfolio_overview_page():
     perf_data = []
     for holding in holdings:
         # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
         quantity = float(holding.get('total_quantity', 0))
-        if quantity <= 0:
+        if quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
             continue  # Skip fully sold positions - they shouldn't count in invested amount or P&L
         
         current_price = holding.get('current_price')
@@ -7107,8 +7119,9 @@ def pnl_analysis_page():
     
     for holding in holdings:
         # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
         quantity = float(holding.get('total_quantity', 0))
-        if quantity <= 0:
+        if quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
             continue  # Skip fully sold positions - they shouldn't count in invested amount or P&L
         
         sector = holding.get('sector', 'Unknown')
