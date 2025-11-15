@@ -39,7 +39,9 @@ def _normalize_stockmaster_ticker(value: str) -> str:
 
 
 def _tx_normalize_ticker(raw: Any) -> str:
-    """Normalize ticker values (shared with transaction pipeline)."""
+    """Normalize ticker values (shared with transaction pipeline).
+    CRITICAL: Preserves .NS and .BO suffixes for stocks to distinguish exchanges.
+    """
     if raw is None:
         return ''
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
@@ -56,6 +58,16 @@ def _tx_normalize_ticker(raw: Any) -> str:
         if parts:
             text = parts[-1].strip()
     text = text.replace('\u00a0', ' ')
+    
+    # CRITICAL: Preserve .NS and .BO suffixes for stocks (they distinguish exchanges)
+    has_ns_suffix = text.upper().endswith('.NS')
+    has_bo_suffix = text.upper().endswith('.BO')
+    exchange_suffix = '.NS' if has_ns_suffix else ('.BO' if has_bo_suffix else '')
+    
+    # Remove suffix temporarily for normalization
+    if exchange_suffix:
+        text = text[:-len(exchange_suffix)]
+    
     text = ''.join(text.split())  # remove whitespace
     text = text.lstrip('$')
     text = re.sub(r'^(NSE|BSE|NSI|BOM)(EQ|BE|BZ|XT|XD|P|W|Z|T0|T1)?', '', text, flags=re.IGNORECASE)
@@ -63,6 +75,12 @@ def _tx_normalize_ticker(raw: Any) -> str:
     if text.endswith('.0') and text.replace('.0', '').isdigit():
         text = text[:-2]
     text = text.replace('-', '')
+    
+    # Restore exchange suffix if it was present (for stocks)
+    if exchange_suffix and not text.isdigit():
+        text = text.upper() + exchange_suffix
+        return text
+    
     if text.isdigit():
         return text
     return text.upper()
@@ -608,23 +626,84 @@ class SharedDatabaseManager:
             return {}
     
     def _fetch_mf_info_mftool(self, ticker: str) -> Dict[str, Any]:
-        """Fetch mutual fund info from mftool"""
+        """Fetch mutual fund info from mftool, with AMFI fallback.
+        Resolves ticker from AMFI to ensure correct format for mftool.
+        """
+        # Normalize ticker: remove any prefixes/suffixes, ensure it's just the AMFI code
+        normalized_ticker = str(ticker).strip()
+        # Remove common prefixes
+        normalized_ticker = normalized_ticker.replace('MF_', '').replace('mf_', '').strip()
+        # Remove any non-digit characters (except if it's not a code)
+        if normalized_ticker.isdigit():
+            # It's already a valid AMFI code
+            scheme_code = normalized_ticker
+        else:
+            # Try to resolve from AMFI dataset first
+            scheme_code = None
+            try:
+                import importlib
+                web_agent_module = importlib.import_module('web_agent')
+                if hasattr(web_agent_module, 'get_amfi_dataset'):
+                    amfi_data = web_agent_module.get_amfi_dataset()
+                    if amfi_data:
+                        # Try code_lookup first (direct code match)
+                        if 'code_lookup' in amfi_data and normalized_ticker in amfi_data['code_lookup']:
+                            scheme_code = normalized_ticker
+                        # Try name_lookup (if ticker is actually a name)
+                        elif 'name_lookup' in amfi_data:
+                            # Search for matching scheme by name
+                            for code, scheme in amfi_data.get('code_lookup', {}).items():
+                                scheme_name = scheme.get('name', '').upper()
+                                if normalized_ticker.upper() in scheme_name or scheme_name in normalized_ticker.upper():
+                                    scheme_code = code
+                                    break
+            except:
+                pass
+            
+            # If still not resolved, use original ticker
+            if not scheme_code:
+                scheme_code = normalized_ticker
+        
+        # Try mftool with resolved code
         try:
             from mftool import Mftool
             mf = Mftool()
             
-            # Get scheme info
-            scheme_info = mf.get_scheme_info(ticker)
-            
-            if scheme_info:
-                return {
-                    'stock_name': scheme_info.get('schemeName', ''),
-                    'sector': scheme_info.get('category', 'Unknown')
-                }
-            
-            return {}
+            # Ensure scheme_code is a string of digits for mftool
+            if scheme_code.isdigit():
+                # Get scheme info using the AMFI code
+                scheme_info = mf.get_scheme_info(scheme_code)
+                
+                if scheme_info and scheme_info.get('schemeName'):
+                    return {
+                        'stock_name': scheme_info.get('schemeName', ''),
+                        'sector': scheme_info.get('category', 'Unknown')
+                    }
+        except Exception as e:
+            # mftool failed, try AMFI dataset fallback
+            pass
+        
+        # Fallback: Try AMFI dataset directly (avoid circular import by using lazy import)
+        try:
+            import importlib
+            web_agent_module = importlib.import_module('web_agent')
+            if hasattr(web_agent_module, 'get_amfi_dataset'):
+                amfi_data = web_agent_module.get_amfi_dataset()
+                if amfi_data and 'code_lookup' in amfi_data:
+                    # Try with resolved code first
+                    scheme = amfi_data['code_lookup'].get(scheme_code)
+                    if not scheme and normalized_ticker != scheme_code:
+                        # Try with original normalized ticker
+                        scheme = amfi_data['code_lookup'].get(normalized_ticker)
+                    if scheme and scheme.get('name'):
+                        return {
+                            'stock_name': scheme.get('name', ''),
+                            'sector': 'Mutual Fund'
+                        }
         except:
-            return {}
+            pass
+        
+        return {}
     
     def update_stock_live_price(self, stock_id: str, live_price: float):
         """Update live price in stock_master"""

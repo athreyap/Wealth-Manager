@@ -6661,6 +6661,42 @@ def portfolio_overview_page():
                     else:
                         st.warning("Could not verify asset types. They may be correct.")
         
+        # Show "Fix Mutual Fund Names" button if there are MFs with numeric names
+        mf_with_numeric_names = []
+        for h in holdings:
+            ticker = str(h.get('ticker', '')).strip()
+            stock_name = str(h.get('stock_name', '')).strip()
+            asset_type = h.get('asset_type', '')
+            if asset_type == 'mutual_fund' and ticker.isdigit() and stock_name == ticker:
+                # Mutual fund with numeric name (should be resolved from AMFI)
+                mf_with_numeric_names.append(h)
+        
+        if mf_with_numeric_names:
+            if st.button(f"📝 Fix {len(mf_with_numeric_names)} Mutual Fund Name(s)", help=f"Resolve mutual fund names from AMFI dataset"):
+                with st.spinner(f"Resolving names for {len(mf_with_numeric_names)} mutual funds..."):
+                    fixed = 0
+                    amfi_data = get_amfi_dataset()
+                    if amfi_data and 'code_lookup' in amfi_data:
+                        for h in mf_with_numeric_names:
+                            ticker = h.get('ticker')
+                            stock_id = h.get('stock_id')
+                            scheme = amfi_data['code_lookup'].get(ticker)
+                            if scheme and scheme.get('name'):
+                                try:
+                                    db.supabase.table('stock_master').update({
+                                        'stock_name': scheme.get('name')
+                                    }).eq('id', stock_id).execute()
+                                    fixed += 1
+                                except Exception:
+                                    pass
+                    if fixed > 0:
+                        st.success(f"✅ Fixed {fixed} mutual fund name(s)! Refreshing...")
+                        get_cached_holdings.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.warning("Could not resolve mutual fund names. AMFI data may be unavailable.")
+        
         # Show "Refresh All Prices" button if there are stale prices
         if stale_prices:
             if st.button(f"🔄 Refresh {len(stale_prices)} Price(s)", help=f"Refresh prices for holdings with missing or stale prices"):
@@ -6895,13 +6931,16 @@ def portfolio_overview_page():
         current_price = holding.get('current_price') or holding.get('live_price')
         
         # For PMS/AIF, if price is missing or equals average, try to calculate using CAGR
-        if asset_type in ['pms', 'aif'] and (current_price is None or current_price == 0 or current_price == holding.get('average_price', 0)):
+        if asset_type in ['pms', 'aif'] and (current_price is None or current_price == 0 or abs(current_price - holding.get('average_price', 0)) < 0.01):
             try:
                 from enhanced_price_fetcher import EnhancedPriceFetcher
                 price_fetcher = EnhancedPriceFetcher()
                 ticker = holding.get('ticker')
                 if ticker:
-                    calculated_price, source = price_fetcher._get_pms_aif_price(ticker, asset_type)
+                    # Use the holding-specific calculation method which has access to transaction data
+                    calculated_price, source = price_fetcher._calculate_pms_aif_live_price(
+                        ticker, asset_type, db, holding
+                    )
                     if calculated_price and calculated_price > 0:
                         current_price = calculated_price
                         # Update the holding's live_price in database
@@ -6910,9 +6949,11 @@ def portfolio_overview_page():
                                 'live_price': calculated_price,
                                 'last_updated': datetime.now().isoformat()
                             }).eq('id', holding.get('stock_id')).execute()
-                        except Exception:
-                            pass  # Silently fail if update fails
-            except Exception:
+                            print(f"[PMS_CALC] ✅ Updated {ticker} ({asset_type}): ₹{calculated_price:,.2f} (source: {source})")
+                        except Exception as e:
+                            print(f"[PMS_CALC] ⚠️ Failed to update DB for {ticker}: {e}")
+            except Exception as e:
+                print(f"[PMS_CALC] ⚠️ Failed to calculate PMS price for {holding.get('ticker')}: {e}")
                 pass  # Fall back to average_price if calculation fails
         
         if current_price is None or current_price == 0:
