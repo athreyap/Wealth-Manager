@@ -6677,11 +6677,25 @@ def portfolio_overview_page():
     
     # Show warning and clear cache button if zero-quantity holdings were found
     if zero_qty_found:
-        st.warning(f"⚠️ Found {len(zero_qty_found)} zero-quantity holdings in cache (filtered out). Clearing cache to refresh data.")
-        if st.button("🔄 Clear Cache & Refresh Now", help="Clear cached holdings data and refresh"):
-            get_cached_holdings.clear()
-            get_portfolio_metrics.clear()
-            st.rerun()
+        st.warning(f"⚠️ Found {len(zero_qty_found)} zero-quantity holdings in cache (filtered out). Recalculating holdings and clearing cache...")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Recalculate & Clear Cache", help="Recalculate holdings from transactions and clear cache"):
+                from database_shared import SharedDatabaseManager
+                db = SharedDatabaseManager()
+                try:
+                    db.recalculate_holdings(user['id'])
+                    st.success("✅ Holdings recalculated!")
+                except Exception as e:
+                    st.error(f"Error recalculating: {e}")
+                get_cached_holdings.clear()
+                get_portfolio_metrics.clear()
+                st.rerun()
+        with col2:
+            if st.button("🗑️ Clear Cache Only", help="Just clear cached holdings data"):
+                get_cached_holdings.clear()
+                get_portfolio_metrics.clear()
+                st.rerun()
     
     # Get cached metrics
     metrics = get_portfolio_metrics(holdings)

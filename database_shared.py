@@ -1059,13 +1059,13 @@ class SharedDatabaseManager:
                 average_price = calc['total_cost'] / calc['buy_qty'] if calc['buy_qty'] > 0 else 0
                 
                 # Update ALL holdings (including zero-quantity) - we'll filter them out in get_user_holdings()
+                # Note: sector is not stored in holdings table, it's resolved from stock_master when needed
                 self.supabase.table('holdings').upsert({
                     'user_id': user_id,
                     'portfolio_id': calc['portfolio_id'],
                     'stock_id': stock_id,
                     'total_quantity': total_quantity,
-                    'average_price': average_price,
-                    'sector': self._resolve_sector_for_stock(stock_id, calc['portfolio_id'])
+                    'average_price': average_price
                 }, on_conflict='user_id,portfolio_id,stock_id').execute()
                 
                 updated_count += 1
