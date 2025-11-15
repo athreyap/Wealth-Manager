@@ -99,7 +99,19 @@ def get_cached_holdings(user_id: str):
     """Cache holdings data to avoid repeated database calls"""
     from database_shared import SharedDatabaseManager
     db = SharedDatabaseManager()
-    return db.get_user_holdings_silent(user_id)
+    holdings = db.get_user_holdings_silent(user_id)
+    # CRITICAL: Double-check filtering at cache level to ensure zero-quantity holdings are never cached
+    # This is a safety net in case database filtering has any issues
+    filtered = []
+    for h in holdings:
+        quantity_raw = h.get('total_quantity', 0)
+        try:
+            quantity = float(quantity_raw) if quantity_raw is not None else 0.0
+        except (ValueError, TypeError):
+            quantity = 0.0
+        if quantity > 0.0001:  # Only cache holdings with positive quantity
+            filtered.append(h)
+    return filtered
 
 @st.cache_data(ttl=21600)  # 6 hours
 def get_cached_amfi_schemes() -> Dict[str, str]:
@@ -6643,8 +6655,16 @@ def portfolio_overview_page():
                     else:
                         st.warning("No holdings found to update.")
     
-    # Use cached holdings data
+    # Use cached holdings data (with zero-quantity filtering)
     holdings = get_cached_holdings(user['id'])
+    
+    # Clear cache button for debugging (only show if there are zero-quantity holdings)
+    zero_qty_count = sum(1 for h in holdings if float(h.get('total_quantity', 0)) <= 0.0001)
+    if zero_qty_count > 0:
+        if st.button("🔄 Clear Cache & Refresh", help="Clear cached holdings data and refresh"):
+            get_cached_holdings.clear()
+            get_portfolio_metrics.clear()
+            st.rerun()
     
     # Get cached metrics
     metrics = get_portfolio_metrics(holdings)
@@ -6719,7 +6739,10 @@ def portfolio_overview_page():
             quantity = 0.0
         
         # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
+        # Also handle cases where quantity might be exactly 0, negative, or very small
         if quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
+            # Debug: Log skipped holdings to help diagnose issues
+            print(f"[HOLDINGS_TABLE] Skipping zero-quantity holding: {holding.get('ticker')} - {holding.get('stock_name')} (quantity={quantity})")
             continue  # Skip fully sold positions - they shouldn't appear in holdings table
         
         # Handle None current_price - check both current_price and live_price fields
