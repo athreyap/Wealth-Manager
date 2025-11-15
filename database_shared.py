@@ -1050,32 +1050,27 @@ class SharedDatabaseManager:
                 
                 holdings_calc[stock_id]['portfolio_id'] = txn['portfolio_id']
             
-            # Upsert holdings
+            # Upsert holdings (update all holdings, including zero-quantity ones)
+            # We keep zero-quantity holdings in database for historical purposes
+            # But filter them out in get_user_holdings() so they don't appear in UI
             updated_count = 0
             for stock_id, calc in holdings_calc.items():
                 total_quantity = calc['buy_qty'] - calc['sell_qty']
+                average_price = calc['total_cost'] / calc['buy_qty'] if calc['buy_qty'] > 0 else 0
                 
-                # Use a small epsilon to handle floating point precision issues
-                # Treat anything <= 0.0001 as effectively zero (fully sold position)
-                if total_quantity > 0.0001:  # Only store holdings with positive quantity
-                    average_price = calc['total_cost'] / calc['buy_qty'] if calc['buy_qty'] > 0 else 0
-                    
-                    # Upsert (update if exists, insert if not)
-                    self.supabase.table('holdings').upsert({
-                        'user_id': user_id,
-                        'portfolio_id': calc['portfolio_id'],
-                        'stock_id': stock_id,
-                        'total_quantity': total_quantity,
-                        'average_price': average_price,
-                        'sector': self._resolve_sector_for_stock(stock_id, calc['portfolio_id'])
-                    }, on_conflict='user_id,portfolio_id,stock_id').execute()
-                    
-                    updated_count += 1
-                else:
-                    # Quantity is 0 or negative, delete holding
-                    self.supabase.table('holdings').delete().eq(
-                        'user_id', user_id
-                    ).eq('stock_id', stock_id).execute()
+                # Update ALL holdings (including zero-quantity) - we'll filter them out in get_user_holdings()
+                self.supabase.table('holdings').upsert({
+                    'user_id': user_id,
+                    'portfolio_id': calc['portfolio_id'],
+                    'stock_id': stock_id,
+                    'total_quantity': total_quantity,
+                    'average_price': average_price,
+                    'sector': self._resolve_sector_for_stock(stock_id, calc['portfolio_id'])
+                }, on_conflict='user_id,portfolio_id,stock_id').execute()
+                
+                updated_count += 1
+                if total_quantity <= 0.0001:
+                    print(f"[HOLDINGS] Updated zero-quantity holding (will be filtered in UI): stock_id={stock_id}, quantity={total_quantity}")
             
             print(f"[HOLDINGS] Recalculated {updated_count} holdings for user {user_id}")
             return updated_count
@@ -1083,6 +1078,7 @@ class SharedDatabaseManager:
         except Exception as e:
             print(f"[HOLDINGS] Error recalculating: {e}")
             return 0
+    
     
     def get_user_holdings(self, user_id: str, portfolio_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get user holdings with stock details (uses view)"""
@@ -1095,8 +1091,9 @@ class SharedDatabaseManager:
             response = query.execute()
             holdings = response.data
 
-            # CRITICAL: Filter out holdings with zero or negative quantity (fully sold positions)
-            # These shouldn't appear in holdings list at all
+            # CRITICAL: Filter out holdings where total quantity (calculated from buys - sells) is zero or negative
+            # The total_quantity field is calculated from transactions: buy_qty - sell_qty in recalculate_holdings()
+            # If the net quantity from all transactions is zero (all sold), exclude from display and calculations
             # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
             filtered_holdings = []
             for h in holdings:
@@ -1105,9 +1102,13 @@ class SharedDatabaseManager:
                     quantity = float(quantity_raw) if quantity_raw is not None else 0.0
                 except (ValueError, TypeError):
                     quantity = 0.0
-                # Treat anything <= 0.0001 as effectively zero
+                # Treat anything <= 0.0001 as effectively zero (fully sold position)
+                # This quantity represents: total_buys - total_sells from all transactions
                 if quantity > 0.0001:
                     filtered_holdings.append(h)
+                else:
+                    # Debug: Log filtered holdings
+                    print(f"[GET_HOLDINGS] Filtering out zero-quantity holding: {h.get('ticker')} - {h.get('stock_name')} (calculated_qty={quantity})")
             holdings = filtered_holdings
 
             latest_channels = self._prefetch_latest_channels(user_id)
@@ -1146,8 +1147,9 @@ class SharedDatabaseManager:
             response = query.execute()
             holdings = response.data
 
-            # CRITICAL: Filter out holdings with zero or negative quantity (fully sold positions)
-            # These shouldn't appear in holdings list at all
+            # CRITICAL: Filter out holdings where total quantity (calculated from buys - sells) is zero or negative
+            # The total_quantity field is calculated from transactions: buy_qty - sell_qty in recalculate_holdings()
+            # If the net quantity from all transactions is zero (all sold), exclude from display and calculations
             # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
             filtered_holdings = []
             for h in holdings:
@@ -1156,9 +1158,13 @@ class SharedDatabaseManager:
                     quantity = float(quantity_raw) if quantity_raw is not None else 0.0
                 except (ValueError, TypeError):
                     quantity = 0.0
-                # Treat anything <= 0.0001 as effectively zero
+                # Treat anything <= 0.0001 as effectively zero (fully sold position)
+                # This quantity represents: total_buys - total_sells from all transactions
                 if quantity > 0.0001:
                     filtered_holdings.append(h)
+                else:
+                    # Debug: Log filtered holdings
+                    print(f"[GET_HOLDINGS_SILENT] Filtering out zero-quantity holding: {h.get('ticker')} - {h.get('stock_name')} (calculated_qty={quantity})")
             holdings = filtered_holdings
 
             latest_channels = self._prefetch_latest_channels(user_id)

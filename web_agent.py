@@ -6740,9 +6740,10 @@ def portfolio_overview_page():
         
         # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
         # Also handle cases where quantity might be exactly 0, negative, or very small
-        if quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
+        # CRITICAL: Also check if quantity is None, empty string, or invalid
+        if quantity is None or quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
             # Debug: Log skipped holdings to help diagnose issues
-            print(f"[HOLDINGS_TABLE] Skipping zero-quantity holding: {holding.get('ticker')} - {holding.get('stock_name')} (quantity={quantity})")
+            print(f"[HOLDINGS_TABLE] ⚠️ Skipping zero-quantity holding: {holding.get('ticker')} - {holding.get('stock_name')} (quantity={quantity}, raw={quantity_raw})")
             continue  # Skip fully sold positions - they shouldn't appear in holdings table
         
         # Handle None current_price - check both current_price and live_price fields
@@ -6763,7 +6764,7 @@ def portfolio_overview_page():
             'Rating': stars,
             'Grade': grade,
             'Type': holding['asset_type'],
-            'Quantity': f"{holding['total_quantity']:,.0f}",
+            'Quantity': f"{quantity:,.0f}",  # Use the filtered quantity, not raw holding['total_quantity']
             'Avg Price': f"₹{holding['average_price']:,.2f}",
             'Current Price': f"₹{current_price:,.2f}" if current_price else "N/A",
             'Current Value': f"₹{current_value:,.0f}",
