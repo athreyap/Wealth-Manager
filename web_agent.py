@@ -3241,7 +3241,14 @@ def _tx_dataframe_to_transactions(
         if not sector:
             sector = 'Mutual Fund' if asset_type == 'mutual_fund' else 'Unknown'
 
-        scheme_name = _tx_safe_str(row.get('scheme_name')) if asset_type == 'mutual_fund' else None
+        # scheme_name is already set above during AMFI resolution for mutual funds
+        # Only set from row if it wasn't already resolved (for non-MF or if AMFI resolution didn't happen)
+        if asset_type == 'mutual_fund' and not scheme_name:
+            scheme_name = _tx_safe_str(row.get('scheme_name')) or stock_name
+        elif asset_type != 'mutual_fund':
+            scheme_name = None
+        # If asset_type == 'mutual_fund' and scheme_name is already set (from AMFI), keep it
+        
         notes = _tx_safe_str(row.get('notes'))
 
         transaction = {

@@ -158,6 +158,43 @@ class SharedDatabaseManager:
                 print(f"[DB_RETRY]    Retrying in {delay:.2f} seconds...")
                 time.sleep(delay)
             except Exception as e:
+                # Check if it's a Supabase API error (502, 500, etc.) or Cloudflare error
+                error_msg = str(e)
+                
+                # Try to extract error code from various exception formats
+                error_code = ''
+                if hasattr(e, 'message'):
+                    error_dict = e.message if isinstance(e.message, dict) else {}
+                    error_code = str(error_dict.get('code', '')) if isinstance(error_dict, dict) else ''
+                elif hasattr(e, 'code'):
+                    error_code = str(e.code)
+                elif hasattr(e, 'args') and e.args:
+                    # Check if error code is in args
+                    for arg in e.args:
+                        if isinstance(arg, dict):
+                            error_code = str(arg.get('code', ''))
+                            break
+                
+                # Check for retryable Supabase/Cloudflare errors
+                is_retryable_api_error = (
+                    error_code in ['502', '500', '503', '504', '502', '500'] or  # HTTP error codes
+                    'JSON could not be generated' in error_msg or  # Cloudflare HTML response
+                    'Internal server error' in error_msg or
+                    'cloudflare' in error_msg.lower() or
+                    '500: Internal server error' in error_msg or
+                    '<!DOCTYPE html>' in error_msg or  # HTML error page
+                    'Error code 500' in error_msg
+                )
+                
+                if is_retryable_api_error and attempt < max_retries - 1:
+                    last_exception = e
+                    delay = base_delay * (2 ** attempt)
+                    print(f"[DB_RETRY] ⚠️ Supabase API error (attempt {attempt + 1}/{max_retries}): {error_code or 'Unknown'}")
+                    print(f"[DB_RETRY]    Error: {error_msg[:200]}...")
+                    print(f"[DB_RETRY]    Retrying in {delay:.2f} seconds...")
+                    time.sleep(delay)
+                    continue
+                
                 # Non-retryable errors, raise immediately
                 raise
         
@@ -418,21 +455,27 @@ class SharedDatabaseManager:
             normalised_ticker = _tx_normalize_ticker(ticker)
             normalised_name = (stock_name or '').strip()
             
-            # First, try to find exact match by ticker AND stock_name
+            # First, try to find exact match by ticker AND stock_name - wrap in retry logic
             if normalised_name and normalised_name != 'Unknown':
-                response = self.supabase.table('stock_master').select('*').eq(
-                    'ticker', normalised_ticker
-                ).eq('stock_name', normalised_name).execute()
+                def _find_exact_match():
+                    return self.supabase.table('stock_master').select('*').eq(
+                        'ticker', normalised_ticker
+                    ).eq('stock_name', normalised_name).execute()
+                
+                response = self._retry_db_operation(_find_exact_match, max_retries=3, base_delay=1.0)
                 
                 if response.data and len(response.data) > 0:
                     # Exact match found - use it
                     existing_stock = response.data[0]
                     return existing_stock['id']
             
-            # If no exact match, try to find by ticker only
-            response = self.supabase.table('stock_master').select('*').eq(
-                'ticker', normalised_ticker
-            ).execute()
+            # If no exact match, try to find by ticker only - wrap in retry logic
+            def _find_by_ticker():
+                return self.supabase.table('stock_master').select('*').eq(
+                    'ticker', normalised_ticker
+                ).execute()
+            
+            response = self._retry_db_operation(_find_by_ticker, max_retries=3, base_delay=1.0)
             
             if response.data and len(response.data) > 0:
                 # Multiple entries with same ticker - prefer one with matching name or best match
@@ -484,7 +527,9 @@ class SharedDatabaseManager:
                     update_data['sector'] = sector
                 
                 if update_data:
-                    self.supabase.table('stock_master').update(update_data).eq('id', existing_stock['id']).execute()
+                    def _update_stock():
+                        return self.supabase.table('stock_master').update(update_data).eq('id', existing_stock['id']).execute()
+                    self._retry_db_operation(_update_stock, max_retries=3, base_delay=1.0)
                 
                 return existing_stock['id']
             
@@ -500,7 +545,7 @@ class SharedDatabaseManager:
             else:
                 final_sector = enhanced_info.get('sector') or sector or 'Unknown'
             
-            # Create new
+            # Create new - wrap in retry logic for transient errors
             insert_data = {
                 'ticker': normalised_ticker,
                 'stock_name': final_stock_name,
@@ -508,7 +553,10 @@ class SharedDatabaseManager:
                 'sector': final_sector
             }
             
-            response = self.supabase.table('stock_master').insert(insert_data).execute()
+            def _insert_stock():
+                return self.supabase.table('stock_master').insert(insert_data).execute()
+            
+            response = self._retry_db_operation(_insert_stock, max_retries=3, base_delay=1.0)
             
             if response.data:
                 return response.data[0]['id']
@@ -516,7 +564,13 @@ class SharedDatabaseManager:
             return None
             
         except Exception as e:
-            st.error(f"Error creating stock: {str(e)}")
+            error_msg = str(e)
+            # Check if it's a retryable error that we should handle gracefully
+            if '502' in error_msg or '500' in error_msg or 'JSON could not be generated' in error_msg:
+                print(f"[DB_RETRY] ⚠️ Failed to create stock after retries: {error_msg[:200]}")
+                st.warning(f"⚠️ Temporary database error. Please try again in a moment.")
+            else:
+                st.error(f"Error creating stock: {error_msg[:200]}")
             return None
     
     def _fetch_stock_info(self, ticker: str, asset_type: str) -> Dict[str, Any]:
