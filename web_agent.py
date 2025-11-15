@@ -6457,6 +6457,7 @@ def portfolio_overview_page():
     st.header("🏠 Portfolio Overview")
     
     user = st.session_state.user
+    db = st.session_state.db  # Get database manager from session state
     
     # Show Corporate Actions Alert (Stock Splits/Bonus)
     if 'corporate_actions_detected' in st.session_state and st.session_state.corporate_actions_detected:
