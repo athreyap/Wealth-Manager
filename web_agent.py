@@ -6664,30 +6664,57 @@ def portfolio_overview_page():
     zero_qty_found = []
     for h in holdings:
         quantity_raw = h.get('total_quantity', 0)
-        try:
-            quantity = float(quantity_raw) if quantity_raw is not None else 0.0
-        except (ValueError, TypeError):
+        
+        # Convert to float, handling various formats
+        if quantity_raw is None:
             quantity = 0.0
+        elif isinstance(quantity_raw, str):
+            # Handle string "0", "0.0", "", etc.
+            quantity_raw = quantity_raw.strip()
+            if not quantity_raw or quantity_raw in ['0', '0.0', '0.00', '']:
+                quantity = 0.0
+            else:
+                try:
+                    quantity = float(quantity_raw)
+                except (ValueError, TypeError):
+                    quantity = 0.0
+        else:
+            try:
+                quantity = float(quantity_raw)
+            except (ValueError, TypeError):
+                quantity = 0.0
+        
+        # CRITICAL: Filter out anything <= 0.0001 (fully sold position)
         if quantity > 0.0001:  # Only include holdings with positive quantity
             filtered_holdings.append(h)
         else:
-            zero_qty_found.append(f"{h.get('ticker')} - {h.get('stock_name')} (qty={quantity})")
-            print(f"[HOLDINGS_PAGE] ⚠️ Filtering out zero-quantity holding at display level: {h.get('ticker')} - {h.get('stock_name')} (quantity={quantity}, raw={quantity_raw})")
+            zero_qty_found.append(f"{h.get('ticker')} ({h.get('stock_id')}) - {h.get('stock_name')} (qty={quantity}, raw={quantity_raw}, type={type(quantity_raw).__name__})")
+            print(f"[HOLDINGS_PAGE] ⚠️ Filtering out zero-quantity holding at display level: {h.get('ticker')} - {h.get('stock_name')} (quantity={quantity}, raw={quantity_raw}, type={type(quantity_raw).__name__})")
     holdings = filtered_holdings
     
     # Show warning and clear cache button if zero-quantity holdings were found
     if zero_qty_found:
-        st.warning(f"⚠️ Found {len(zero_qty_found)} zero-quantity holdings in cache (filtered out). Recalculating holdings and clearing cache...")
+        st.error(f"⚠️ **CRITICAL: Found {len(zero_qty_found)} zero-quantity holdings that should not appear!**")
+        st.warning("These holdings have been filtered out from display, but you need to recalculate holdings to update the database.")
+        
+        # Show details
+        with st.expander(f"View {len(zero_qty_found)} filtered zero-quantity holdings"):
+            for zq in zero_qty_found:
+                st.text(f"  • {zq}")
+        
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🔄 Recalculate & Clear Cache", help="Recalculate holdings from transactions and clear cache"):
+            if st.button("🔄 Recalculate & Clear Cache", help="Recalculate holdings from transactions and clear cache", type="primary"):
                 from database_shared import SharedDatabaseManager
                 db = SharedDatabaseManager()
-                try:
-                    db.recalculate_holdings(user['id'])
-                    st.success("✅ Holdings recalculated!")
-                except Exception as e:
-                    st.error(f"Error recalculating: {e}")
+                with st.spinner("Recalculating holdings from transactions..."):
+                    try:
+                        count = db.recalculate_holdings(user['id'])
+                        st.success(f"✅ Recalculated {count} holdings!")
+                    except Exception as e:
+                        st.error(f"❌ Error recalculating: {e}")
+                        st.exception(e)
+                # Clear all caches
                 get_cached_holdings.clear()
                 get_portfolio_metrics.clear()
                 st.rerun()
@@ -6695,13 +6722,25 @@ def portfolio_overview_page():
             if st.button("🗑️ Clear Cache Only", help="Just clear cached holdings data"):
                 get_cached_holdings.clear()
                 get_portfolio_metrics.clear()
+                st.success("✅ Cache cleared!")
                 st.rerun()
     
-    # Get cached metrics
+    # CRITICAL: Log holdings count for debugging
+    if zero_qty_found:
+        st.warning(f"⚠️ **Found {len(zero_qty_found)} zero-quantity holdings that were filtered out:**")
+        for zq in zero_qty_found[:5]:  # Show first 5
+            st.text(f"  • {zq}")
+        if len(zero_qty_found) > 5:
+            st.text(f"  ... and {len(zero_qty_found) - 5} more")
+    
+    # Get cached metrics (only for filtered holdings)
     metrics = get_portfolio_metrics(holdings)
     
     if not holdings:
-        st.info("No holdings found. Upload transaction files to see your portfolio.")
+        if zero_qty_found:
+            st.info("⚠️ All holdings have zero quantity (fully sold). Recalculate holdings to update the database.")
+        else:
+            st.info("No holdings found. Upload transaction files to see your portfolio.")
         return
     
     st.success(f"📊 Loaded {len(holdings)} holdings")
