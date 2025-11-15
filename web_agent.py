@@ -6658,10 +6658,27 @@ def portfolio_overview_page():
     # Use cached holdings data (with zero-quantity filtering)
     holdings = get_cached_holdings(user['id'])
     
-    # Clear cache button for debugging (only show if there are zero-quantity holdings)
-    zero_qty_count = sum(1 for h in holdings if float(h.get('total_quantity', 0)) <= 0.0001)
-    if zero_qty_count > 0:
-        if st.button("🔄 Clear Cache & Refresh", help="Clear cached holdings data and refresh"):
+    # CRITICAL: Double-check filtering at display level (safety net)
+    # Filter out any zero-quantity holdings that might have slipped through cache
+    filtered_holdings = []
+    zero_qty_found = []
+    for h in holdings:
+        quantity_raw = h.get('total_quantity', 0)
+        try:
+            quantity = float(quantity_raw) if quantity_raw is not None else 0.0
+        except (ValueError, TypeError):
+            quantity = 0.0
+        if quantity > 0.0001:  # Only include holdings with positive quantity
+            filtered_holdings.append(h)
+        else:
+            zero_qty_found.append(f"{h.get('ticker')} - {h.get('stock_name')} (qty={quantity})")
+            print(f"[HOLDINGS_PAGE] ⚠️ Filtering out zero-quantity holding at display level: {h.get('ticker')} - {h.get('stock_name')} (quantity={quantity}, raw={quantity_raw})")
+    holdings = filtered_holdings
+    
+    # Show warning and clear cache button if zero-quantity holdings were found
+    if zero_qty_found:
+        st.warning(f"⚠️ Found {len(zero_qty_found)} zero-quantity holdings in cache (filtered out). Clearing cache to refresh data.")
+        if st.button("🔄 Clear Cache & Refresh Now", help="Clear cached holdings data and refresh"):
             get_cached_holdings.clear()
             get_portfolio_metrics.clear()
             st.rerun()
@@ -6733,17 +6750,32 @@ def portfolio_overview_page():
         # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
         # Handle both string and numeric quantities, and account for floating point precision
         quantity_raw = holding.get('total_quantity', 0)
-        try:
-            quantity = float(quantity_raw) if quantity_raw is not None else 0.0
-        except (ValueError, TypeError):
+        
+        # Convert to float, handling various formats
+        if quantity_raw is None:
             quantity = 0.0
+        elif isinstance(quantity_raw, str):
+            # Handle string "0", "0.0", "", etc.
+            quantity_raw = quantity_raw.strip()
+            if not quantity_raw or quantity_raw in ['0', '0.0', '0.00', '']:
+                quantity = 0.0
+            else:
+                try:
+                    quantity = float(quantity_raw)
+                except (ValueError, TypeError):
+                    quantity = 0.0
+        else:
+            try:
+                quantity = float(quantity_raw)
+            except (ValueError, TypeError):
+                quantity = 0.0
         
         # Use a small epsilon to handle floating point precision issues (e.g., 0.0001)
         # Also handle cases where quantity might be exactly 0, negative, or very small
-        # CRITICAL: Also check if quantity is None, empty string, or invalid
-        if quantity is None or quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
+        # CRITICAL: Filter out anything <= 0.0001 (fully sold position)
+        if quantity <= 0.0001:  # Treat anything <= 0.0001 as effectively zero
             # Debug: Log skipped holdings to help diagnose issues
-            print(f"[HOLDINGS_TABLE] ⚠️ Skipping zero-quantity holding: {holding.get('ticker')} - {holding.get('stock_name')} (quantity={quantity}, raw={quantity_raw})")
+            print(f"[HOLDINGS_TABLE] ⚠️ Skipping zero-quantity holding: {holding.get('ticker')} - {holding.get('stock_name')} (quantity={quantity}, raw={quantity_raw}, type={type(quantity_raw)})")
             continue  # Skip fully sold positions - they shouldn't appear in holdings table
         
         # Handle None current_price - check both current_price and live_price fields
