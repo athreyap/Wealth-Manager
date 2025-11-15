@@ -147,13 +147,18 @@ def get_cached_portfolio_summary(holdings: List[Dict]) -> str:
     sectors = {}
     
     for holding in holdings:
+        # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        quantity = safe_float(holding.get('total_quantity'), 0)
+        if quantity <= 0:
+            continue  # Skip fully sold positions - they shouldn't count in invested amount or P&L
+        
         current_price = holding.get('current_price')
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
         
         # Use safe_float to handle None values
-        current_value = safe_float(current_price, 0) * safe_float(holding.get('total_quantity'), 0)
-        investment = safe_float(holding.get('total_quantity'), 0) * safe_float(holding.get('average_price'), 0)
+        current_value = safe_float(current_price, 0) * quantity
+        investment = quantity * safe_float(holding.get('average_price'), 0)
         total_investment += investment
         total_current += current_value
         
@@ -214,12 +219,17 @@ def get_cached_portfolio_summary(holdings: List[Dict]) -> str:
     # Calculate P&L for all holdings for top gainers/losers
     holdings_with_pnl = []
     for holding in holdings:
+        # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        quantity = safe_float(holding.get('total_quantity'), 0)
+        if quantity <= 0:
+            continue  # Skip fully sold positions
+        
         current_price = holding.get('current_price')
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
         
-        current_value = safe_float(current_price, 0) * safe_float(holding.get('total_quantity'), 0)
-        investment = safe_float(holding.get('total_quantity'), 0) * safe_float(holding.get('average_price'), 0)
+        current_value = safe_float(current_price, 0) * quantity
+        investment = quantity * safe_float(holding.get('average_price'), 0)
         pnl_pct = ((current_value - investment) / investment * 100) if investment > 0 else 0
         
         holdings_with_pnl.append({
@@ -2220,9 +2230,12 @@ _TX_COLUMN_ALIASES: Dict[str, List[str]] = {
         'scheme name', 'fund scheme', 'scheme', 'schemename', 'plan name'
     ],
     'quantity': [
-        'quantity', 'Quantity', 'QTY', 'qty', 'units', 'shares', 'quantity/unit',
+        'quantity', 'Quantity', 'QTY', 'qty', 'units', 'Units', 'UNITS', 'shares', 'quantity/unit',
         'no. of units', 'no of units', 'units/qty', 'units (credit)',
-        'units (debit)', 'lot size', 'filled quantity', 'executed quantity'
+        'units (debit)', 'lot size', 'filled quantity', 'executed quantity',
+        'number of units', 'no. of shares', 'no of shares', 'unit balance',
+        'units held', 'units balance', 'total units', 'current units',
+        'holding quantity', 'holding units', 'balance units', 'balance quantity'
     ],
     'price': [
         'price', 'rate', 'nav', 'purchase price', 'per unit price',
@@ -6381,12 +6394,17 @@ def get_portfolio_metrics(holdings: List[Dict]) -> Dict[str, Any]:
     returns = []
     
     for holding in holdings:
+        # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        quantity = float(holding.get('total_quantity', 0))
+        if quantity <= 0:
+            continue  # Skip fully sold positions - they shouldn't count in invested amount or P&L
+        
         current_price = holding.get('current_price')
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
         
-        current_value = float(current_price) * float(holding['total_quantity'])
-        investment = float(holding['total_quantity']) * float(holding['average_price'])
+        current_value = float(current_price) * quantity
+        investment = quantity * float(holding['average_price'])
         
         total_investment += investment
         total_current += current_value
@@ -6640,8 +6658,13 @@ def portfolio_overview_page():
     total_pnl = 0
     
     for holding in holdings:
+        # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        quantity = float(holding.get('total_quantity', 0))
+        if quantity <= 0:
+            continue  # Skip fully sold positions - they shouldn't count in invested amount or P&L
+        
         # Calculate investment value
-        investment_value = float(holding['total_quantity']) * float(holding['average_price'])
+        investment_value = quantity * float(holding['average_price'])
         total_investment += investment_value
         
         # Get current price - handle None values (check both current_price and live_price)
@@ -6651,7 +6674,7 @@ def portfolio_overview_page():
         
         if current_price and current_price != holding['average_price']:
             # Price was fetched successfully
-            current_value = float(holding['total_quantity']) * float(current_price)
+            current_value = quantity * float(current_price)
             total_current += current_value
             
             pnl = current_value - investment_value
@@ -6683,12 +6706,17 @@ def portfolio_overview_page():
     
     holdings_data = []
     for holding in holdings:
+        # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        quantity = float(holding.get('total_quantity', 0))
+        if quantity <= 0:
+            continue  # Skip fully sold positions - they shouldn't appear in holdings table
+        
         # Handle None current_price - check both current_price and live_price fields
         current_price = holding.get('current_price') or holding.get('live_price')
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
-        current_value = float(holding['total_quantity']) * float(current_price) if current_price else 0
-        investment_value = float(holding['total_quantity']) * float(holding['average_price'])
+        current_value = quantity * float(current_price) if current_price else 0
+        investment_value = quantity * float(holding['average_price'])
         pnl = current_value - investment_value
         pnl_percent = (pnl / investment_value * 100) if investment_value > 0 else 0
         
@@ -6878,11 +6906,16 @@ def portfolio_overview_page():
     # Prepare performance data
     perf_data = []
     for holding in holdings:
+        # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        quantity = float(holding.get('total_quantity', 0))
+        if quantity <= 0:
+            continue  # Skip fully sold positions - they shouldn't count in invested amount or P&L
+        
         current_price = holding.get('current_price')
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
-        current_value = float(holding['total_quantity']) * float(current_price) if current_price else 0
-        investment_value = float(holding['total_quantity']) * float(holding['average_price'])
+        current_value = quantity * float(current_price) if current_price else 0
+        investment_value = quantity * float(holding['average_price'])
         pnl = current_value - investment_value
         pnl_percent = (pnl / investment_value * 100) if investment_value > 0 else 0
         
@@ -6980,10 +7013,15 @@ def portfolio_overview_page():
     # Create treemap data
     treemap_data = []
     for holding in holdings:
+        # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        quantity = float(holding.get('total_quantity', 0))
+        if quantity <= 0:
+            continue  # Skip fully sold positions - they shouldn't appear in treemap
+        
         current_price = holding.get('current_price')
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
-        current_value = float(holding['total_quantity']) * float(current_price) if current_price else 0
+        current_value = quantity * float(current_price) if current_price else 0
         
         treemap_data.append({
             'labels': f"{holding['ticker']}<br>{holding['stock_name'][:20]}",
@@ -7068,6 +7106,11 @@ def pnl_analysis_page():
     channel_data = {}
     
     for holding in holdings:
+        # CRITICAL: Skip holdings with zero or negative quantity (fully sold positions)
+        quantity = float(holding.get('total_quantity', 0))
+        if quantity <= 0:
+            continue  # Skip fully sold positions - they shouldn't count in invested amount or P&L
+        
         sector = holding.get('sector', 'Unknown')
         channel = holding.get('channel', 'Direct')
         
@@ -7075,8 +7118,8 @@ def pnl_analysis_page():
         current_price = holding.get('current_price')
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
-        current_value = float(holding['total_quantity']) * float(current_price) if current_price else 0
-        investment_value = float(holding['total_quantity']) * float(holding['average_price'])
+        current_value = quantity * float(current_price) if current_price else 0
+        investment_value = quantity * float(holding['average_price'])
         pnl = current_value - investment_value
         
         # Sector analysis

@@ -1093,6 +1093,10 @@ class SharedDatabaseManager:
             response = query.execute()
             holdings = response.data
 
+            # CRITICAL: Filter out holdings with zero or negative quantity (fully sold positions)
+            # These shouldn't appear in holdings list at all
+            holdings = [h for h in holdings if float(h.get('total_quantity', 0)) > 0]
+
             latest_channels = self._prefetch_latest_channels(user_id)
             
             # Normalize live price information before channel lookup
@@ -1128,6 +1132,10 @@ class SharedDatabaseManager:
             
             response = query.execute()
             holdings = response.data
+
+            # CRITICAL: Filter out holdings with zero or negative quantity (fully sold positions)
+            # These shouldn't appear in holdings list at all
+            holdings = [h for h in holdings if float(h.get('total_quantity', 0)) > 0]
 
             latest_channels = self._prefetch_latest_channels(user_id)
             

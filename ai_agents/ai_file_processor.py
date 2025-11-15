@@ -791,7 +791,7 @@ IMPORTANT COLUMN MAPPING RULES:
 - **Date columns**: Look for "Date", "Execution date", "Txn Date", "Transaction Date", "Trade Date", etc. → map to `"date"`
 - **Ticker/Symbol columns**: Look for "Symbol", "Ticker", "Scrip Symbol", "Trading Symbol", "ISIN" (use ISIN if no symbol) → map to `"ticker"`
 - **Stock Name columns**: Look for "Stock name", "Stock Name", "Security Name", "Scrip Name", "Name" → map to `"stock_name"`
-- **Quantity columns**: Look for "Quantity", "Qty", "Units", "No. of Units" → map to `"quantity"` (THIS IS CRITICAL - quantity must be extracted correctly!)
+- **Quantity columns**: Look for "Quantity", "Qty", "Units", "No. of Units", "Number of Units", "Units Held", "Unit Balance", "Total Units", "Current Units", "Holding Quantity", "Balance Units" → map to `"quantity"` (THIS IS CRITICAL - quantity must be extracted correctly!)
 - **Amount/Value columns**: Look for "Value", "Amount", "Total Value", "Consideration", "Trade Value" → map to `"amount"`
 - **Price columns**: Look for "Price", "Rate", "NAV", "Per Unit Price" → map to `"price"` (if missing, we'll calculate from amount/quantity)
 - **Transaction Type**: Look for "Type", "Transaction Type", "Action", "Buy/Sell" → map to `"transaction_type"` ("BUY" → "buy", "SELL" → "sell")
@@ -799,10 +799,11 @@ IMPORTANT COLUMN MAPPING RULES:
 - **Channel**: Use filename `{filename}` or any "Broker"/"Platform" column
 
 CRITICAL INSTRUCTIONS:
-- **Quantity is the MOST IMPORTANT field** - if the file has a "Quantity" column, extract it EXACTLY as shown, do NOT calculate it
-- If quantity is present in the file, use it as-is (even if it's 0)
+- **Quantity is the MOST IMPORTANT field** - if the file has a "Quantity", "Units", "Number of Units", "Units Held", or similar column, extract it EXACTLY as shown, do NOT calculate it
+- If quantity is present in the file (even if the column is named "Units", "No. of Units", "Units Held", etc.), use it as-is (even if it's 0)
 - Only calculate quantity if it's completely missing AND you have amount+price
-- If you see "Quantity" column with values like 5, 3000, 1, etc. - extract those EXACT values
+- If you see "Quantity" or "Units" column with values like 5, 3000, 151218, etc. - extract those EXACT values, do NOT recalculate
+- For mutual funds, quantity is often called "Units" or "No. of Units" - map these to `"quantity"`
 - If you see "Value" column - that's the total amount, map it to `"amount"`
 - If price column is missing but quantity and amount exist, set price to 0 (we'll calculate it later)
 
@@ -1091,6 +1092,8 @@ CRITICAL RULES:
             return 'stock'
         
         # Check name for clues
+        # CRITICAL: Check for "fund" or "scheme" FIRST before "bond"
+        # This ensures mutual funds with "bond" in the name (e.g., "Bond Fund", "AAA Bond Fund") are correctly identified as mutual_fund
         if 'fund' in name or 'scheme' in name:
             return 'mutual_fund'
         
@@ -1100,6 +1103,7 @@ CRITICAL RULES:
         if 'aif' in name or 'alternative investment' in name:
             return 'aif'
         
+        # Only check for bond if it's NOT a fund/scheme (bond funds are already handled above)
         if 'bond' in name or 'debenture' in name:
             return 'bond'
         
