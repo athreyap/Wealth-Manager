@@ -984,7 +984,9 @@ _TX_COLUMN_ALIASES: Dict[str, List[str]] = {
         'through', 'partner', 'advisor', 'exchange', 'Exchange', 'EXCHANGE'
     ],
     'sector': [
-        'sector', 'industry', 'sector name', 'segment'
+        'sector', 'industry', 'sector name', 'segment', 'fund category', 'Fund Category', 'FUND CATEGORY',
+        'category', 'Category', 'CATEGORY', 'fund type', 'Fund Type', 'asset category',
+        'investment category', 'scheme category', 'mf category', 'mutual fund category'
     ],
     'notes': [
         'notes', 'Notes', 'remarks', 'comment', 'description', 'order status', 'Order status', 'Order Status', 'ORDER STATUS',
@@ -1077,25 +1079,49 @@ def _tx_fallback_ticker_from_name(name: str) -> str:
 
 
 def _tx_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename columns to canonical names based on aliases."""
+    """Rename columns to canonical names based on aliases.
+    CRITICAL: Prioritizes exact matches over partial matches to avoid wrong mappings.
+    """
     rename_map: Dict[str, str] = {}
     used_targets: set[str] = set()
+    
+    # First pass: Find exact matches (higher priority)
+    exact_matches = {}
     for col in df.columns:
+        col_name = _tx_safe_str(col).lower()
+        for canonical, aliases in _TX_COLUMN_ALIASES.items():
+            for alias in aliases:
+                alias_lower = alias.lower()
+                if col_name == alias_lower:  # Exact match
+                    if canonical not in used_targets:
+                        exact_matches[col] = canonical
+                        used_targets.add(canonical)
+                    break
+            if col in exact_matches:
+                break
+    
+    # Second pass: Find partial matches (lower priority, only if no exact match)
+    for col in df.columns:
+        if col in exact_matches:
+            rename_map[col] = exact_matches[col]
+            continue
+            
         col_name = _tx_safe_str(col).lower()
         target = None
         for canonical, aliases in _TX_COLUMN_ALIASES.items():
             for alias in aliases:
                 alias_lower = alias.lower()
-                if col_name == alias_lower or alias_lower in col_name:
+                if alias_lower in col_name and canonical not in used_targets:
                     target = canonical
                     break
             if target:
                 break
-        if target and target not in used_targets:
+        if target:
             rename_map[col] = target
             used_targets.add(target)
         else:
             rename_map[col] = col
+    
     return df.rename(columns=rename_map)
 
 
@@ -2310,7 +2336,9 @@ _TX_COLUMN_ALIASES: Dict[str, List[str]] = {
         'through', 'partner', 'advisor', 'exchange', 'Exchange', 'EXCHANGE'
     ],
     'sector': [
-        'sector', 'industry', 'sector name', 'segment'
+        'sector', 'industry', 'sector name', 'segment', 'fund category', 'Fund Category', 'FUND CATEGORY',
+        'category', 'Category', 'CATEGORY', 'fund type', 'Fund Type', 'asset category',
+        'investment category', 'scheme category', 'mf category', 'mutual fund category'
     ],
     'notes': [
         'notes', 'Notes', 'remarks', 'comment', 'description', 'order status', 'Order status', 'Order Status', 'ORDER STATUS',
