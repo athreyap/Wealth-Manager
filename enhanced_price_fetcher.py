@@ -43,15 +43,36 @@ class EnhancedPriceFetcher:
         self.http_session = self._get_http_session()
         self._mftool = self._get_shared_mftool()
         
-        # Initialize OpenAI for AI fallback
+        # Defer OpenAI initialization until actually needed (lazy initialization)
+        # This avoids KeyError when st.secrets is not available during module import
         self.ai_available = False
+        self.openai_client = None
+        self._openai_initialized = False
+    
+    def _get_openai_client(self):
+        """Lazy initialization of OpenAI client - only when needed"""
+        if self._openai_initialized:
+            return self.openai_client
+        
+        self._openai_initialized = True
         try:
             from openai import OpenAI
+            # Check if secrets are available
+            if "api_keys" not in st.secrets:
+                raise KeyError("'api_keys' not found in st.secrets")
+            if "open_ai" not in st.secrets.get("api_keys", {}):
+                raise KeyError("'open_ai' not found in st.secrets['api_keys']")
             self.openai_client = OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
             self.ai_available = True
+            return self.openai_client
+        except KeyError as e:
+            self.ai_available = False
+            self.openai_client = None
+            return None
         except Exception as e:
             self.ai_available = False
-            #st.caption(f"⚠️ OpenAI not available: {str(e)}")
+            self.openai_client = None
+            return None
         
         # Initialize PMS/AIF calculator
         try:
@@ -837,7 +858,9 @@ class EnhancedPriceFetcher:
         if cache_key in self._stock_alias_cache:
             return self._stock_alias_cache[cache_key]
 
-        if not self.ai_available:
+        # Ensure OpenAI client is initialized
+        openai_client = self._get_openai_client()
+        if not self.ai_available or not openai_client:
             return []
 
         prompt_lines = [
@@ -851,7 +874,7 @@ class EnhancedPriceFetcher:
         prompt = "\n".join(prompt_lines)
 
         try:
-            response = self.openai_client.chat.completions.create(
+            response = openai_client.chat.completions.create(
                 model="gpt-5-mini",
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=150,

@@ -47,15 +47,10 @@ class AIFileProcessor(BaseAgent):
         self.openai_client = None
         self._openai_initialized = False
         
-        # Initialize price fetcher for automatic price backfill
-        if EnhancedPriceFetcher is not None:
-            try:
-                self.price_fetcher = EnhancedPriceFetcher()
-            except Exception as exc:  # pragma: no cover - runtime dependency
-                self.logger.error(f"Failed to initialize EnhancedPriceFetcher: {exc}")
-                self.price_fetcher = None
-        else:
-            self.price_fetcher = None
+        # Defer price fetcher initialization until it's actually needed
+        # EnhancedPriceFetcher.__init__ may access st.secrets which isn't available during import
+        self.price_fetcher = None
+        self._price_fetcher_initialized = False
 
         self._price_cache: Dict[Tuple[str, str, str], Optional[float]] = {}
         self.processed_transactions = []
@@ -1194,9 +1189,28 @@ CRITICAL RULES:
         clean = re.sub(r'[_\-\s]+', ' ', stem).strip()
         return clean.title() if clean else "Direct"
 
+    def _get_price_fetcher(self):
+        """Lazy initialization of price fetcher - only when needed"""
+        if self._price_fetcher_initialized:
+            return self.price_fetcher
+        
+        self._price_fetcher_initialized = True
+        if EnhancedPriceFetcher is not None:
+            try:
+                self.price_fetcher = EnhancedPriceFetcher()
+                self.logger.info("EnhancedPriceFetcher initialized successfully")
+            except Exception as exc:
+                self.logger.error(f"Failed to initialize EnhancedPriceFetcher: {exc}")
+                self.price_fetcher = None
+        else:
+            self.price_fetcher = None
+        
+        return self.price_fetcher
+    
     def _fetch_price_for_transaction(self, trans: Dict[str, Any]) -> Optional[float]:
         """Fetch historical price for transaction date when price missing/zero."""
-        if not self.price_fetcher:
+        price_fetcher = self._get_price_fetcher()
+        if not price_fetcher:
             return None
 
         price = trans.get('price') or 0
@@ -1218,7 +1232,7 @@ CRITICAL RULES:
         fetched_price = None
 
         try:
-            fetched_price = self.price_fetcher.get_historical_price(
+            fetched_price = price_fetcher.get_historical_price(
                 ticker,
                 asset_type,
                 date,
@@ -1226,7 +1240,7 @@ CRITICAL RULES:
             )
 
             if not fetched_price:
-                current_price, _ = self.price_fetcher.get_current_price(
+                current_price, _ = price_fetcher.get_current_price(
                     ticker,
                     asset_type,
                     fund_name=fund_name
