@@ -1069,7 +1069,7 @@ CRITICAL RULES:
         return validated
     
     def _detect_asset_type(self, trans: Dict[str, Any]) -> str:
-        """Intelligently detect asset type"""
+        """Intelligently detect asset type by checking actual data sources"""
         
         ticker = str(trans.get('ticker', '')).strip()
         name = str(trans.get('stock_name', '')).lower()
@@ -1078,13 +1078,48 @@ CRITICAL RULES:
         if trans.get('asset_type'):
             return str(trans['asset_type']).lower()
         
-        # Numeric ticker = likely mutual fund
-        if ticker.isdigit() and len(ticker) >= 5:
-            return 'mutual_fund'
-        
         # Contains .NS or .BO = stock
         if '.NS' in ticker.upper() or '.BO' in ticker.upper():
             return 'stock'
+        
+        # For numeric tickers, check actual data sources to determine type
+        if ticker.isdigit():
+            # First, check if it's in AMFI dataset (mutual fund)
+            try:
+                from web_agent import get_amfi_dataset
+                amfi_data = get_amfi_dataset()
+                if amfi_data and 'code_lookup' in amfi_data:
+                    if ticker in amfi_data['code_lookup']:
+                        return 'mutual_fund'  # Found in AMFI = mutual fund
+            except Exception:
+                pass  # AMFI check failed, continue to stock check
+            
+            # Try to fetch from yfinance (for stocks)
+            try:
+                import yfinance as yf
+                # Try NSE first
+                nse_ticker = f"{ticker}.NS"
+                stock = yf.Ticker(nse_ticker)
+                hist = stock.history(period='1d')
+                if not hist.empty:
+                    return 'stock'  # Found in yfinance NSE = stock
+                
+                # Try BSE
+                bse_ticker = f"{ticker}.BO"
+                stock = yf.Ticker(bse_ticker)
+                hist = stock.history(period='1d')
+                if not hist.empty:
+                    return 'stock'  # Found in yfinance BSE = stock
+            except Exception:
+                pass  # yfinance check failed, fall back to heuristics
+            
+            # Fallback to heuristics if both checks failed
+            # Most 6-digit numbers starting with '1' are mutual funds
+            if len(ticker) == 6 and ticker.startswith('1'):
+                return 'mutual_fund'
+            else:
+                # Other numeric codes are likely BSE stocks
+                return 'stock'
         
         # Check name for clues
         # CRITICAL: Check for "fund" or "scheme" FIRST before "bond"

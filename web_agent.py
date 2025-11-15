@@ -6850,6 +6850,7 @@ def portfolio_overview_page():
             'Grade': grade,
             'Type': holding['asset_type'],
             'Quantity': f"{quantity:,.0f}",  # Use the filtered quantity, not raw holding['total_quantity']
+            'Invested': f"₹{investment_value:,.0f}",  # CRITICAL: Investment amount = quantity * average_price
             'Avg Price': f"₹{holding['average_price']:,.2f}",
             'Current Price': f"₹{current_price:,.2f}" if current_price else "N/A",
             'Current Value': f"₹{current_value:,.0f}",
