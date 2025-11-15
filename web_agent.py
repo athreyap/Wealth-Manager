@@ -3145,18 +3145,44 @@ def _tx_dataframe_to_transactions(
                 scheme_name = stock_name
             # For mutual funds, stock_name should be the fund name (same as scheme_name if not provided separately)
             # But if we have a separate scheme_name, keep stock_name as is (it might be the display name)
-            # If stock_name is just the ticker, try to resolve from AMFI
+            # Only resolve from AMFI if stock_name is just the ticker or a generic name
+            # If the file has a specific, non-generic name, keep it as-is
+            should_resolve_mf_name = False
+            stock_name_lower = (stock_name or '').lower().strip()
+            
+            # Generic patterns that indicate a generic name (not a specific scheme name)
+            generic_patterns = [
+                'large cap fund', 'mid cap fund', 'small cap fund', 'thematic',
+                'equity fund', 'debt fund', 'hybrid fund', 'balanced fund',
+                'growth fund', 'income fund', 'liquid fund', 'ultra short term',
+                'short term', 'long term', 'fund', 'scheme', 'plan',
+                'cap fund', 'cap equity', 'cap debt'
+            ]
+            
             if stock_name == ticker or not stock_name or stock_name == 'Unknown':
+                should_resolve_mf_name = True
+            elif ticker and ticker.isdigit() and any(pattern in stock_name_lower for pattern in generic_patterns):
+                # It's a generic name, try to resolve from AMFI
+                should_resolve_mf_name = True
+            # Also check if it's too short (likely generic) - less than 10 chars
+            elif ticker and ticker.isdigit() and len(stock_name_lower) < 10:
+                should_resolve_mf_name = True
+            
+            if should_resolve_mf_name and ticker and ticker.isdigit():
                 # Try to resolve fund name from AMFI
                 try:
                     amfi_data = get_amfi_dataset()
                     if amfi_data and 'code_lookup' in amfi_data:
                         scheme = amfi_data['code_lookup'].get(ticker)
                         if scheme and scheme.get('name'):
-                            stock_name = scheme.get('name')
-                            scheme_name = scheme.get('name')  # Use same for both
-                except Exception:
-                    pass
+                            amfi_name = scheme.get('name').strip()
+                            # Only use AMFI name if it's different and more specific
+                            if amfi_name and amfi_name.lower() != stock_name_lower:
+                                stock_name = amfi_name
+                                scheme_name = amfi_name  # Use same for both
+                                print(f"[MF_RESOLVE] ✅ Resolved {ticker}: '{stock_name}' → '{amfi_name}'")
+                except Exception as e:
+                    print(f"[MF_RESOLVE] ⚠️ Failed to resolve {ticker}: {e}")
         else:
             # For non-mutual funds, scheme_name should be None
             scheme_name = None
@@ -3440,6 +3466,47 @@ def _tx_build_db_transaction(
     asset_hint = _tx_safe_str(tx.get('asset_type'))
     asset_type = _tx_infer_asset_type(ticker, stock_name, asset_hint)
     
+    # Initialize scheme_name for mutual funds
+    scheme_name = _tx_safe_str(tx.get('scheme_name')) if asset_type == 'mutual_fund' else None
+    
+    # For mutual funds, resolve names from AMFI if stock_name is generic or just the ticker
+    if asset_type == 'mutual_fund' and ticker and ticker.isdigit():
+        should_resolve_mf_name = False
+        stock_name_lower = (stock_name or '').lower().strip()
+        
+        # Generic patterns that indicate a generic name (not a specific scheme name)
+        generic_patterns = [
+            'large cap fund', 'mid cap fund', 'small cap fund', 'thematic',
+            'equity fund', 'debt fund', 'hybrid fund', 'balanced fund',
+            'growth fund', 'income fund', 'liquid fund', 'ultra short term',
+            'short term', 'long term', 'fund', 'scheme', 'plan',
+            'cap fund', 'cap equity', 'cap debt'
+        ]
+        
+        if stock_name == ticker or not stock_name or stock_name == 'Unknown':
+            should_resolve_mf_name = True
+        elif any(pattern in stock_name_lower for pattern in generic_patterns):
+            # It's a generic name, resolve from AMFI
+            should_resolve_mf_name = True
+        # Also check if it's too short (likely generic) - less than 10 chars
+        elif len(stock_name_lower) < 10:
+            should_resolve_mf_name = True
+        
+        if should_resolve_mf_name:
+            try:
+                amfi_data = get_amfi_dataset()
+                if amfi_data and 'code_lookup' in amfi_data:
+                    scheme = amfi_data['code_lookup'].get(ticker)
+                    if scheme and scheme.get('name'):
+                        amfi_name = scheme.get('name').strip()
+                        # Only use AMFI name if it's different and more specific
+                        if amfi_name and amfi_name.lower() != stock_name_lower:
+                            stock_name = amfi_name
+                            scheme_name = amfi_name  # Use same for both
+                            print(f"[TX_BUILD] ✅ Resolved MF {ticker}: '{stock_name}' → '{amfi_name}'")
+            except Exception as e:
+                print(f"[TX_BUILD] ⚠️ Failed to resolve MF {ticker} from AMFI: {e}")
+    
     # For PMS/AIF, calculate current value using CAGR and store that instead of original values
     if asset_type in ['pms', 'aif']:
         try:
@@ -3472,7 +3539,7 @@ def _tx_build_db_transaction(
             # Continue with original values if CAGR calculation fails
 
     # For mutual funds, prefer scheme_name for ticker resolution (AMFI code lookup)
-    scheme_name = _tx_safe_str(tx.get('scheme_name'))
+    # scheme_name is already set above during AMFI resolution
     fund_name_for_lookup = scheme_name if (asset_type == 'mutual_fund' and scheme_name) else stock_name
 
     cache_key = (ticker, normalized_date, asset_type)
@@ -3511,7 +3578,10 @@ def _tx_build_db_transaction(
     sector = _tx_safe_str(tx.get('sector'))
     if not sector:
         sector = 'Mutual Fund' if asset_type == 'mutual_fund' else 'Unknown'
-    scheme_name = _tx_safe_str(tx.get('scheme_name')) if asset_type == 'mutual_fund' else None
+    # scheme_name is already set above during AMFI resolution for mutual funds
+    # For non-mutual funds, ensure it's None
+    if asset_type != 'mutual_fund':
+        scheme_name = None
     notes = _tx_safe_str(tx.get('notes'))
 
     transaction_type = transaction_type if transaction_type in {'buy', 'sell'} else 'buy'
@@ -6677,9 +6747,11 @@ def portfolio_overview_page():
         # Check how many holdings need updating
         holdings = get_cached_holdings(user['id'])
         
-        # Find ALL holdings with stale prices (current_price == avg_price, 0% return, or missing)
+            # Find ALL holdings with stale prices (current_price == avg_price, 0% return, or missing)
         stale_prices = []
         bonds_to_update = []
+        pms_aif_stale = []
+        mf_stale = []
         for h in holdings:
             # Check both current_price and live_price fields
             cp = h.get('current_price') or h.get('live_price') or 0
@@ -6695,6 +6767,20 @@ def portfolio_overview_page():
             elif ap > 0 and abs(cp - ap) < 0.01:
                 # Current price equals average (within 1 paisa) = stale (price wasn't fetched)
                 is_stale = True
+            
+            # Special handling for PMS/AIF - always need CAGR calculation
+            if asset_type in ['pms', 'aif']:
+                if cp == 0 or (ap > 0 and abs(cp - ap) < 0.01):
+                    h_with_user = h.copy()
+                    h_with_user['user_id'] = user['id']
+                    pms_aif_stale.append(h_with_user)
+                    is_stale = True
+            
+            # Special handling for mutual funds - check if price seems wrong
+            if asset_type == 'mutual_fund':
+                if cp == 0 or (ap > 0 and abs(cp - ap) < 0.01):
+                    mf_stale.append(h)
+                    is_stale = True
             
             # Special handling for bonds - check if price seems wrong
             if asset_type == 'bond':
@@ -6723,8 +6809,16 @@ def portfolio_overview_page():
                 with st.spinner(f"Refreshing prices for {len(stale_prices)} holdings..."):
                     from enhanced_price_fetcher import EnhancedPriceFetcher
                     price_fetcher = EnhancedPriceFetcher()
-                    price_fetcher.update_live_prices_for_holdings(stale_prices, db)
+                    # Ensure all holdings have user_id for PMS/AIF calculations
+                    holdings_with_user = []
+                    for h in stale_prices:
+                        h_with_user = h.copy()
+                        if 'user_id' not in h_with_user:
+                            h_with_user['user_id'] = user['id']
+                        holdings_with_user.append(h_with_user)
+                    price_fetcher.update_live_prices_for_holdings(holdings_with_user, db)
                     st.success(f"✅ Refreshed prices for {len(stale_prices)} holdings!")
+                    get_cached_holdings.clear()
                     st.rerun()
         
         # Show bond update button if bonds need updating
@@ -6782,43 +6876,113 @@ def portfolio_overview_page():
             # Automatically resolve mutual fund names from AMFI
             amfi_data = get_amfi_dataset()
             mf_updates = []
+            pms_aif_to_update = []
+            
+            # Prepare holdings with user_id for price updates
+            holdings_with_user_id = []
             for h in holdings:
+                # Ensure user_id is in holding dict for PMS/AIF calculations
+                h_with_user = h.copy()
+                h_with_user['user_id'] = user['id']
+                holdings_with_user_id.append(h_with_user)
+                
                 asset_type = h.get('asset_type', '')
                 ticker = str(h.get('ticker', '')).strip()
                 stock_name = str(h.get('stock_name', '')).strip()
                 stock_id = h.get('stock_id')
                 
                 # Resolve mutual fund names from AMFI
-                if asset_type == 'mutual_fund' and ticker.isdigit() and stock_name == ticker:
-                    if amfi_data and 'code_lookup' in amfi_data:
+                # Only update if: stock_name is just the ticker, or if it's a generic name (like "Large Cap Fund", "Mid Cap Fund", etc.)
+                # If the file has a specific, non-generic name, keep it as-is
+                if asset_type == 'mutual_fund' and ticker.isdigit():
+                    should_resolve = False
+                    stock_name_lower = (stock_name or '').lower().strip()
+                    
+                    # Generic patterns that indicate a generic name (not a specific scheme name)
+                    generic_patterns = [
+                        'large cap fund', 'mid cap fund', 'small cap fund', 'thematic',
+                        'equity fund', 'debt fund', 'hybrid fund', 'balanced fund',
+                        'growth fund', 'income fund', 'liquid fund', 'ultra short term',
+                        'short term', 'long term', 'fund', 'scheme', 'plan',
+                        'cap fund', 'cap equity', 'cap debt'
+                    ]
+                    
+                    # Check if stock_name is just the ticker
+                    if stock_name == ticker or not stock_name or stock_name == 'Unknown':
+                        should_resolve = True
+                    # Check if it matches generic patterns (exact match or contains generic pattern)
+                    elif any(pattern in stock_name_lower for pattern in generic_patterns):
+                        # It's a generic name, resolve from AMFI
+                        should_resolve = True
+                    # Also check if it's too short (likely generic) - less than 10 chars
+                    elif len(stock_name_lower) < 10:
+                        should_resolve = True
+                    
+                    if should_resolve and amfi_data and 'code_lookup' in amfi_data:
                         scheme = amfi_data['code_lookup'].get(ticker)
                         if scheme and scheme.get('name'):
-                            try:
-                                db.supabase.table('stock_master').update({
-                                    'stock_name': scheme.get('name')
-                                }).eq('id', stock_id).execute()
-                                mf_updates.append(ticker)
-                            except Exception:
-                                pass
+                            amfi_name = scheme.get('name').strip()
+                            # Only update if AMFI name is different and more specific (longer/more detailed)
+                            if amfi_name and amfi_name.lower() != stock_name_lower and len(amfi_name) > len(stock_name):
+                                try:
+                                    db.supabase.table('stock_master').update({
+                                        'stock_name': amfi_name
+                                    }).eq('id', stock_id).execute()
+                                    mf_updates.append(ticker)
+                                    print(f"[MF_RESOLVE] ✅ Updated {ticker}: '{stock_name}' → '{amfi_name}'")
+                                except Exception as e:
+                                    print(f"[MF_RESOLVE] ⚠️ Failed to update {ticker}: {e}")
+                            elif amfi_name and amfi_name.lower() != stock_name_lower:
+                                # Even if not longer, update if different (AMFI is authoritative)
+                                try:
+                                    db.supabase.table('stock_master').update({
+                                        'stock_name': amfi_name
+                                    }).eq('id', stock_id).execute()
+                                    mf_updates.append(ticker)
+                                    print(f"[MF_RESOLVE] ✅ Updated {ticker}: '{stock_name}' → '{amfi_name}'")
+                                except Exception as e:
+                                    print(f"[MF_RESOLVE] ⚠️ Failed to update {ticker}: {e}")
+                
+                # Check if PMS/AIF needs price update (current price equals average or is missing)
+                if asset_type in ['pms', 'aif']:
+                    cp = h.get('current_price') or h.get('live_price') or 0
+                    ap = h.get('average_price', 0)
+                    if cp == 0 or (ap > 0 and abs(cp - ap) < 0.01):
+                        pms_aif_to_update.append(h_with_user)
             
             # Automatically update prices for all holdings (background, non-blocking)
             # This will resolve tickers and fetch prices for all asset types
             try:
+                # Count holdings by asset type for logging
+                asset_type_counts = {}
+                for h in holdings_with_user_id:
+                    at = h.get('asset_type', 'unknown')
+                    asset_type_counts[at] = asset_type_counts.get(at, 0) + 1
+                
                 # Update prices in background (non-blocking)
-                price_fetcher.update_live_prices_for_holdings(holdings, db)
+                price_fetcher.update_live_prices_for_holdings(holdings_with_user_id, db)
+                
                 if mf_updates:
                     print(f"[AUTO_RESOLVE] ✅ Resolved {len(mf_updates)} mutual fund name(s) from AMFI")
+                if pms_aif_to_update:
+                    print(f"[AUTO_RESOLVE] ✅ Detected {len(pms_aif_to_update)} PMS/AIF holding(s) needing price update")
+                
                 print(f"[AUTO_RESOLVE] ✅ Automatically updated prices for {len(holdings)} holdings")
+                print(f"[AUTO_RESOLVE]   Breakdown: {asset_type_counts}")
             except Exception as e:
                 print(f"[AUTO_RESOLVE] ⚠️ Auto price update failed: {e}")
+                import traceback
+                traceback.print_exc()
             
             # Clear cache to refresh holdings with updated names/prices
-            if mf_updates:
+            if mf_updates or pms_aif_to_update:
                 get_cached_holdings.clear()
-                # Reload holdings to get updated names
+                # Reload holdings to get updated names/prices
                 holdings = get_cached_holdings(user['id'])
         except Exception as e:
             print(f"[AUTO_RESOLVE] ⚠️ Auto resolution failed: {e}")
+            import traceback
+            traceback.print_exc()
             pass  # Continue even if auto-resolution fails
     
     # CRITICAL: Double-check filtering at display level (safety net)

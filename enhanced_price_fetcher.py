@@ -300,11 +300,21 @@ class EnhancedPriceFetcher:
                     else:
                         failed_count += 1
                         ticker = holding.get('ticker', 'unknown')
-                        print(f"[PRICE_UPDATE] ❌ {ticker}: {error_msg}")
+                        asset_type = holding.get('asset_type', 'unknown')
+                        print(f"[PRICE_UPDATE] ❌ {ticker} ({asset_type}): {error_msg}")
+                        
+                        # For PMS/AIF, log more details about why it failed
+                        if asset_type in ['pms', 'aif']:
+                            user_id = holding.get('user_id')
+                            stock_id = holding.get('stock_id')
+                            print(f"[PRICE_UPDATE]   PMS/AIF debug: user_id={user_id}, stock_id={stock_id}, ticker={ticker}")
                 except Exception as e:
                     failed_count += 1
                     ticker = holding.get('ticker', 'unknown')
-                    print(f"[PRICE_UPDATE] ❌ Error updating {ticker}: {str(e)}")
+                    asset_type = holding.get('asset_type', 'unknown')
+                    print(f"[PRICE_UPDATE] ❌ Error updating {ticker} ({asset_type}): {str(e)}")
+                    import traceback
+                    traceback.print_exc()
         
         # OPTIMIZATION: Batch update all prices at once (much faster than individual updates)
         if price_updates:
