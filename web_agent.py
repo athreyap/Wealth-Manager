@@ -2284,55 +2284,56 @@ def _tx_extract_tables_from_pdf(uploaded_file) -> List[pd.DataFrame]:
 
 _TX_COLUMN_ALIASES: Dict[str, List[str]] = {
     'date': [
-        'date', 'Date', 'transaction date', 'trade date', 'tx date', 'tran date',
-        'order date', 'purchase date', 'nav date', 'valuation date',
-        'execution', 'execution date', 'Execution date', 'execution date and time', 'Execution date and time',
-        'Execution Date and Time', 'deal date', 'order datetime', 'order date / time'
+        'date', 'Date', 'transaction_date', 'transaction date', 'trade_date', 'trade date', 'tx_date', 'tx date', 'tran_date', 'tran date',
+        'order_date', 'order date', 'purchase_date', 'purchase date', 'nav_date', 'nav date', 'valuation_date', 'valuation date',
+        'execution', 'execution_date', 'execution date', 'Execution date', 'execution_date_and_time', 'execution date and time', 'Execution date and time',
+        'Execution Date and Time', 'deal_date', 'deal date', 'order_datetime', 'order datetime', 'order_date_time', 'order date / time'
     ],
     'ticker': [
-        'ticker', 'Ticker', 'symbol', 'Symbol', 'SYMBOL', 'scrip symbol', 'scrip', 'scrip sym',
-        'trading symbol', 'script', 'code', 'bse code', 'nse code',
-        'security code', 'instrument code', 'scheme code',
-        'isin code', 'isin', 'ISIN', 'amfi code', 'amfi',
-        'investment code', 'contract symbol', 'security id'
+        'ticker', 'Ticker', 'TICKER', 'symbol', 'Symbol', 'SYMBOL', 'scrip_symbol', 'scrip symbol', 'scrip', 'scrip_sym', 'scrip sym',
+        'trading_symbol', 'trading symbol', 'script', 'code', 'bse_code', 'bse code', 'nse_code', 'nse code',
+        'security_code', 'security code', 'instrument_code', 'instrument code', 'scheme_code', 'scheme code',
+        'isin_code', 'isin code', 'isin', 'ISIN', 'amfi_code', 'amfi code', 'amfi',
+        'investment_code', 'investment code', 'contract_symbol', 'contract symbol', 'security_id', 'security id'
     ],
     'stock_name': [
-        'stock name', 'Stock name', 'Stock Name', 'STOCK NAME', 'scrip name', 'security name', 'instrument', 'name', 'scheme name',
+        'stock_name', 'stock name', 'Stock name', 'Stock Name', 'STOCK NAME', 'STOCK_NAME',
+        'scrip name', 'security name', 'instrument', 'name', 'scheme name',
         'company', 'fund name', 'description', 'asset name', 'holding',
         'product', 'contract description', 'company name'
     ],
     'scheme_name': [
-        'scheme name', 'fund scheme', 'scheme', 'schemename', 'plan name'
+        'scheme_name', 'scheme name', 'fund_scheme', 'fund scheme', 'scheme', 'schemename', 'plan_name', 'plan name'
     ],
     'quantity': [
-        'quantity', 'Quantity', 'QTY', 'qty', 'units', 'Units', 'UNITS', 'shares', 'quantity/unit',
-        'no. of units', 'no of units', 'units/qty', 'units (credit)',
-        'units (debit)', 'lot size', 'filled quantity', 'executed quantity',
-        'number of units', 'no. of shares', 'no of shares', 'unit balance',
-        'units held', 'units balance', 'total units', 'current units',
-        'holding quantity', 'holding units', 'balance units', 'balance quantity'
+        'quantity', 'Quantity', 'QUANTITY', 'QTY', 'qty', 'units', 'Units', 'UNITS', 'shares', 'quantity_unit', 'quantity/unit',
+        'no_of_units', 'no. of units', 'no of units', 'units_qty', 'units/qty', 'units_credit', 'units (credit)',
+        'units_debit', 'units (debit)', 'lot_size', 'lot size', 'filled_quantity', 'filled quantity', 'executed_quantity', 'executed quantity',
+        'number_of_units', 'number of units', 'no_of_shares', 'no. of shares', 'no of shares', 'unit_balance', 'unit balance',
+        'units_held', 'units held', 'units_balance', 'units balance', 'total_units', 'total units', 'current_units', 'current units',
+        'holding_quantity', 'holding quantity', 'holding_units', 'holding units', 'balance_units', 'balance units', 'balance_quantity', 'balance quantity'
     ],
     'price': [
-        'price', 'rate', 'nav', 'purchase price', 'per unit price',
-        'trade price', 'unit price', 'cost price', 'nav per unit',
-        'deal price', 'executed price', 'execution price', 'order price', 'strike price'
+        'price', 'Price', 'PRICE', 'rate', 'nav', 'NAV', 'purchase_price', 'purchase price', 'per_unit_price', 'per unit price',
+        'trade_price', 'trade price', 'unit_price', 'unit price', 'cost_price', 'cost price', 'nav_per_unit', 'nav per unit',
+        'deal_price', 'deal price', 'executed_price', 'executed price', 'execution_price', 'execution price', 'order_price', 'order price', 'strike_price', 'strike price'
     ],
     'amount': [
-        'amount', 'Amount', 'value', 'Value', 'VALUE', 'total value', 'Total Value', 'consideration', 'txn amount',
-        'gross amount', 'net amount', 'investment amount', 'order value',
-        'total', 'investment', 'transaction value', 'contract value', 'turnover'
+        'amount', 'Amount', 'AMOUNT', 'value', 'Value', 'VALUE', 'total_value', 'total value', 'Total Value', 'consideration', 'txn_amount', 'txn amount',
+        'gross_amount', 'gross amount', 'net_amount', 'net amount', 'investment_amount', 'investment amount', 'order_value', 'order value',
+        'total', 'investment', 'transaction_value', 'transaction value', 'contract_value', 'contract value', 'turnover'
     ],
     'transaction_type': [
-        'transaction type', 'Transaction Type', 'type', 'Type', 'TYPE', 'action', 'side', 'buy/sell',
-        'txn type', 'order type', 'direction', 'nature', 'transaction',
-        'mode', 'buy/sell/other', 'transaction mode', 'trade type'
+        'transaction_type', 'transaction type', 'Transaction Type', 'type', 'Type', 'TYPE', 'action', 'side', 'buy_sell', 'buy/sell',
+        'txn_type', 'txn type', 'order_type', 'order type', 'direction', 'nature', 'transaction',
+        'mode', 'buy_sell_other', 'buy/sell/other', 'transaction_mode', 'transaction mode', 'trade_type', 'trade type'
     ],
     'asset_type': [
-        'asset type', 'instrument type', 'category', 'asset class',
-        'type of asset', 'class', 'instrument category'
+        'asset_type', 'asset type', 'instrument_type', 'instrument type', 'category', 'asset_class', 'asset class',
+        'type_of_asset', 'type of asset', 'class', 'instrument_category', 'instrument category'
     ],
     'channel': [
-        'channel', 'Channel', 'platform', 'broker', 'account', 'source', 'portfolio',
+        'channel', 'Channel', 'CHANNEL', 'platform', 'broker', 'account', 'source', 'portfolio',
         'through', 'partner', 'advisor', 'exchange', 'Exchange', 'EXCHANGE'
     ],
     'sector': [
