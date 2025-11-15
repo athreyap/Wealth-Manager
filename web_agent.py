@@ -1124,32 +1124,66 @@ def _tx_normalize_transaction_type(
 
 
 def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> str:
-    """Infer asset type from ticker/name/hint."""
+    """Infer asset type from ticker/name/hint.
+    CRITICAL: For numeric tickers, checks actual data sources (AMFI, yfinance) before heuristics.
+    """
     hint = asset_hint.lower()
     name = stock_name.lower()
     ticker_upper = ticker.upper()
 
     # Check if ticker is numeric (including decimals like "10.65" - AMFI codes)
-    is_numeric_amfi = False
+    is_numeric = False
     try:
         # Remove any non-numeric characters except decimal point
         cleaned = ticker_upper.replace(',', '').replace('$', '').strip()
         numeric_value = float(cleaned)
-        is_numeric_amfi = True
+        is_numeric = True
     except (ValueError, AttributeError):
         pass
 
-    # IMPORTANT: If ticker is numeric (AMFI code), it's ALWAYS a mutual fund
-    # regardless of scheme name (even if name contains "bond")
-    if is_numeric_amfi:
-        return 'mutual_fund'
-
-    if ticker_upper.isdigit():
-        if len(ticker_upper) >= 5:
+    # For numeric tickers, check actual data sources to determine type
+    if is_numeric and ticker_upper.replace('.', '').isdigit():
+        ticker_clean = ticker_upper.replace('.', '').split('.')[0]  # Remove decimal part
+        
+        # First, check if it's in AMFI dataset (mutual fund)
+        try:
+            amfi_data = get_amfi_dataset()
+            if amfi_data and 'code_lookup' in amfi_data:
+                if ticker_clean in amfi_data['code_lookup']:
+                    return 'mutual_fund'  # Found in AMFI = mutual fund
+        except Exception:
+            pass  # AMFI check failed, continue to stock check
+        
+        # Try to fetch from yfinance (for stocks) - but only if it's a 5-6 digit number
+        if len(ticker_clean) >= 5:
+            try:
+                import yfinance as yf
+                # Try NSE first
+                nse_ticker = f"{ticker_clean}.NS"
+                stock = yf.Ticker(nse_ticker)
+                hist = stock.history(period='1d')
+                if not hist.empty:
+                    return 'stock'  # Found in yfinance NSE = stock
+                
+                # Try BSE
+                bse_ticker = f"{ticker_clean}.BO"
+                stock = yf.Ticker(bse_ticker)
+                hist = stock.history(period='1d')
+                if not hist.empty:
+                    return 'stock'  # Found in yfinance BSE = stock
+            except Exception:
+                pass  # yfinance check failed, fall back to heuristics
+        
+        # Fallback to heuristics if both checks failed
+        # Most 6-digit numbers starting with '1' are mutual funds
+        if len(ticker_clean) == 6 and ticker_clean.startswith('1'):
             return 'mutual_fund'
-        if any(keyword in name for keyword in ('fund', 'growth', 'plan', 'scheme')):
-            return 'mutual_fund'
-        return 'stock'
+        elif len(ticker_clean) >= 5:
+            # Other 5-6 digit numeric codes are likely BSE stocks
+            return 'stock'
+        else:
+            # Shorter numeric codes are likely stocks
+            return 'stock'
 
     if hint:
         if 'mutual' in hint or 'mf' in hint or hint == 'mutual_fund':
@@ -1186,7 +1220,8 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
     if 'debenture' in name and not has_mf_keyword:
         return 'bond'
     # Other "bond" mentions might be bond mutual funds, so only classify as bond if no MF keywords
-    if 'bond' in name and not has_mf_keyword and not is_numeric_amfi:
+    is_numeric = ticker_upper.replace('.', '').isdigit()
+    if 'bond' in name and not has_mf_keyword and not is_numeric:
         return 'bond'
     
     if '.NS' in ticker_upper or '.BO' in ticker_upper:
@@ -3074,9 +3109,28 @@ def _tx_dataframe_to_transactions(
         asset_hint = _tx_safe_str(row.get('asset_type'))
         asset_type = _tx_infer_asset_type(ticker, stock_name or scheme_name, asset_hint)
         
-        # For mutual funds, ensure we have scheme_name for ticker resolution
-        if asset_type == 'mutual_fund' and not scheme_name:
-            scheme_name = stock_name  # Use stock_name as fallback
+        # For mutual funds, properly set scheme_name and stock_name
+        if asset_type == 'mutual_fund':
+            # If scheme_name is missing, use stock_name as scheme_name
+            if not scheme_name:
+                scheme_name = stock_name
+            # For mutual funds, stock_name should be the fund name (same as scheme_name if not provided separately)
+            # But if we have a separate scheme_name, keep stock_name as is (it might be the display name)
+            # If stock_name is just the ticker, try to resolve from AMFI
+            if stock_name == ticker or not stock_name or stock_name == 'Unknown':
+                # Try to resolve fund name from AMFI
+                try:
+                    amfi_data = get_amfi_dataset()
+                    if amfi_data and 'code_lookup' in amfi_data:
+                        scheme = amfi_data['code_lookup'].get(ticker)
+                        if scheme and scheme.get('name'):
+                            stock_name = scheme.get('name')
+                            scheme_name = scheme.get('name')  # Use same for both
+                except Exception:
+                    pass
+        else:
+            # For non-mutual funds, scheme_name should be None
+            scheme_name = None
 
         # CRITICAL: Never recalculate quantity if it's present in the file
         # Quantity is the source of truth - if it's in the file, use it as-is
@@ -3139,8 +3193,8 @@ def _tx_dataframe_to_transactions(
             'date': raw_date,
             'transaction_type': transaction_type,
             'ticker': ticker,
-            'stock_name': stock_name or ticker,
-            'scheme_name': scheme_name,
+            'stock_name': stock_name or ticker if asset_type != 'mutual_fund' else (scheme_name or stock_name or ticker),
+            'scheme_name': scheme_name if asset_type == 'mutual_fund' else None,
             'quantity': quantity_value,
             'price': price_value,
             'amount': amount_value,
@@ -3337,7 +3391,7 @@ def _tx_build_db_transaction(
     if quantity_present and quantity_value != original_quantity:
         print(f"[TX_BUILD] ⚠️ WARNING: Quantity was present ({original_quantity}) but got changed to {quantity_value}. Restoring original.")
         quantity_value = original_quantity
-
+    
     transaction_type = _tx_normalize_transaction_type(
         tx.get('transaction_type'),
         quantity=quantity_value,
@@ -3356,6 +3410,37 @@ def _tx_build_db_transaction(
 
     asset_hint = _tx_safe_str(tx.get('asset_type'))
     asset_type = _tx_infer_asset_type(ticker, stock_name, asset_hint)
+    
+    # For PMS/AIF, calculate current value using CAGR and store that instead of original values
+    if asset_type in ['pms', 'aif']:
+        try:
+            from pms_aif_calculator import PMS_AIF_Calculator
+            
+            # Get the original investment amount (from file)
+            original_investment = amount_value if amount_value > 0 else (quantity_value * price_value if quantity_value > 0 and price_value > 0 else 0)
+            
+            if original_investment > 0 and normalized_date:
+                # Calculate current value using CAGR
+                calculator = PMS_AIF_Calculator()
+                result = calculator.calculate_pms_aif_value(
+                    ticker,
+                    normalized_date,
+                    original_investment,
+                    is_aif=(asset_type == 'aif')
+                )
+                
+                current_value = result.get('current_value', 0)
+                if current_value > 0:
+                    # Store current value as amount
+                    amount_value = current_value
+                    # For PMS/AIF, quantity is typically 1 (single investment)
+                    quantity_value = 1.0
+                    # Price is the current value (since quantity = 1)
+                    price_value = current_value
+                    print(f"[TX_BUILD] ✅ PMS/AIF: Calculated current value ₹{current_value:,.2f} from original ₹{original_investment:,.2f} (CAGR: {result.get('cagr_used', 0)*100:.1f}%)")
+        except Exception as e:
+            print(f"[TX_BUILD] ⚠️ Failed to calculate PMS/AIF current value: {e}")
+            # Continue with original values if CAGR calculation fails
 
     # For mutual funds, prefer scheme_name for ticker resolution (AMFI code lookup)
     scheme_name = _tx_safe_str(tx.get('scheme_name'))
@@ -6603,100 +6688,6 @@ def portfolio_overview_page():
             if is_stale:
                 stale_prices.append(h)
     
-        # Show "Fix Asset Types" button if there are holdings with potentially wrong asset types
-        wrong_asset_types = []
-        for h in holdings:
-            ticker = str(h.get('ticker', '')).strip()
-            asset_type = h.get('asset_type', '')
-            # Check for numeric tickers that might be misclassified
-            if ticker.isdigit() and asset_type == 'mutual_fund':
-                # Check if it's actually a BSE stock (not in AMFI)
-                try:
-                    amfi_data = get_amfi_dataset()
-                    if amfi_data and 'code_lookup' in amfi_data:
-                        if ticker not in amfi_data['code_lookup']:
-                            # Not in AMFI, might be a stock
-                            wrong_asset_types.append(h)
-                except Exception:
-                    pass
-        
-        if wrong_asset_types:
-            if st.button(f"🔧 Fix {len(wrong_asset_types)} Asset Type(s)", help=f"Fix incorrectly classified asset types (e.g., BSE stocks marked as mutual funds)"):
-                with st.spinner(f"Fixing asset types for {len(wrong_asset_types)} holdings..."):
-                    fixed = 0
-                    for h in wrong_asset_types:
-                        ticker = h.get('ticker')
-                        stock_id = h.get('stock_id')
-                        try:
-                            # Try to fetch from yfinance to confirm it's a stock
-                            import yfinance as yf
-                            nse_ticker = f"{ticker}.NS"
-                            stock = yf.Ticker(nse_ticker)
-                            hist = stock.history(period='1d')
-                            if not hist.empty:
-                                # Found in yfinance, update to stock
-                                db.supabase.table('stock_master').update({
-                                    'asset_type': 'stock'
-                                }).eq('id', stock_id).execute()
-                                fixed += 1
-                                continue
-                            
-                            # Try BSE
-                            bse_ticker = f"{ticker}.BO"
-                            stock = yf.Ticker(bse_ticker)
-                            hist = stock.history(period='1d')
-                            if not hist.empty:
-                                # Found in yfinance BSE, update to stock
-                                db.supabase.table('stock_master').update({
-                                    'asset_type': 'stock'
-                                }).eq('id', stock_id).execute()
-                                fixed += 1
-                        except Exception:
-                            pass
-                    if fixed > 0:
-                        st.success(f"✅ Fixed {fixed} asset type(s)! Refreshing...")
-                        get_cached_holdings.clear()
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.warning("Could not verify asset types. They may be correct.")
-        
-        # Show "Fix Mutual Fund Names" button if there are MFs with numeric names
-        mf_with_numeric_names = []
-        for h in holdings:
-            ticker = str(h.get('ticker', '')).strip()
-            stock_name = str(h.get('stock_name', '')).strip()
-            asset_type = h.get('asset_type', '')
-            if asset_type == 'mutual_fund' and ticker.isdigit() and stock_name == ticker:
-                # Mutual fund with numeric name (should be resolved from AMFI)
-                mf_with_numeric_names.append(h)
-        
-        if mf_with_numeric_names:
-            if st.button(f"📝 Fix {len(mf_with_numeric_names)} Mutual Fund Name(s)", help=f"Resolve mutual fund names from AMFI dataset"):
-                with st.spinner(f"Resolving names for {len(mf_with_numeric_names)} mutual funds..."):
-                    fixed = 0
-                    amfi_data = get_amfi_dataset()
-                    if amfi_data and 'code_lookup' in amfi_data:
-                        for h in mf_with_numeric_names:
-                            ticker = h.get('ticker')
-                            stock_id = h.get('stock_id')
-                            scheme = amfi_data['code_lookup'].get(ticker)
-                            if scheme and scheme.get('name'):
-                                try:
-                                    db.supabase.table('stock_master').update({
-                                        'stock_name': scheme.get('name')
-                                    }).eq('id', stock_id).execute()
-                                    fixed += 1
-                                except Exception:
-                                    pass
-                    if fixed > 0:
-                        st.success(f"✅ Fixed {fixed} mutual fund name(s)! Refreshing...")
-                        get_cached_holdings.clear()
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.warning("Could not resolve mutual fund names. AMFI data may be unavailable.")
-        
         # Show "Refresh All Prices" button if there are stale prices
         if stale_prices:
             if st.button(f"🔄 Refresh {len(stale_prices)} Price(s)", help=f"Refresh prices for holdings with missing or stale prices"):
@@ -6752,6 +6743,54 @@ def portfolio_overview_page():
     
     # Use cached holdings data (with zero-quantity filtering)
     holdings = get_cached_holdings(user['id'])
+    
+    # AUTOMATIC: Resolve tickers and fetch prices for all asset types (PMS, stock, MF, AIF, bond)
+    if holdings:
+        try:
+            from enhanced_price_fetcher import EnhancedPriceFetcher
+            price_fetcher = EnhancedPriceFetcher()
+            
+            # Automatically resolve mutual fund names from AMFI
+            amfi_data = get_amfi_dataset()
+            mf_updates = []
+            for h in holdings:
+                asset_type = h.get('asset_type', '')
+                ticker = str(h.get('ticker', '')).strip()
+                stock_name = str(h.get('stock_name', '')).strip()
+                stock_id = h.get('stock_id')
+                
+                # Resolve mutual fund names from AMFI
+                if asset_type == 'mutual_fund' and ticker.isdigit() and stock_name == ticker:
+                    if amfi_data and 'code_lookup' in amfi_data:
+                        scheme = amfi_data['code_lookup'].get(ticker)
+                        if scheme and scheme.get('name'):
+                            try:
+                                db.supabase.table('stock_master').update({
+                                    'stock_name': scheme.get('name')
+                                }).eq('id', stock_id).execute()
+                                mf_updates.append(ticker)
+                            except Exception:
+                                pass
+            
+            # Automatically update prices for all holdings (background, non-blocking)
+            # This will resolve tickers and fetch prices for all asset types
+            try:
+                # Update prices in background (non-blocking)
+                price_fetcher.update_live_prices_for_holdings(holdings, db)
+                if mf_updates:
+                    print(f"[AUTO_RESOLVE] ✅ Resolved {len(mf_updates)} mutual fund name(s) from AMFI")
+                print(f"[AUTO_RESOLVE] ✅ Automatically updated prices for {len(holdings)} holdings")
+            except Exception as e:
+                print(f"[AUTO_RESOLVE] ⚠️ Auto price update failed: {e}")
+            
+            # Clear cache to refresh holdings with updated names/prices
+            if mf_updates:
+                get_cached_holdings.clear()
+                # Reload holdings to get updated names
+                holdings = get_cached_holdings(user['id'])
+        except Exception as e:
+            print(f"[AUTO_RESOLVE] ⚠️ Auto resolution failed: {e}")
+            pass  # Continue even if auto-resolution fails
     
     # CRITICAL: Double-check filtering at display level (safety net)
     # Filter out any zero-quantity holdings that might have slipped through cache
