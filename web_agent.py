@@ -1229,14 +1229,33 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
         return 'aif'
     
     # Check for mutual fund keywords FIRST (even if "bond" is in name - bond funds are still MFs)
-    mf_keywords = ['fund', 'scheme', 'growth', 'nav', 'mutual', 'mf', 'plan']
+    # This should happen BEFORE numeric checks to catch cases like "25872" with name "DSP Dynamic Asset Allocation Fund"
+    mf_keywords = ['fund', 'scheme', 'growth', 'nav', 'mutual', 'mf', 'plan', 'allocation', 'hybrid', 'equity', 'debt']
     has_mf_keyword = any(keyword in name for keyword in mf_keywords)
     
     if has_mf_keyword:
         return 'mutual_fund'
     
+    # For numeric tickers, check AMFI first (before assuming stock)
+    if is_numeric and ticker_upper.replace('.', '').isdigit():
+        ticker_clean = ticker_upper.replace('.', '').split('.')[0]
+        # Check AMFI for any numeric ticker (not just 6-digit starting with 1)
+        try:
+            amfi_data = get_amfi_dataset()
+            if amfi_data and 'code_lookup' in amfi_data:
+                if ticker_clean in amfi_data['code_lookup']:
+                    return 'mutual_fund'  # Found in AMFI = mutual fund
+        except Exception:
+            pass
+    
+    # Only assume stock for numeric if it's NOT in AMFI and NOT a 6-digit starting with 1
     if ticker_upper.isdigit() and len(ticker_upper) >= 5:
-        return 'mutual_fund'
+        # Most 6-digit numbers starting with '1' are mutual funds
+        if len(ticker_upper) == 6 and ticker_upper.startswith('1'):
+            return 'mutual_fund'
+        # For other numeric codes, if name suggests MF, treat as MF
+        if has_mf_keyword:
+            return 'mutual_fund'
     
     # Only check for bonds if NOT a mutual fund and NOT numeric
     # SGB (Sovereign Gold Bonds) are actual bonds, not mutual funds
@@ -3139,50 +3158,13 @@ def _tx_dataframe_to_transactions(
         asset_type = _tx_infer_asset_type(ticker, stock_name or scheme_name, asset_hint)
         
         # For mutual funds, properly set scheme_name and stock_name
+        # Use what's in the file - don't replace with AMFI names
         if asset_type == 'mutual_fund':
             # If scheme_name is missing, use stock_name as scheme_name
             if not scheme_name:
                 scheme_name = stock_name
-            # For mutual funds, stock_name should be the fund name (same as scheme_name if not provided separately)
-            # But if we have a separate scheme_name, keep stock_name as is (it might be the display name)
-            # Only resolve from AMFI if stock_name is just the ticker or a generic name
-            # If the file has a specific, non-generic name, keep it as-is
-            should_resolve_mf_name = False
-            stock_name_lower = (stock_name or '').lower().strip()
-            
-            # Generic patterns that indicate a generic name (not a specific scheme name)
-            generic_patterns = [
-                'large cap fund', 'mid cap fund', 'small cap fund', 'thematic',
-                'equity fund', 'debt fund', 'hybrid fund', 'balanced fund',
-                'growth fund', 'income fund', 'liquid fund', 'ultra short term',
-                'short term', 'long term', 'fund', 'scheme', 'plan',
-                'cap fund', 'cap equity', 'cap debt'
-            ]
-            
-            if stock_name == ticker or not stock_name or stock_name == 'Unknown':
-                should_resolve_mf_name = True
-            elif ticker and ticker.isdigit() and any(pattern in stock_name_lower for pattern in generic_patterns):
-                # It's a generic name, try to resolve from AMFI
-                should_resolve_mf_name = True
-            # Also check if it's too short (likely generic) - less than 10 chars
-            elif ticker and ticker.isdigit() and len(stock_name_lower) < 10:
-                should_resolve_mf_name = True
-            
-            if should_resolve_mf_name and ticker and ticker.isdigit():
-                # Try to resolve fund name from AMFI
-                try:
-                    amfi_data = get_amfi_dataset()
-                    if amfi_data and 'code_lookup' in amfi_data:
-                        scheme = amfi_data['code_lookup'].get(ticker)
-                        if scheme and scheme.get('name'):
-                            amfi_name = scheme.get('name').strip()
-                            # Only use AMFI name if it's different and more specific
-                            if amfi_name and amfi_name.lower() != stock_name_lower:
-                                stock_name = amfi_name
-                                scheme_name = amfi_name  # Use same for both
-                                print(f"[MF_RESOLVE] ✅ Resolved {ticker}: '{stock_name}' → '{amfi_name}'")
-                except Exception as e:
-                    print(f"[MF_RESOLVE] ⚠️ Failed to resolve {ticker}: {e}")
+            # Keep the stock_name and scheme_name from the file as-is
+            # The ticker will be resolved/verified using the file name, but the name stays from the file
         else:
             # For non-mutual funds, scheme_name should be None
             scheme_name = None
@@ -3190,7 +3172,7 @@ def _tx_dataframe_to_transactions(
         # CRITICAL: Never recalculate quantity if it's present in the file
         # Quantity is the source of truth - if it's in the file, use it as-is
         original_quantity = quantity_value  # Store original before any calculations
-        
+
         # Only recalculate missing values, don't override existing values from file
         # Priority 1: Calculate price if missing (when we have quantity and amount)
         # CRITICAL: Always calculate price from amount/quantity if price is missing, even if it's 0
@@ -3453,7 +3435,7 @@ def _tx_build_db_transaction(
     if quantity_present and quantity_value != original_quantity:
         print(f"[TX_BUILD] ⚠️ WARNING: Quantity was present ({original_quantity}) but got changed to {quantity_value}. Restoring original.")
         quantity_value = original_quantity
-    
+
     transaction_type = _tx_normalize_transaction_type(
         tx.get('transaction_type'),
         quantity=quantity_value,
@@ -3474,47 +3456,13 @@ def _tx_build_db_transaction(
     asset_type = _tx_infer_asset_type(ticker, stock_name, asset_hint)
     
     # Initialize scheme_name for mutual funds
+    # Use what's in the file - don't replace with AMFI names
     scheme_name = _tx_safe_str(tx.get('scheme_name')) if asset_type == 'mutual_fund' else None
-    
-    # For mutual funds, resolve names from AMFI if stock_name is generic or just the ticker
-    if asset_type == 'mutual_fund' and ticker and ticker.isdigit():
-        should_resolve_mf_name = False
-        stock_name_lower = (stock_name or '').lower().strip()
-        
-        # Generic patterns that indicate a generic name (not a specific scheme name)
-        generic_patterns = [
-            'large cap fund', 'mid cap fund', 'small cap fund', 'thematic',
-            'equity fund', 'debt fund', 'hybrid fund', 'balanced fund',
-            'growth fund', 'income fund', 'liquid fund', 'ultra short term',
-            'short term', 'long term', 'fund', 'scheme', 'plan',
-            'cap fund', 'cap equity', 'cap debt'
-        ]
-        
-        if stock_name == ticker or not stock_name or stock_name == 'Unknown':
-            should_resolve_mf_name = True
-        elif any(pattern in stock_name_lower for pattern in generic_patterns):
-            # It's a generic name, resolve from AMFI
-            should_resolve_mf_name = True
-        # Also check if it's too short (likely generic) - less than 10 chars
-        elif len(stock_name_lower) < 10:
-            should_resolve_mf_name = True
-        
-        if should_resolve_mf_name:
-            try:
-                amfi_data = get_amfi_dataset()
-                if amfi_data and 'code_lookup' in amfi_data:
-                    scheme = amfi_data['code_lookup'].get(ticker)
-                    if scheme and scheme.get('name'):
-                        amfi_name = scheme.get('name').strip()
-                        # Only use AMFI name if it's different and more specific
-                        if amfi_name and amfi_name.lower() != stock_name_lower:
-                            stock_name = amfi_name
-                            scheme_name = amfi_name  # Use same for both
-                            print(f"[TX_BUILD] ✅ Resolved MF {ticker}: '{stock_name}' → '{amfi_name}'")
-            except Exception as e:
-                print(f"[TX_BUILD] ⚠️ Failed to resolve MF {ticker} from AMFI: {e}")
+    # Keep the stock_name and scheme_name from the file as-is
+    # The ticker will be resolved/verified using the file name, but the name stays from the file
     
     # For PMS/AIF, calculate current value using CAGR and store that instead of original values
+    pms_aif_calculated_price = None
     if asset_type in ['pms', 'aif']:
         try:
             from pms_aif_calculator import PMS_AIF_Calculator
@@ -3540,6 +3488,7 @@ def _tx_build_db_transaction(
                     quantity_value = 1.0
                     # Price is the current value (since quantity = 1)
                     price_value = current_value
+                    pms_aif_calculated_price = current_value  # Store for later use
                     print(f"[TX_BUILD] ✅ PMS/AIF: Calculated current value ₹{current_value:,.2f} from original ₹{original_investment:,.2f} (CAGR: {result.get('cagr_used', 0)*100:.1f}%)")
         except Exception as e:
             print(f"[TX_BUILD] ⚠️ Failed to calculate PMS/AIF current value: {e}")
@@ -3593,7 +3542,7 @@ def _tx_build_db_transaction(
 
     transaction_type = transaction_type if transaction_type in {'buy', 'sell'} else 'buy'
 
-    return {
+    result = {
         'user_id': user_id,
         'portfolio_id': portfolio_id,
         'ticker': ticker,
@@ -3609,6 +3558,12 @@ def _tx_build_db_transaction(
         'filename': filename,
         'notes': notes,
     }
+    
+    # Store PMS/AIF calculated price for later use in updating live_price
+    if pms_aif_calculated_price:
+        result['_pms_aif_calculated_price'] = pms_aif_calculated_price
+    
+    return result
 
 # Import modules
 from database_shared import SharedDatabaseManager
@@ -5912,6 +5867,7 @@ def _tx_prepare_preview_row(
     date_value = tx.get('transaction_date') or tx.get('date') or tx.get('Date') or ''
     ticker_value = tx.get('ticker') or ''
     stock_name = tx.get('stock_name') or tx.get('scheme_name') or ticker_value or ''
+    scheme_name = tx.get('scheme_name') or ''
 
     normalized = {
         'source_file': source_file,
@@ -5919,7 +5875,7 @@ def _tx_prepare_preview_row(
         'date': _tx_safe_str(date_value),
         'ticker': _tx_normalize_ticker(ticker_value) or _tx_fallback_ticker_from_name(stock_name),
         'stock_name': _tx_safe_str(stock_name),
-        'scheme_name': _tx_safe_str(tx.get('scheme_name')),
+        'scheme_name': _tx_safe_str(scheme_name),
         'quantity': _tx_safe_float(tx.get('quantity') or tx.get('units')),
         'price': _tx_safe_float(tx.get('price')),
         'amount': _tx_safe_float(tx.get('amount') or tx.get('value')),
@@ -5933,10 +5889,13 @@ def _tx_prepare_preview_row(
     asset_type_lower = normalized['asset_type'].lower()
 
     if asset_type_lower == 'mutual_fund':
+        # Use the file name to verify/resolve the ticker, but preserve the file name
+        # Don't replace the name with AMFI names - use what's in the file
         resolved_code, _source = _preview_resolve_mutual_fund_ticker(stock_name, normalized['ticker'])
         if resolved_code:
             normalized['ticker'] = resolved_code
             normalized['sector'] = normalized['sector'] or 'Mutual Fund'
+        # Keep the stock_name and scheme_name from the file - don't replace with AMFI names
 
     # CRITICAL: For file uploads, calculate price from amount/quantity FIRST
     # This ensures we use the transaction price from the file, not current market prices
@@ -6006,9 +5965,9 @@ def _tx_prepare_preview_row(
                         fetched_price = None
             _preview_price_cache[key] = fetched_price
 
-            if fetched_price and fetched_price > 0:
-                normalized['price'] = round(float(fetched_price), 4)
-                print(f"[PREVIEW] ✅ Fetched historical price: {normalized['price']} for {normalized['ticker']} on {normalized['date']}")
+        if fetched_price and fetched_price > 0:
+            normalized['price'] = round(float(fetched_price), 4)
+            print(f"[PREVIEW] ✅ Fetched historical price: {normalized['price']} for {normalized['ticker']} on {normalized['date']}")
     
     # After price is set, calculate missing values:
     # 1. Calculate amount if missing (when we have quantity and price)
@@ -6061,13 +6020,13 @@ def _tx_prepare_preview_row(
         pass
     elif not quantity_present and amount_present and price_present:
         # Only calculate quantity if it's truly missing AND we have amount+price
-        if normalized['amount'] > 0 and normalized['price'] > 0:
+        if normalized.get('amount', 0) > 0 and normalized.get('price', 0) > 0:
             normalized['quantity'] = round(normalized['amount'] / normalized['price'], 4)
             print(f"[TX_NORMALIZE] Calculated quantity from amount/price: {normalized['quantity']}")
     
     # Calculate price from amount/quantity if price is missing
     if not price_present and amount_present and quantity_present:
-        if normalized['amount'] > 0 and normalized['quantity'] > 0:
+        if normalized.get('amount', 0) > 0 and normalized.get('quantity', 0) > 0:
             normalized['price'] = round(normalized['amount'] / normalized['quantity'], 4)
             print(f"[TX_NORMALIZE] Calculated price from amount/quantity: {normalized['price']}")
     
@@ -6149,53 +6108,53 @@ def extract_transactions_for_csv(uploaded_file, file_name: str, user_id: Optiona
     else:
         # CSV/PDF: Try Python first, then AI
         method_used = 'python'
-        try:
-            uploaded_file.seek(0)
-        except Exception:
-            pass
-        extraction_result = extract_transactions_python(uploaded_file, file_name)
-        if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
-            python_transactions, _python_log = extraction_result
-        else:
-            python_transactions = extraction_result or []
-        transactions = python_transactions or []
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+    extraction_result = extract_transactions_python(uploaded_file, file_name)
+    if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+        python_transactions, _python_log = extraction_result
+    else:
+        python_transactions = extraction_result or []
+    transactions = python_transactions or []
 
-        # Fall back to AI only when Python parser finds nothing
-        if not transactions:
-            if AI_AGENTS_AVAILABLE:
-                method_used = 'ai'
-                print(f"[FILE_PARSE] Python extraction found no transactions, trying AI extraction for {file_name}...")
-                # Check if Vision API text was pre-extracted
-                if hasattr(uploaded_file, '_vision_api_text'):
-                    print(f"[FILE_PARSE] ✅ Pre-extracted Vision API text found ({len(uploaded_file._vision_api_text)} characters) - will reuse it")
-                else:
-                    print(f"[FILE_PARSE] ⚠️ No pre-extracted Vision API text found")
-                try:
-                    uploaded_file.seek(0)
-                except Exception:
-                    pass
-                transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
-                if transactions:
-                    print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions")
-                else:
-                    print(f"[FILE_PARSE] ⚠️ AI extraction also found no transactions")
-                    # Check if this is a PDF that might be image-based
-                    if file_name.lower().endswith('.pdf'):
-                        st.warning("""
-                        **⚠️ PDF Processing Issue**
-                        
-                        The PDF file appears to be **image-based (scanned)** and contains no extractable text.
-                        
-                        **Solutions:**
-                        1. **Use OCR software** (e.g., Adobe Acrobat, online OCR tools) to convert the PDF to text-selectable format
-                        2. **Provide the original source file** (CSV, Excel, or text-selectable PDF) instead
-                        3. **Check terminal logs** for detailed extraction diagnostics
-                        
-                        The system detected table structures but all cells were empty, and text extraction returned no content.
-                        """)
+    # Fall back to AI only when Python parser finds nothing
+    if not transactions:
+        if AI_AGENTS_AVAILABLE:
+            method_used = 'ai'
+            print(f"[FILE_PARSE] Python extraction found no transactions, trying AI extraction for {file_name}...")
+            # Check if Vision API text was pre-extracted
+            if hasattr(uploaded_file, '_vision_api_text'):
+                print(f"[FILE_PARSE] ✅ Pre-extracted Vision API text found ({len(uploaded_file._vision_api_text)} characters) - will reuse it")
             else:
-                print(f"[FILE_PARSE] ⚠️ Python extraction found no transactions and AI agents are not available")
-                print(f"[FILE_PARSE]   Check terminal logs above for details on why extraction failed")
+                print(f"[FILE_PARSE] ⚠️ No pre-extracted Vision API text found")
+            try:
+                uploaded_file.seek(0)
+            except Exception:
+                pass
+            transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
+            if transactions:
+                print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions")
+            else:
+                print(f"[FILE_PARSE] ⚠️ AI extraction also found no transactions")
+                # Check if this is a PDF that might be image-based
+                if file_name.lower().endswith('.pdf'):
+                    st.warning("""
+                    **⚠️ PDF Processing Issue**
+                    
+                    The PDF file appears to be **image-based (scanned)** and contains no extractable text.
+                    
+                    **Solutions:**
+                    1. **Use OCR software** (e.g., Adobe Acrobat, online OCR tools) to convert the PDF to text-selectable format
+                    2. **Provide the original source file** (CSV, Excel, or text-selectable PDF) instead
+                    3. **Check terminal logs** for detailed extraction diagnostics
+                    
+                    The system detected table structures but all cells were empty, and text extraction returned no content.
+                    """)
+        else:
+            print(f"[FILE_PARSE] ⚠️ Python extraction found no transactions and AI agents are not available")
+            print(f"[FILE_PARSE]   Check terminal logs above for details on why extraction failed")
 
     normalized_rows = [
         _tx_prepare_preview_row(tx, file_name, method_used, use_price_fetcher=True)
@@ -6349,24 +6308,24 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                 except Exception:
                     pass
                 
-                extraction_result = extract_transactions_python(uploaded_file, file_name)
-                if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
-                    python_transactions, python_debug_log = extraction_result
-                else:
-                    python_transactions = extraction_result or []
-                    python_debug_log = []
-                transactions = python_transactions or []
+            extraction_result = extract_transactions_python(uploaded_file, file_name)
+            if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+                python_transactions, python_debug_log = extraction_result
+            else:
+                python_transactions = extraction_result or []
+                python_debug_log = []
+            transactions = python_transactions or []
+            
+            # Fallback to AI only if Python found nothing (or for PDFs)
+            if not transactions:
+                method_used = 'ai'
+                try:
+                    uploaded_file.seek(0)
+                except Exception:
+                    pass
                 
-                # Fallback to AI only if Python found nothing (or for PDFs)
-                if not transactions:
-                    method_used = 'ai'
-                    try:
-                        uploaded_file.seek(0)
-                    except Exception:
-                        pass
-                    
-                    ai_transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
-                    transactions = ai_transactions
+                ai_transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
+                transactions = ai_transactions
 
             if not transactions:
                 st.error(f"   ❌ Could not extract transactions from {file_name}.")
@@ -6409,6 +6368,18 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                 }
                 try:
                     result = db.add_transaction(payload)
+                    
+                    # If PMS/AIF CAGR was calculated, update live_price in stock_master
+                    if result.get('success') and normalized_tx.get('_pms_aif_calculated_price'):
+                        try:
+                            pms_aif_price = normalized_tx['_pms_aif_calculated_price']
+                            ticker_for_update = payload.get('ticker')
+                            asset_type_for_update = payload.get('asset_type', 'stock')
+                            if ticker_for_update and asset_type_for_update in ['pms', 'aif']:
+                                db._store_current_price(ticker_for_update, pms_aif_price, asset_type_for_update)
+                                print(f"[PMS_AIF] ✅ Updated live_price for {ticker_for_update}: ₹{pms_aif_price:,.2f}")
+                        except Exception as e:
+                            print(f"[PMS_AIF] ⚠️ Failed to update live_price: {e}")
                 except Exception as exc:
                     st.caption(f"   ⚠️ Database error: {str(exc)[:100]}")
                     errors += 1
@@ -6754,7 +6725,7 @@ def portfolio_overview_page():
         # Check how many holdings need updating
         holdings = get_cached_holdings(user['id'])
         
-            # Find ALL holdings with stale prices (current_price == avg_price, 0% return, or missing)
+        # Find ALL holdings with stale prices (current_price == avg_price, 0% return, or missing)
         stale_prices = []
         bonds_to_update = []
         pms_aif_stale = []
@@ -6787,7 +6758,7 @@ def portfolio_overview_page():
             if asset_type == 'mutual_fund':
                 if cp == 0 or (ap > 0 and abs(cp - ap) < 0.01):
                     mf_stale.append(h)
-                    is_stale = True
+                is_stale = True
             
             # Special handling for bonds - check if price seems wrong
             if asset_type == 'bond':
@@ -6901,7 +6872,9 @@ def portfolio_overview_page():
                 # Resolve mutual fund names from AMFI
                 # Only update if: stock_name is just the ticker, or if it's a generic name (like "Large Cap Fund", "Mid Cap Fund", etc.)
                 # If the file has a specific, non-generic name, keep it as-is
-                if asset_type == 'mutual_fund' and ticker.isdigit():
+                # Handle both pure numeric and numeric with decimals (e.g., "133561" or "133561.0")
+                ticker_clean = ticker.replace('.', '').split('.')[0] if '.' in ticker else ticker
+                if asset_type == 'mutual_fund' and ticker_clean.isdigit():
                     should_resolve = False
                     stock_name_lower = (stock_name or '').lower().strip()
                     
@@ -6926,7 +6899,8 @@ def portfolio_overview_page():
                         should_resolve = True
                     
                     if should_resolve and amfi_data and 'code_lookup' in amfi_data:
-                        scheme = amfi_data['code_lookup'].get(ticker)
+                        # Use cleaned ticker (without decimals) for AMFI lookup
+                        scheme = amfi_data['code_lookup'].get(ticker_clean)
                         if scheme and scheme.get('name'):
                             amfi_name = scheme.get('name').strip()
                             # Only update if AMFI name is different and more specific (longer/more detailed)
@@ -6935,20 +6909,22 @@ def portfolio_overview_page():
                                     db.supabase.table('stock_master').update({
                                         'stock_name': amfi_name
                                     }).eq('id', stock_id).execute()
-                                    mf_updates.append(ticker)
-                                    print(f"[MF_RESOLVE] ✅ Updated {ticker}: '{stock_name}' → '{amfi_name}'")
+                                    mf_updates.append(ticker_clean)
+                                    print(f"[MF_RESOLVE] ✅ Updated {ticker_clean}: '{stock_name}' → '{amfi_name}'")
                                 except Exception as e:
-                                    print(f"[MF_RESOLVE] ⚠️ Failed to update {ticker}: {e}")
+                                    print(f"[MF_RESOLVE] ⚠️ Failed to update {ticker_clean}: {e}")
                             elif amfi_name and amfi_name.lower() != stock_name_lower:
                                 # Even if not longer, update if different (AMFI is authoritative)
                                 try:
                                     db.supabase.table('stock_master').update({
                                         'stock_name': amfi_name
                                     }).eq('id', stock_id).execute()
-                                    mf_updates.append(ticker)
-                                    print(f"[MF_RESOLVE] ✅ Updated {ticker}: '{stock_name}' → '{amfi_name}'")
+                                    mf_updates.append(ticker_clean)
+                                    print(f"[MF_RESOLVE] ✅ Updated {ticker_clean}: '{stock_name}' → '{amfi_name}'")
                                 except Exception as e:
-                                    print(f"[MF_RESOLVE] ⚠️ Failed to update {ticker}: {e}")
+                                    print(f"[MF_RESOLVE] ⚠️ Failed to update {ticker_clean}: {e}")
+                        else:
+                            print(f"[MF_RESOLVE] ⚠️ Ticker {ticker_clean} not found in AMFI dataset")
                 
                 # Check if PMS/AIF needs price update (current price equals average or is missing)
                 if asset_type in ['pms', 'aif']:
@@ -7054,8 +7030,10 @@ def portfolio_overview_page():
                 st.rerun()
         with col2:
             if st.button("🗑️ Clear Cache Only", help="Just clear cached holdings data"):
-                get_cached_holdings.clear()
-                get_portfolio_metrics.clear()
+                if hasattr(get_cached_holdings, 'clear'):
+                    get_cached_holdings.clear()
+                if hasattr(get_portfolio_metrics, 'clear'):
+                    get_portfolio_metrics.clear()
                 st.success("✅ Cache cleared!")
                 st.rerun()
     
