@@ -6603,6 +6603,64 @@ def portfolio_overview_page():
             if is_stale:
                 stale_prices.append(h)
     
+        # Show "Fix Asset Types" button if there are holdings with potentially wrong asset types
+        wrong_asset_types = []
+        for h in holdings:
+            ticker = str(h.get('ticker', '')).strip()
+            asset_type = h.get('asset_type', '')
+            # Check for numeric tickers that might be misclassified
+            if ticker.isdigit() and asset_type == 'mutual_fund':
+                # Check if it's actually a BSE stock (not in AMFI)
+                try:
+                    amfi_data = get_amfi_dataset()
+                    if amfi_data and 'code_lookup' in amfi_data:
+                        if ticker not in amfi_data['code_lookup']:
+                            # Not in AMFI, might be a stock
+                            wrong_asset_types.append(h)
+                except Exception:
+                    pass
+        
+        if wrong_asset_types:
+            if st.button(f"🔧 Fix {len(wrong_asset_types)} Asset Type(s)", help=f"Fix incorrectly classified asset types (e.g., BSE stocks marked as mutual funds)"):
+                with st.spinner(f"Fixing asset types for {len(wrong_asset_types)} holdings..."):
+                    fixed = 0
+                    for h in wrong_asset_types:
+                        ticker = h.get('ticker')
+                        stock_id = h.get('stock_id')
+                        try:
+                            # Try to fetch from yfinance to confirm it's a stock
+                            import yfinance as yf
+                            nse_ticker = f"{ticker}.NS"
+                            stock = yf.Ticker(nse_ticker)
+                            hist = stock.history(period='1d')
+                            if not hist.empty:
+                                # Found in yfinance, update to stock
+                                db.supabase.table('stock_master').update({
+                                    'asset_type': 'stock'
+                                }).eq('id', stock_id).execute()
+                                fixed += 1
+                                continue
+                            
+                            # Try BSE
+                            bse_ticker = f"{ticker}.BO"
+                            stock = yf.Ticker(bse_ticker)
+                            hist = stock.history(period='1d')
+                            if not hist.empty:
+                                # Found in yfinance BSE, update to stock
+                                db.supabase.table('stock_master').update({
+                                    'asset_type': 'stock'
+                                }).eq('id', stock_id).execute()
+                                fixed += 1
+                        except Exception:
+                            pass
+                    if fixed > 0:
+                        st.success(f"✅ Fixed {fixed} asset type(s)! Refreshing...")
+                        get_cached_holdings.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.warning("Could not verify asset types. They may be correct.")
+        
         # Show "Refresh All Prices" button if there are stale prices
         if stale_prices:
             if st.button(f"🔄 Refresh {len(stale_prices)} Price(s)", help=f"Refresh prices for holdings with missing or stale prices"):
@@ -6833,7 +6891,30 @@ def portfolio_overview_page():
             continue  # Skip fully sold positions - they shouldn't appear in holdings table
         
         # Handle None current_price - check both current_price and live_price fields
+        asset_type = holding.get('asset_type', 'stock')
         current_price = holding.get('current_price') or holding.get('live_price')
+        
+        # For PMS/AIF, if price is missing or equals average, try to calculate using CAGR
+        if asset_type in ['pms', 'aif'] and (current_price is None or current_price == 0 or current_price == holding.get('average_price', 0)):
+            try:
+                from enhanced_price_fetcher import EnhancedPriceFetcher
+                price_fetcher = EnhancedPriceFetcher()
+                ticker = holding.get('ticker')
+                if ticker:
+                    calculated_price, source = price_fetcher._get_pms_aif_price(ticker, asset_type)
+                    if calculated_price and calculated_price > 0:
+                        current_price = calculated_price
+                        # Update the holding's live_price in database
+                        try:
+                            db.supabase.table('stock_master').update({
+                                'live_price': calculated_price,
+                                'last_updated': datetime.now().isoformat()
+                            }).eq('id', holding.get('stock_id')).execute()
+                        except Exception:
+                            pass  # Silently fail if update fails
+            except Exception:
+                pass  # Fall back to average_price if calculation fails
+        
         if current_price is None or current_price == 0:
             current_price = holding.get('average_price', 0)
         current_value = quantity * float(current_price) if current_price else 0
