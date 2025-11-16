@@ -112,7 +112,8 @@ class PMS_AIF_Calculator:
             return result
             
         except Exception as e:
-            st.error(f"Error calculating PMS/AIF value for {ticker}: {str(e)}")
+            # Log error (don't use st.error as it may not be available)
+            print(f"[PMS_AIF] Error calculating value for {ticker}: {str(e)}")
             
             # Return zero-growth fallback
             return {
@@ -175,16 +176,27 @@ class PMS_AIF_Calculator:
             
             prompt = f"""You are a financial data expert. I need the CAGR (Compound Annual Growth Rate) for a {asset_type} (Portfolio Management Service/Alternative Investment Fund) with registration code {ticker}{name_context}{date_context}.
 
-CRITICAL: If exact data for this specific {asset_type} is not available, provide the CLOSEST available CAGR from:
-- Similar {asset_type} products from the same fund house
-- Industry average for similar strategy
-- Most recent available CAGR data for this {asset_type}
+IMPORTANT INSTRUCTIONS:
+1. First, search for the specific {asset_type} product with registration code {ticker}
+2. If found, use the actual CAGR data from SEBI, fund house website, or financial databases
+3. If NOT found, provide a reasonable estimate based on:
+   - Similar {asset_type} products from the same fund house (if name is provided)
+   - Industry average CAGR for similar strategy types
+   - Typical {asset_type} performance ranges (usually 8-25% CAGR for equity-focused, 6-12% for balanced)
+4. DO NOT return null/not_found unless you have absolutely no way to estimate
+
+For Indian PMS/AIF products:
+- Equity-focused PMS typically have 12-20% CAGR
+- Balanced PMS typically have 10-15% CAGR
+- Large-cap focused typically have 10-18% CAGR
+- Mid-cap focused typically have 15-25% CAGR
+- AIF Category III typically have 12-22% CAGR
 
 Please provide:
 1. The CAGR percentage (as a decimal, e.g., 0.15 for 15%)
 2. The period this CAGR is based on (e.g., "3Y", "5Y", "Since Inception", etc.)
-3. The source of this data (e.g., "SEBI", "Fund House", "Industry Average", "Similar Product")
-4. Whether this is exact data or closest available (use "exact" or "closest_available")
+3. The source of this data (e.g., "SEBI", "Fund House", "Industry Average", "Similar Product", "Estimated")
+4. Whether this is exact data or estimated (use "exact" or "closest_available")
 
 Return ONLY a JSON object with this exact format:
 {{
@@ -194,21 +206,15 @@ Return ONLY a JSON object with this exact format:
     "data_type": "exact"
 }}
 
-OR if using closest available:
+OR if using closest available/estimated:
 {{
-    "cagr": 0.12,
+    "cagr": 0.14,
     "period": "3Y",
-    "source": "Similar Product/Industry Average",
+    "source": "Industry Average/Estimated",
     "data_type": "closest_available"
 }}
 
-If absolutely no data is available (not even similar products), return:
-{{
-    "cagr": null,
-    "period": null,
-    "source": "Not Found",
-    "data_type": "not_found"
-}}"""
+CRITICAL: Always provide a CAGR value (between 0.08 and 0.25 for typical Indian PMS/AIF). Only return null if you cannot provide any reasonable estimate."""
 
             response = client.chat.completions.create(
                 model="gpt-4o",
@@ -222,25 +228,38 @@ If absolutely no data is available (not even similar products), return:
             )
             
             content = response.choices[0].message.content
+            print(f"[PMS_AIF_AI] Raw AI response for {ticker}: {content[:200]}")
             result = json.loads(content)
+            print(f"[PMS_AIF_AI] Parsed result: {result}")
             
-            if result.get('cagr') is not None and result.get('cagr') != 'null':
-                cagr = float(result['cagr'])
-                if 0 < cagr < 1:  # CAGR should be between 0% and 100%
-                    data_type = result.get('data_type', 'exact')
-                    period = result.get('period', 'AI Estimated')
-                    source = result.get('source', 'AI')
+            cagr_value = result.get('cagr')
+            if cagr_value is not None and cagr_value != 'null':
+                try:
+                    cagr = float(cagr_value)
+                    print(f"[PMS_AIF_AI] CAGR as float: {cagr}")
                     
-                    # Log if using closest available data
-                    if data_type == 'closest_available':
-                        print(f"[PMS_AIF_AI] 📅 {ticker}: Using closest available CAGR {cagr*100:.1f}% ({period}) from {source}")
-                    
-                    return {
-                        'cagr': cagr,
-                        'period': period,
-                        'source': source,
-                        'data_type': data_type
-                    }
+                    # Allow CAGR up to 2.0 (200%) for exceptional cases
+                    if 0 < cagr <= 2.0:
+                        data_type = result.get('data_type', 'exact')
+                        period = result.get('period', 'AI Estimated')
+                        source = result.get('source', 'AI')
+                        
+                        # Log if using closest available data
+                        if data_type == 'closest_available':
+                            print(f"[PMS_AIF_AI] Using closest available CAGR {cagr*100:.1f}% ({period}) from {source}")
+                        
+                        return {
+                            'cagr': cagr,
+                            'period': period,
+                            'source': source,
+                            'data_type': data_type
+                        }
+                    else:
+                        print(f"[PMS_AIF_AI] CAGR {cagr} is outside valid range (0-2.0)")
+                except (ValueError, TypeError) as e:
+                    print(f"[PMS_AIF_AI] Failed to convert CAGR to float: {cagr_value}, error: {e}")
+            else:
+                print(f"[PMS_AIF_AI] CAGR is None or null: {cagr_value}")
             
             return None
             

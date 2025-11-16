@@ -1144,6 +1144,33 @@ class EnhancedPriceFetcher:
         except Exception:
             pass
         
+        # Method 1.5: NEW! Try name-based search if code fails but we have fund name
+        if fund_name:
+            try:
+                resolved = self._resolve_mf_code_by_name(scheme_code, fund_name)
+                if resolved:
+                    correct_code = resolved['code']
+                    confidence = resolved['score']
+                    
+                    # Try fetching with resolved code
+                    try:
+                        dataset = self._get_amfi_dataset()
+                        scheme_entry = dataset.get("code_lookup", {}).get(correct_code)
+                        if scheme_entry:
+                            nav_value = scheme_entry.get("nav")
+                            if nav_value:
+                                price = float(nav_value)
+                                if price > 0:
+                                    # Success! Log the resolution
+                                    print(f"[MF_RESOLVE] ✅ Auto-resolved {scheme_code} → {correct_code} (confidence: {confidence*100:.0f}%)")
+                                    print(f"[MF_RESOLVE] 💡 Suggestion: Update CSV - replace {scheme_code} with {correct_code}")
+                                    return price, f'amfi_name_resolved:{correct_code}'
+                    except Exception:
+                        pass
+            except Exception as e:
+                # Name-based search failed, continue to other fallbacks
+                pass
+        
         # Method 2: AI Fallback with Enhanced Context
         # Trying AI (OpenAI) with enhanced context
         if self.ai_available:
@@ -1245,7 +1272,8 @@ class EnhancedPriceFetcher:
 
     def _get_pms_aif_price(self, ticker: str, asset_type: str) -> Tuple[Optional[float], str]:
         """Get PMS/AIF price using earliest transaction available."""
-        if not self.pms_aif_calculator:
+        calculator = self._get_pms_aif_calculator()
+        if not calculator:
             return None, 'cagr_calculator_unavailable'
 
         try:
@@ -1290,6 +1318,66 @@ class EnhancedPriceFetcher:
         except Exception as exc:
             return None, f'cagr_error:{exc}'
 
+    def _resolve_mf_code_by_name(self, old_code: str, fund_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Resolve incorrect/old MF code by searching AMFI dataset by name
+        Returns the best matching scheme with high confidence
+        
+        Args:
+            old_code: The code that failed
+            fund_name: Fund name to search for
+            
+        Returns:
+            Dict with 'code', 'name', 'score' if found, None otherwise
+        """
+        try:
+            from difflib import SequenceMatcher
+            
+            dataset = self._get_amfi_dataset()
+            if not dataset:
+                return None
+            
+            code_lookup = dataset.get('code_lookup', {})
+            if not code_lookup:
+                return None
+            
+            # Calculate similarity scores for all schemes
+            matches = []
+            fund_name_lower = fund_name.lower()
+            
+            for code, scheme_data in code_lookup.items():
+                scheme_name = scheme_data.get('name', '')
+                if not scheme_name:
+                    continue
+                
+                # Calculate similarity score
+                score = SequenceMatcher(None, fund_name_lower, scheme_name.lower()).ratio()
+                
+                # Only consider good matches (>70% similarity)
+                if score > 0.7:
+                    nav = scheme_data.get('nav', '0')
+                    # Only consider schemes with valid NAV
+                    if nav and float(nav) > 0:
+                        matches.append({
+                            'code': code,
+                            'name': scheme_name,
+                            'nav': nav,
+                            'score': score
+                        })
+            
+            # Sort by score descending
+            matches.sort(key=lambda x: x['score'], reverse=True)
+            
+            # Return best match if confidence is high enough
+            if matches and matches[0]['score'] > 0.75:  # 75% confidence threshold
+                return matches[0]
+            
+            return None
+            
+        except Exception as e:
+            # Silently fail and let other fallbacks handle it
+            return None
+    
     @staticmethod
     def _normalize_scheme_name(name: str) -> str:
         cleaned = name.lower().strip()
@@ -2259,28 +2347,28 @@ If not found, return: NOT_FOUND"""
                                     target_dt = start_dt
                                     closest_date = None
                                     min_diff = float('inf')
+                                
+                                for date, row in hist_expanded.iterrows():
+                                    if date.tzinfo is None:
+                                        date = pytz.UTC.localize(date)
                                     
-                                    for date, row in hist_expanded.iterrows():
-                                        if date.tzinfo is None:
-                                            date = pytz.UTC.localize(date)
-                                        
-                                        date_diff = abs((date - target_dt).days)
-                                        if date_diff < min_diff:
-                                            min_diff = date_diff
-                                            closest_date = date
-                                    
+                                    date_diff = abs((date - target_dt).days)
+                                    if date_diff < min_diff:
+                                        min_diff = date_diff
+                                        closest_date = date
+                                
                                     # Use closest date if within 30 days
                                     if closest_date and min_diff <= 30:
                                         closest_price = float(hist_expanded.loc[closest_date, 'Close'])
                                         print(f"[HIST_PRICE] 📅 {ticker}: Using closest price date {closest_date.strftime('%Y-%m-%d')} (target: {start_date}, diff: {min_diff} days)")
-                                        return [{
-                                            'asset_symbol': ticker,
-                                            'asset_type': 'stock',
-                                            'price': closest_price,
-                                            'price_date': closest_date.strftime('%Y-%m-%d'),
-                                            'volume': int(hist_expanded.loc[closest_date, 'Volume'])
-                                        }]
-                                else:
+                                    return [{
+                                        'asset_symbol': ticker,
+                                        'asset_type': 'stock',
+                                        'price': closest_price,
+                                        'price_date': closest_date.strftime('%Y-%m-%d'),
+                                        'volume': int(hist_expanded.loc[closest_date, 'Volume'])
+                                    }]
+                            else:
                                     # For date range, find closest dates for start and end
                                     prices = []
                                     
