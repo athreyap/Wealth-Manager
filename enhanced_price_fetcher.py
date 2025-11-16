@@ -225,11 +225,41 @@ class EnhancedPriceFetcher:
                 avg_price_for_fallback = holding.get('average_price', 0)
                 self._last_holding_avg_price = avg_price_for_fallback if avg_price_for_fallback > 0 else None
                 current_price, source = self._get_mf_price_with_fallback(ticker, fund_name)
-                # If price fetch failed, use average price to avoid 0% returns
+                
+                # Check if this is a segregated/discontinued fund
+                is_segregated = fund_name and ('segregated' in fund_name.lower() or 'segregated portfolio' in fund_name.lower())
+                
+                # If price fetch failed, only use average price as fallback if NOT a segregated fund
+                # Segregated funds should show actual price (even if 0) or try harder to find replacement fund
                 if not current_price or current_price <= 0:
-                    if avg_price_for_fallback > 0:
+                    if is_segregated:
+                        # For segregated funds, try name-based resolution to find replacement fund
+                        print(f"[MF_PRICE] ⚠️ {ticker} ({fund_name[:50]}): Price fetch failed - segregated fund, trying harder...")
+                        # Try to find the parent fund or replacement fund by removing "Segregated Portfolio" from name
+                        if fund_name:
+                            parent_fund_name = fund_name.replace('Segregated Portfolio', '').replace('Segregated', '').strip()
+                            parent_fund_name = re.sub(r'\s+', ' ', parent_fund_name)  # Clean up extra spaces
+                            if parent_fund_name and parent_fund_name != fund_name:
+                                print(f"[MF_PRICE] 🔍 Trying parent fund name: {parent_fund_name[:50]}")
+                                parent_price, parent_source = self._get_mf_price_with_fallback(ticker, parent_fund_name)
+                                if parent_price and parent_price > 0:
+                                    current_price = parent_price
+                                    source = f'parent_fund_{parent_source}'
+                                    print(f"[MF_PRICE] ✅ Found parent fund price: ₹{current_price}")
+                        
+                        # If still no price, don't use average - let it show as unavailable
+                        if not current_price or current_price <= 0:
+                            current_price = None
+                            source = 'segregated_fund_unavailable'
+                            print(f"[MF_PRICE] ❌ {ticker}: Segregated fund - price unavailable (not using average price fallback)")
+                        else:
+                            # Price was found (either from parent fund or resolved code) - use it!
+                            print(f"[MF_PRICE] ✅ {ticker}: Segregated fund - using resolved price ₹{current_price:.2f} from {source}")
+                    elif avg_price_for_fallback > 0:
+                        # For regular funds, use average price as fallback
                         current_price = avg_price_for_fallback
                         source = 'average_price_fallback'
+                        print(f"[MF_PRICE] ⚠️ {ticker}: Using average price as fallback (price fetch failed)")
                 # OPTIMIZATION: Don't update DB here - will be batched later
                     
             elif asset_type in ['pms', 'aif']:
@@ -1226,6 +1256,13 @@ class EnhancedPriceFetcher:
                     price = float(nav_value)
                     if price > 0:
                         return price, 'amfi_dataset'
+                    else:
+                        # NAV = 0 means discontinued/segregated fund - log it
+                        scheme_name = scheme_entry.get("name", "")
+                        if "segregated" in scheme_name.lower() or "segregated portfolio" in scheme_name.lower():
+                            print(f"[MF_PRICE] ⚠️ {scheme_code} ({scheme_name[:50]}): NAV = 0.00 - Segregated/Discontinued fund")
+                        else:
+                            print(f"[MF_PRICE] ⚠️ {scheme_code} ({scheme_name[:50]}): NAV = 0.00 - Discontinued fund")
         except Exception:
             pass
         
@@ -1412,6 +1449,7 @@ class EnhancedPriceFetcher:
         """
         Resolve incorrect/old MF code by searching AMFI dataset by name
         Returns the best matching scheme with high confidence
+        Handles segregated portfolios by trying parent fund name
         
         Args:
             old_code: The code that failed
@@ -1422,6 +1460,7 @@ class EnhancedPriceFetcher:
         """
         try:
             from difflib import SequenceMatcher
+            import re
             
             dataset = self._get_amfi_dataset()
             if not dataset:
@@ -1431,29 +1470,48 @@ class EnhancedPriceFetcher:
             if not code_lookup:
                 return None
             
+            # For segregated portfolios, try parent fund name first
+            search_names = [fund_name]
+            if 'segregated' in fund_name.lower() or 'segregated portfolio' in fund_name.lower():
+                # Try parent fund name by removing segregated portfolio details
+                parent_name = fund_name
+                # Remove patterns like "Segregated Portfolio 1", "8.25% Vodafone Idea Ltd-10JUL20", etc.
+                parent_name = re.sub(r'-?\s*Segregated Portfolio\s*\d+', '', parent_name, flags=re.IGNORECASE)
+                parent_name = re.sub(r'-?\s*\d+\.\d+%[^-]*-?\d+[A-Z]{3}\d+', '', parent_name)  # Remove percentage and date patterns
+                parent_name = re.sub(r'-?\s*Monthly\s+Dividend\s+Plan', '', parent_name, flags=re.IGNORECASE)
+                parent_name = re.sub(r'-?\s*Quarterly\s+IDCW', '', parent_name, flags=re.IGNORECASE)
+                parent_name = re.sub(r'-?\s*IDCW\s+Option', '', parent_name, flags=re.IGNORECASE)
+                parent_name = re.sub(r'\s+', ' ', parent_name).strip()  # Clean up spaces
+                if parent_name and parent_name != fund_name:
+                    search_names.insert(0, parent_name)  # Try parent name first
+                    print(f"[MF_RESOLVE] 🔍 Segregated fund detected, trying parent: '{parent_name[:60]}'")
+            
             # Calculate similarity scores for all schemes
             matches = []
-            fund_name_lower = fund_name.lower()
             
-            for code, scheme_data in code_lookup.items():
-                scheme_name = scheme_data.get('name', '')
-                if not scheme_name:
-                    continue
+            for search_name in search_names:
+                fund_name_lower = search_name.lower()
                 
-                # Calculate similarity score
-                score = SequenceMatcher(None, fund_name_lower, scheme_name.lower()).ratio()
-                
-                # Only consider good matches (>70% similarity)
-                if score > 0.7:
-                    nav = scheme_data.get('nav', '0')
-                    # Only consider schemes with valid NAV
-                    if nav and float(nav) > 0:
-                        matches.append({
-                            'code': code,
-                            'name': scheme_name,
-                            'nav': nav,
-                            'score': score
-                        })
+                for code, scheme_data in code_lookup.items():
+                    scheme_name = scheme_data.get('name', '')
+                    if not scheme_name:
+                        continue
+                    
+                    # Calculate similarity score
+                    score = SequenceMatcher(None, fund_name_lower, scheme_name.lower()).ratio()
+                    
+                    # Only consider good matches (>70% similarity)
+                    if score > 0.7:
+                        nav = scheme_data.get('nav', '0')
+                        # Only consider schemes with valid NAV
+                        if nav and float(nav) > 0:
+                            matches.append({
+                                'code': code,
+                                'name': scheme_name,
+                                'nav': nav,
+                                'score': score,
+                                'search_name': search_name  # Track which name matched
+                            })
             
             # Sort by score descending
             matches.sort(key=lambda x: x['score'], reverse=True)
