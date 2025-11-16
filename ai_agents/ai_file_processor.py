@@ -1467,6 +1467,10 @@ CRITICAL RULES:
                 # For mutual funds without ticker, use fund name - price fetcher will resolve ticker
                 ticker = fund_name  # Temporary - will be resolved during fetch
                 print(f"[VALIDATE] 🔍 Mutual fund without ticker, using fund name for resolution: {fund_name}")
+            elif asset_type == 'stock' and fund_name:
+                # For stocks without ticker, use stock name - price fetcher will resolve ticker using AI + yfinance
+                ticker = fund_name  # Temporary - will be resolved during fetch
+                print(f"[VALIDATE] 🔍 Stock without ticker, using stock name for resolution: {fund_name}")
             else:
                 return None, None
 
@@ -1502,11 +1506,16 @@ CRITICAL RULES:
             else:
                 ticker_for_fetch = ticker
             print(f"[FETCH_PRICE] Fetching historical price for {ticker_for_fetch} ({asset_type}) on {date}")
+            # Get stock_id if available from transaction (for stored ticker lookup)
+            stock_id = trans.get('stock_id')
+            db_manager = getattr(self, 'db_manager', None)
             fetched_price = price_fetcher.get_historical_price(
                 ticker_for_fetch,
                 asset_type,
                 date,
-                fund_name=fund_name
+                fund_name=fund_name,
+                stock_id=stock_id,
+                db_manager=db_manager
             )
 
             if fetched_price and fetched_price > 0:

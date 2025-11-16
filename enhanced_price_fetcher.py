@@ -155,7 +155,11 @@ class EnhancedPriceFetcher:
             if age < self.cache_timeout:
                 return cached_data['price'], cached_data.get('source', 'cache')
         
-        self._last_resolved_ticker = ticker
+        # CRITICAL: Clear resolved ticker at START of each fetch to prevent cross-contamination
+        # between parallel/sequential holdings
+        self._last_resolved_ticker = None
+        self._last_resolved_fund_name = None
+        
         price = None
         source = 'unknown'
         
@@ -215,11 +219,55 @@ class EnhancedPriceFetcher:
             source = None
             
             if asset_type == 'stock':
+                # CRITICAL: Clear resolved ticker at START of each holding to prevent cross-contamination
+                self._last_resolved_ticker = None
+                self._last_resolved_fund_name = None
+                
+                # STEP 1: Try to get stored ticker from stock_master (if available)
+                stored_ticker = None
                 stock_name = holding.get('stock_name')
+                try:
+                    if stock_id and db_manager:
+                        stock_info = db_manager.supabase.table('stock_master').select('ticker, stock_name').eq('id', stock_id).execute()
+                        if stock_info.data and len(stock_info.data) > 0:
+                            stored_ticker = stock_info.data[0].get('ticker')
+                            stored_name = stock_info.data[0].get('stock_name')
+                            if stored_ticker and stored_ticker != ticker:
+                                print(f"[PRICE_UPDATE] 📋 Using stored ticker from stock_master: {ticker} → {stored_ticker} (stock_id: {stock_id})")
+                                ticker = stored_ticker
+                                if stored_name and not stock_name:
+                                    stock_name = stored_name
+                except Exception as e:
+                    print(f"[PRICE_UPDATE] ⚠️ Could not fetch stored ticker: {str(e)[:100]}")
+                
+                # STEP 2: Try fetching with stored ticker (or original ticker)
                 current_price, source = self._get_stock_price_with_fallback(ticker, stock_name)
+                
+                # STEP 3: If stored ticker failed and we have stock_name, try AI resolution
+                if (not current_price or current_price <= 0) and stock_name and not stored_ticker:
+                    print(f"[PRICE_UPDATE] 🔍 Stored ticker failed, trying AI resolution from name: '{stock_name}'")
+                    resolved_ticker = self._resolve_stock_ticker_by_name(stock_name)
+                    if resolved_ticker and resolved_ticker != ticker:
+                        print(f"[PRICE_UPDATE] ✅ AI resolved ticker: {ticker} → {resolved_ticker}")
+                        current_price, source = self._get_stock_price_with_fallback(resolved_ticker, stock_name)
+                        if current_price and current_price > 0:
+                            # Update stock_master with resolved ticker
+                            try:
+                                if stock_id and db_manager:
+                                    db_manager.supabase.table('stock_master').update({
+                                        'ticker': resolved_ticker,
+                                        'last_updated': datetime.now().isoformat()
+                                    }).eq('id', stock_id).execute()
+                                    print(f"[PRICE_UPDATE] 💾 Updated stock_master with resolved ticker: {resolved_ticker}")
+                            except Exception as e:
+                                print(f"[PRICE_UPDATE] ⚠️ Could not update stock_master: {str(e)[:100]}")
                 # OPTIMIZATION: Don't update DB here - will be batched later
                     
             elif asset_type == 'mutual_fund':
+                # CRITICAL: Clear resolved ticker at START of each holding to prevent cross-contamination
+                self._last_resolved_ticker = None
+                self._last_resolved_fund_name = None
+                
                 fund_name = holding.get('scheme_name') or holding.get('stock_name', '')
                 # Store average price for fallback if price fetch fails (for regular funds only)
                 avg_price_for_fallback = holding.get('average_price', 0)
@@ -274,8 +322,36 @@ class EnhancedPriceFetcher:
                         pass
                 
                 # For stocks, use _last_resolved_ticker if set
-                if not resolved_ticker:
+                if not resolved_ticker and asset_type == 'stock':
                     resolved_ticker = getattr(self, "_last_resolved_ticker", None)
+                    # CRITICAL: Validate that resolved ticker is actually related to original ticker
+                    if resolved_ticker:
+                        original_base = self._base_symbol(ticker)
+                        resolved_base = self._base_symbol(resolved_ticker)
+                        # Only use resolved ticker if base symbols match exactly (same stock, different exchange suffix)
+                        if original_base != resolved_base:
+                            # Resolved ticker is for a completely different stock - ignore it
+                            print(f"[PRICE_UPDATE] ⚠️ Ignoring wrong resolved ticker: {ticker} → {resolved_ticker} (different base: {original_base} vs {resolved_base})")
+                            resolved_ticker = None
+                
+                # CRITICAL: For mutual funds, allow resolution to:
+                # 1. Other numeric MF codes
+                # 2. ETF tickers (ETFs can be stored as mutual funds, e.g., GROWWEV, SILVERBEES)
+                if asset_type == 'mutual_fund' and resolved_ticker:
+                    resolved_clean = str(resolved_ticker).strip().replace('.NS', '').replace('.BO', '')
+                    is_numeric_mf = resolved_clean.isdigit() or str(resolved_ticker).isdigit()
+                    # Check if it's an ETF (common ETF patterns: ends with BEES, contains ETF, or known ETF tickers)
+                    is_etf = (
+                        'BEES' in resolved_clean.upper() or
+                        'ETF' in resolved_clean.upper() or
+                        resolved_clean.upper() in ['GROWWEV', 'SILVERBEES', 'GOLDBEES', 'NIFTYBEES', 'BANKBEES']
+                    )
+                    if not is_numeric_mf and not is_etf:
+                        # Resolved to a regular stock ticker - this is wrong for mutual funds (unless it's an ETF)
+                        print(f"[PRICE_UPDATE] ⚠️ Ignoring wrong resolved ticker for MF: {ticker} → {resolved_ticker} (MF code or ETF expected, got stock ticker)")
+                        resolved_ticker = None
+                    elif is_etf:
+                        print(f"[PRICE_UPDATE] ✅ Allowing MF → ETF resolution: {ticker} → {resolved_ticker} (ETF detected)")
                 
                 # Only include resolved_ticker if it's different from current ticker
                 price_data = {
@@ -1033,28 +1109,103 @@ class EnhancedPriceFetcher:
     def _get_stock_price_with_fallback(self, ticker: str, context_name: Optional[str] = None) -> tuple:
         """
         Stock price fetching with complete fallback:
-        1. yfinance NSE (.NS)
-        2. yfinance BSE (.BO)
+        1. yfinance with .NS (if ticker doesn't already have suffix)
+        2. yfinance with .BO (if ticker doesn't already have suffix)
         3. yfinance without suffix
-        4. mftool (in case it's a mutual fund misclassified as stock)
-        5. AI (OpenAI)
+        4. Other variants/aliases
+        5. mftool (in case it's a mutual fund misclassified as stock)
+        6. AI (OpenAI)
         """
-        # Fetching with fallback chain (silent)
+        # CRITICAL: Clear resolved ticker at start
+        self._last_resolved_ticker = None
+        
+        # Normalize the base ticker
         base_ticker = self._normalize_base_ticker(ticker)
+        has_ns = base_ticker.endswith('.NS')
+        has_bo = base_ticker.endswith('.BO')
+        
+        # STEP 1: Try the ticker with .NS and .BO FIRST (if it doesn't already have a suffix)
+        # This is the most common case and should be tried before other variants
+        if not has_ns and not has_bo:
+            # Try .NS first
+            nse_ticker = f"{base_ticker}.NS"
+            result = self._try_single_ticker_variant(nse_ticker, 'nse')
+            if result:
+                price, source = result
+                # Set resolved ticker only if base matches
+                original_base = self._base_symbol(ticker)
+                resolved_base = self._base_symbol(nse_ticker)
+                if original_base == resolved_base:
+                    self._last_resolved_ticker = nse_ticker
+                return price, source
+            
+            # Try .BO second
+            bse_ticker = f"{base_ticker}.BO"
+            result = self._try_single_ticker_variant(bse_ticker, 'bse')
+            if result:
+                price, source = result
+                # Set resolved ticker only if base matches
+                original_base = self._base_symbol(ticker)
+                resolved_base = self._base_symbol(bse_ticker)
+                if original_base == resolved_base:
+                    self._last_resolved_ticker = bse_ticker
+                return price, source
+        
+        # STEP 2: If ticker already has .NS or .BO, try it directly
+        if has_ns or has_bo:
+            result = self._try_single_ticker_variant(base_ticker, 'nse' if has_ns else 'bse')
+            if result:
+                price, source = result
+                # Set resolved ticker only if base matches
+                original_base = self._base_symbol(ticker)
+                resolved_base = self._base_symbol(base_ticker)
+                if original_base == resolved_base:
+                    self._last_resolved_ticker = base_ticker
+                return price, source
+        
+        # STEP 3: Try without suffix
+        if not has_ns and not has_bo:
+            result = self._try_single_ticker_variant(base_ticker, 'raw')
+            if result:
+                price, source = result
+                # Set resolved ticker only if base matches
+                original_base = self._base_symbol(ticker)
+                resolved_base = self._base_symbol(base_ticker)
+                if original_base == resolved_base:
+                    self._last_resolved_ticker = base_ticker
+                return price, source
+        
+        # STEP 3.5: If ticker is missing/invalid and we have stock name, try AI + yfinance to resolve ticker
+        ticker_clean = str(ticker).strip() if ticker else ''
+        if (not ticker_clean or len(ticker_clean) < 2) and context_name:
+            print(f"[STOCK_RESOLVE] 🔍 Resolving stock ticker from name: '{context_name}'")
+            resolved_ticker = self._resolve_stock_ticker_by_name(context_name)
+            if resolved_ticker:
+                # Try fetching price with resolved ticker
+                print(f"[STOCK_RESOLVE] ✅ Resolved stock ticker: '{context_name}' → {resolved_ticker}")
+                result = self._try_single_ticker_variant(resolved_ticker, 'nse')
+                if result:
+                    price, source = result
+                    # Validate resolved ticker matches
+                    resolved_base = self._base_symbol(resolved_ticker)
+                    if resolved_base:  # If we got a valid ticker, use it
+                        self._last_resolved_ticker = resolved_ticker
+                    return price, source
+                # Try BSE variant
+                result = self._try_single_ticker_variant(resolved_ticker, 'bse')
+                if result:
+                    price, source = result
+                    resolved_base = self._base_symbol(resolved_ticker)
+                    if resolved_base:
+                        self._last_resolved_ticker = resolved_ticker
+                    return price, source
+        
+        # STEP 4: If direct attempts failed, try other variants/aliases (fallback)
         stock_name_hint = context_name or self._get_stock_name_from_cache(base_ticker)
         base_candidates = self._generate_stock_aliases(base_ticker, stock_name_hint)
         symbol_variants = self._expand_symbol_variants(base_candidates or [base_ticker])
-        symbol_variants.insert(0, base_ticker)
-        # Only add .NS/.BO if base_ticker doesn't already have them
-        if not base_ticker.endswith('.NS') and not base_ticker.endswith('.BO'):
-            symbol_variants.insert(1, f"{base_ticker}.NS")
-            symbol_variants.insert(2, f"{base_ticker}.BO")
-
-        self._last_resolved_ticker = base_candidates[0] if base_candidates else base_ticker
         
-        # PARALLEL FETCHING: Try all variants concurrently for much faster results
-        # Priority order: NSE > BSE > Raw (without suffix)
-        # OPTIMIZATION: More efficient variant filtering - avoid duplicates
+        # Remove duplicates and prioritize .NS/.BO variants
         nse_variants = []
         bse_variants = []
         raw_variants_set = set()
@@ -1074,7 +1225,7 @@ class EnhancedPriceFetcher:
         
         raw_variants = list(raw_variants_set)
         
-        # Try NSE variants in parallel (highest priority)
+        # Try NSE variants in parallel (fallback)
         # OPTIMIZATION: Cancel remaining futures when we find a result
         with ThreadPoolExecutor(max_workers=min(10, len(nse_variants))) as executor:
             futures = {executor.submit(self._try_single_ticker_variant, variant, 'nse'): variant 
@@ -1098,7 +1249,18 @@ class EnhancedPriceFetcher:
                     else:
                         # Variant has no suffix, add .NS
                         clean_formatted = self._normalize_base_ticker(variant) + '.NS'
-                    self._last_resolved_ticker = clean_formatted
+                    
+                    # CRITICAL: Only set resolved ticker if it's actually related to the original ticker
+                    # Check if the base symbols match (without .NS/.BO suffixes) - must be exact match
+                    original_base = self._base_symbol(ticker)
+                    resolved_base = self._base_symbol(clean_formatted)
+                    # Only set if base symbols match exactly (same stock, just different exchange suffix)
+                    if original_base == resolved_base:
+                        self._last_resolved_ticker = clean_formatted
+                    else:
+                        # Different stock - don't set resolved ticker
+                        print(f"[PRICE_UPDATE] ⚠️ Ignoring wrong variant match: {ticker} (base: {original_base}) → {clean_formatted} (base: {resolved_base})")
+                    
                     return price, source
         
         # Try BSE variants in parallel (second priority)
@@ -1124,7 +1286,18 @@ class EnhancedPriceFetcher:
                     else:
                         # Variant has no suffix, add .BO
                         clean_formatted = self._normalize_base_ticker(variant) + '.BO'
-                    self._last_resolved_ticker = clean_formatted
+                    
+                    # CRITICAL: Only set resolved ticker if it's actually related to the original ticker
+                    # Check if the base symbols match (without .NS/.BO suffixes) - must be exact match
+                    original_base = self._base_symbol(ticker)
+                    resolved_base = self._base_symbol(clean_formatted)
+                    # Only set if base symbols match exactly (same stock, just different exchange suffix)
+                    if original_base == resolved_base:
+                        self._last_resolved_ticker = clean_formatted
+                    else:
+                        # Different stock - don't set resolved ticker
+                        print(f"[PRICE_UPDATE] ⚠️ Ignoring wrong variant match: {ticker} (base: {original_base}) → {clean_formatted} (base: {resolved_base})")
+                    
                     return price, source
         
         # Try raw variants in parallel (third priority)
@@ -1141,7 +1314,18 @@ class EnhancedPriceFetcher:
                     price, source = result
                     variant = futures[future]
                     clean_ticker = self._normalize_base_ticker(variant)
-                    self._last_resolved_ticker = clean_ticker
+                    
+                    # CRITICAL: Only set resolved ticker if it's actually related to the original ticker
+                    # Check if the base symbols match (without .NS/.BO suffixes) - must be exact match
+                    original_base = self._base_symbol(ticker)
+                    resolved_base = self._base_symbol(clean_ticker)
+                    # Only set if base symbols match exactly (same stock, just different exchange suffix)
+                    if original_base == resolved_base:
+                        self._last_resolved_ticker = clean_ticker
+                    else:
+                        # Different stock - don't set resolved ticker
+                        print(f"[PRICE_UPDATE] ⚠️ Ignoring wrong variant match: {ticker} (base: {original_base}) → {clean_ticker} (base: {resolved_base})")
+                    
                     return price, source
         
         # Method 4: Try mftool (in case it's a mutual fund)
@@ -1187,14 +1371,44 @@ class EnhancedPriceFetcher:
     def _get_mf_price_with_fallback(self, ticker: str, fund_name: str = None) -> tuple:
         """
         Mutual Fund price with fallback:
-        1. mftool (AMFI API)
-        2. AI (OpenAI)
+        1. Resolve ticker from fund name if ticker is missing/invalid
+        2. mftool (AMFI API) using resolved ticker
+        3. AI (OpenAI)
         """
-        # Fetching MF with fallback chain
+        # CRITICAL: Clear resolved ticker at start
+        self._last_resolved_ticker = None
+        self._last_resolved_fund_name = None
         
-        resolved_code = self._resolve_amfi_code(ticker, fund_name)
-        scheme_code = resolved_code or ticker
-        self._last_resolved_ticker = scheme_code
+        # STEP 1: If ticker is missing or invalid, resolve from fund name FIRST
+        scheme_code = None
+        resolved_fund_name = None
+        
+        # Check if ticker is missing, empty, or not a valid numeric code
+        ticker_clean = str(ticker).strip() if ticker else ''
+        is_valid_mf_code = ticker_clean.isdigit() and len(ticker_clean) >= 5
+        
+        if (not ticker_clean or not is_valid_mf_code) and fund_name:
+            # Ticker is missing/invalid - resolve from fund name
+            print(f"[MF_PRICE] 🔍 Resolving MF ticker from fund name: '{fund_name}'")
+            resolved = self._resolve_mf_code_by_name(ticker_clean or '', fund_name)
+            if resolved and resolved.get('code'):
+                scheme_code = resolved['code']
+                resolved_fund_name = resolved.get('name', '')
+                self._last_resolved_ticker = scheme_code
+                self._last_resolved_fund_name = resolved_fund_name
+                print(f"[MF_PRICE] ✅ Resolved MF ticker from name: '{fund_name}' → {scheme_code} (confidence: {resolved.get('score', 0)*100:.0f}%)")
+            else:
+                # Name-based resolution failed, try using fund name as ticker (for ETFs)
+                print(f"[MF_PRICE] ⚠️ Name-based resolution failed for '{fund_name}', will try with original ticker")
+        
+        # STEP 2: If we have a valid ticker or resolved code, use it
+        if not scheme_code:
+            # Try to resolve using _resolve_amfi_code (for existing codes)
+            resolved_code = self._resolve_amfi_code(ticker, fund_name)
+            scheme_code = resolved_code or ticker_clean
+            if resolved_code and resolved_code != ticker_clean:
+                self._last_resolved_ticker = scheme_code
+                print(f"[MF_PRICE] 🔄 Resolved MF code: {ticker_clean} → {scheme_code}")
 
         normalized_code = (scheme_code or "").strip()
         upper_code = normalized_code.upper()
@@ -1680,6 +1894,152 @@ class EnhancedPriceFetcher:
 
         self._cached_scheme_maps = (code_to_name, name_to_code)
         return self._cached_scheme_maps
+
+    def _resolve_stock_ticker_by_name(self, stock_name: str) -> Optional[str]:
+        """
+        Resolve stock ticker from stock name using AI and yfinance.
+        
+        Args:
+            stock_name: Full name of the stock (e.g., "Tata Steel Limited", "Reliance Industries")
+        
+        Returns:
+            Resolved ticker symbol (e.g., "TATASTEEL.NS", "RELIANCE.NS") or None
+        """
+        if not stock_name or len(stock_name.strip()) < 3:
+            return None
+        
+        stock_name_clean = stock_name.strip()
+        
+        # STEP 1: Try AI to get ticker suggestions
+        ai_ticker = None
+        try:
+            # Check if AI is available
+            if hasattr(self, 'ai_available') and self.ai_available and hasattr(self, 'openai_client') and self.openai_client:
+                try:
+                    system_prompt = """You are a financial data expert specializing in Indian stock markets (NSE and BSE).
+Your task is to find the correct ticker symbol for a given stock name.
+Return ONLY the ticker symbol (e.g., RELIANCE, TATASTEEL, INFY) without .NS or .BO suffix.
+If multiple exchanges exist, prefer NSE ticker."""
+                    
+                    user_prompt = f"""Find the ticker symbol for this Indian stock:
+Stock Name: {stock_name_clean}
+
+Return format: Just the ticker symbol, nothing else.
+Examples:
+- For "Tata Steel Limited" → TATASTEEL
+- For "Reliance Industries Limited" → RELIANCE
+- For "Infosys Limited" → INFY
+- For "HDFC Bank Limited" → HDFCBANK
+- For "Bharat Heavy Electricals Limited" → BHEL
+- For "Vikas Lifecare Limited" → VIKASLIFE
+- For "Tata Gold ETF" → TATAGOLD
+
+If you cannot find the ticker, return exactly: NOT_FOUND"""
+                    
+                    response = self.openai_client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        max_completion_tokens=20,
+                    )
+                    
+                    if response and response.choices:
+                        ai_response = response.choices[0].message.content.strip()
+                        if ai_response and ai_response != "NOT_FOUND":
+                            # Clean the response - remove .NS, .BO, spaces, etc.
+                            ai_ticker = ai_response.replace('.NS', '').replace('.BO', '').replace('.', '').strip().upper()
+                            print(f"[STOCK_RESOLVE] 🤖 AI suggested ticker: {ai_ticker} for '{stock_name_clean}'")
+                except Exception as e:
+                    print(f"[STOCK_RESOLVE] ⚠️ AI ticker resolution failed: {str(e)[:100]}")
+        except Exception as e:
+            print(f"[STOCK_RESOLVE] ⚠️ AI not available: {str(e)[:50]}")
+        
+        # STEP 2: Try yfinance to validate and find ticker
+        candidates = []
+        if ai_ticker:
+            candidates.append(ai_ticker)
+        
+        # Also try extracting potential ticker from stock name (common patterns)
+        # Remove common suffixes like "Limited", "Ltd", "Incorporated", etc.
+        name_clean = stock_name_clean.upper()
+        for suffix in [' LIMITED', ' LTD', ' INCORPORATED', ' INC', ' CORPORATION', ' CORP']:
+            name_clean = name_clean.replace(suffix, '')
+        name_clean = name_clean.strip()
+        
+        # Extract potential ticker from name (first few words, all caps)
+        words = name_clean.split()
+        if words:
+            # Try first word or first few words combined
+            potential_ticker = ''.join([w[:4] for w in words[:3]]).upper()[:10]  # Max 10 chars
+            if potential_ticker and potential_ticker not in candidates:
+                candidates.append(potential_ticker)
+        
+        # STEP 3: Try each candidate with yfinance
+        for candidate in candidates:
+            if not candidate or len(candidate) < 2:
+                continue
+            
+            # Try with .NS suffix
+            try:
+                ticker_ns = f"{candidate}.NS"
+                stock = yf.Ticker(ticker_ns)
+                info = stock.info
+                if info and info.get('symbol') and info.get('longName'):
+                    # Validate that the name matches
+                    long_name = info.get('longName', '').upper()
+                    if stock_name_clean.upper() in long_name or long_name in stock_name_clean.upper():
+                        print(f"[STOCK_RESOLVE] ✅ yfinance validated: {ticker_ns} for '{stock_name_clean}' (name: {info.get('longName')})")
+                        return ticker_ns
+                    # Even if name doesn't match exactly, if we got valid data, use it
+                    if info.get('regularMarketPrice') or info.get('currentPrice'):
+                        print(f"[STOCK_RESOLVE] ✅ yfinance found: {ticker_ns} for '{stock_name_clean}' (name: {info.get('longName')})")
+                        return ticker_ns
+            except Exception as e:
+                pass
+            
+            # Try with .BO suffix
+            try:
+                ticker_bo = f"{candidate}.BO"
+                stock = yf.Ticker(ticker_bo)
+                info = stock.info
+                if info and info.get('symbol') and info.get('longName'):
+                    long_name = info.get('longName', '').upper()
+                    if stock_name_clean.upper() in long_name or long_name in stock_name_clean.upper():
+                        print(f"[STOCK_RESOLVE] ✅ yfinance validated: {ticker_bo} for '{stock_name_clean}' (name: {info.get('longName')})")
+                        return ticker_bo
+                    if info.get('regularMarketPrice') or info.get('currentPrice'):
+                        print(f"[STOCK_RESOLVE] ✅ yfinance found: {ticker_bo} for '{stock_name_clean}' (name: {info.get('longName')})")
+                        return ticker_bo
+            except Exception as e:
+                pass
+            
+            # Try without suffix (for BSE stocks that might not need .BO)
+            try:
+                stock = yf.Ticker(candidate)
+                info = stock.info
+                if info and info.get('symbol') and info.get('longName'):
+                    long_name = info.get('longName', '').upper()
+                    if stock_name_clean.upper() in long_name or long_name in stock_name_clean.upper():
+                        # Determine if it's NSE or BSE based on symbol
+                        symbol = info.get('symbol', '')
+                        if '.NS' in symbol:
+                            return f"{candidate}.NS"
+                        elif '.BO' in symbol:
+                            return f"{candidate}.BO"
+                        else:
+                            return f"{candidate}.NS"  # Default to NSE
+            except Exception as e:
+                pass
+        
+        # If AI suggested a ticker but yfinance validation failed, still return it (with .NS)
+        if ai_ticker:
+            print(f"[STOCK_RESOLVE] ⚠️ Using AI suggestion without yfinance validation: {ai_ticker}.NS")
+            return f"{ai_ticker}.NS"
+        
+        print(f"[STOCK_RESOLVE] ❌ Could not resolve ticker for '{stock_name_clean}'")
+        return None
 
     def _resolve_amfi_code(self, ticker: str, fund_name: Optional[str]) -> Optional[str]:
         """
@@ -2436,15 +2796,40 @@ If not found, return: NOT_FOUND"""
             #st.caption(f"⚠️ AI error for {ticker}: {str(e)}")
             return None
     
-    def get_historical_price(self, ticker: str, asset_type: str, date: str, fund_name: str = None) -> Optional[float]:
+    def get_historical_price(self, ticker: str, asset_type: str, date: str, fund_name: str = None, stock_id: str = None, db_manager = None) -> Optional[float]:
         """
         Get historical price for a specific date.
         CRITICAL: Uses closest available date if exact date not found (within 30 days).
+        
+        Args:
+            ticker: Ticker symbol
+            asset_type: Asset type
+            date: Date in YYYY-MM-DD format
+            fund_name: Full name of the asset (for AI fallback)
+            stock_id: Optional stock_id to fetch stored ticker from stock_master
+            db_manager: Optional database manager to fetch stored ticker
         """
         try:
+            # STEP 1: Try to get stored ticker from stock_master (if available)
+            original_ticker = ticker
+            stored_ticker = None
+            if asset_type == 'stock' and stock_id and db_manager:
+                try:
+                    stock_info = db_manager.supabase.table('stock_master').select('ticker, stock_name').eq('id', stock_id).execute()
+                    if stock_info.data and len(stock_info.data) > 0:
+                        stored_ticker = stock_info.data[0].get('ticker')
+                        stored_name = stock_info.data[0].get('stock_name')
+                        if stored_ticker and stored_ticker != ticker:
+                            print(f"[HIST_PRICE] 📋 Using stored ticker from stock_master: {ticker} → {stored_ticker} (stock_id: {stock_id})")
+                            ticker = stored_ticker
+                            if stored_name and not fund_name:
+                                fund_name = stored_name
+                except Exception as e:
+                    print(f"[HIST_PRICE] ⚠️ Could not fetch stored ticker: {str(e)[:100]}")
+            
             # Use the existing method but with a single day range
             # The method will automatically find closest date if exact date not available
-            prices = self.get_historical_prices(ticker, asset_type, date, date, fund_name)
+            prices = self.get_historical_prices(ticker, asset_type, date, date, fund_name, stock_id, db_manager)
             if prices and len(prices) > 0:
                 price = prices[0].get('price')
                 price_date = prices[0].get('price_date')
@@ -2456,7 +2841,7 @@ If not found, return: NOT_FOUND"""
             print(f"[HIST_PRICE] ⚠️ Error fetching historical price for {ticker} on {date}: {str(e)}")
             return None
     
-    def get_historical_prices(self, ticker: str, asset_type: str, start_date: str, end_date: str, fund_name: str = None) -> list:
+    def get_historical_prices(self, ticker: str, asset_type: str, start_date: str, end_date: str, fund_name: str = None, stock_id: str = None, db_manager = None) -> list:
         """
         Get historical prices with complete fallback chain:
         Stock: yfinance NSE → yfinance BSE → yfinance raw → mftool → AI
@@ -2466,6 +2851,91 @@ If not found, return: NOT_FOUND"""
         
         try:
             if asset_type == 'stock':
+                # STEP 1: Try to get stored ticker from stock_master (if available)
+                original_ticker = ticker
+                stored_ticker = None
+                if stock_id and db_manager:
+                    try:
+                        stock_info = db_manager.supabase.table('stock_master').select('ticker, stock_name').eq('id', stock_id).execute()
+                        if stock_info.data and len(stock_info.data) > 0:
+                            stored_ticker = stock_info.data[0].get('ticker')
+                            stored_name = stock_info.data[0].get('stock_name')
+                            if stored_ticker and stored_ticker != ticker:
+                                print(f"[HIST_PRICE] 📋 Using stored ticker from stock_master: {ticker} → {stored_ticker} (stock_id: {stock_id})")
+                                ticker = stored_ticker
+                                if stored_name and not fund_name:
+                                    fund_name = stored_name
+                    except Exception as e:
+                        print(f"[HIST_PRICE] ⚠️ Could not fetch stored ticker: {str(e)[:100]}")
+                
+                # STEP 2: Try fetching with stored ticker (or original ticker)
+                base_candidates = self._generate_stock_aliases(ticker, fund_name)
+                symbol_variants = self._expand_symbol_variants(base_candidates or [str(ticker or '').strip()])
+                
+                # Try fetching with variants
+                prices_found = False
+                for variant in symbol_variants:
+                    try:
+                        stock = yf.Ticker(variant)
+                        hist = stock.history(start=start_date, end=end_date)
+                        
+                        if not hist.empty:
+                            prices = []
+                            for date, row in hist.iterrows():
+                                prices.append({
+                                    'asset_symbol': ticker,
+                                    'asset_type': 'stock',
+                                    'price': float(row['Close']),
+                                    'price_date': date.strftime('%Y-%m-%d'),
+                                    'volume': int(row['Volume'])
+                                })
+                            prices_found = True
+                            return prices
+                    except Exception:
+                        continue
+                
+                # STEP 3: If stored ticker failed and we have stock name, try AI resolution
+                ticker_clean = str(ticker).strip() if ticker else ''
+                if not prices_found and fund_name and not stored_ticker:
+                    print(f"[HIST_PRICE] 🔍 Stored ticker failed, trying AI resolution from name: '{fund_name}'")
+                    resolved_ticker = self._resolve_stock_ticker_by_name(fund_name)
+                    if resolved_ticker:
+                        print(f"[HIST_PRICE] ✅ AI resolved ticker: {ticker} → {resolved_ticker}")
+                        ticker = resolved_ticker  # Use resolved ticker for historical price fetch
+                        # Retry with resolved ticker
+                        base_candidates = self._generate_stock_aliases(ticker, fund_name)
+                        symbol_variants = self._expand_symbol_variants(base_candidates or [str(ticker or '').strip()])
+                        
+                        for variant in symbol_variants:
+                            try:
+                                stock = yf.Ticker(variant)
+                                hist = stock.history(start=start_date, end=end_date)
+                                
+                                if not hist.empty:
+                                    prices = []
+                                    for date, row in hist.iterrows():
+                                        prices.append({
+                                            'asset_symbol': ticker,
+                                            'asset_type': 'stock',
+                                            'price': float(row['Close']),
+                                            'price_date': date.strftime('%Y-%m-%d'),
+                                            'volume': int(row['Volume'])
+                                        })
+                                    # Update stock_master with resolved ticker
+                                    try:
+                                        if stock_id and db_manager:
+                                            db_manager.supabase.table('stock_master').update({
+                                                'ticker': resolved_ticker,
+                                                'last_updated': datetime.now().isoformat()
+                                            }).eq('id', stock_id).execute()
+                                            print(f"[HIST_PRICE] 💾 Updated stock_master with resolved ticker: {resolved_ticker}")
+                                    except Exception as e:
+                                        print(f"[HIST_PRICE] ⚠️ Could not update stock_master: {str(e)[:100]}")
+                                    return prices
+                            except Exception:
+                                continue
+                
+                # Continue with ticker (either original, stored, or resolved)
                 base_candidates = self._generate_stock_aliases(ticker, fund_name)
                 symbol_variants = self._expand_symbol_variants(base_candidates or [str(ticker or '').strip()])
 
