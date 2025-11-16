@@ -1040,11 +1040,23 @@ CRITICAL RULES:
                 if validated_trans['price'] < 0:
                     validated_trans['price'] = 0
 
-                # CRITICAL: Only fetch historical price if price was NOT calculated from amount/quantity
-                # If we calculated price from amount/quantity, that's the correct transaction price - don't overwrite it!
-                # Also ensure we use the transaction date from the file, NOT current date
-                if not price_was_calculated and (validated_trans['price'] <= 0 or not price_present):
-                    # Only fetch if price is still missing/zero and we didn't calculate it
+                # CRITICAL: Fetch historical price if:
+                # 1. Price was NOT calculated from amount/quantity (use calculated price if available)
+                # 2. OR price is still 0/missing even after calculations (amount/quantity may be 0/invalid)
+                # Always use transaction date from file, NOT current date
+                should_fetch_historical = False
+                if price_was_calculated:
+                    # If we calculated price, only fetch if calculated price is 0 or invalid
+                    if validated_trans['price'] <= 0:
+                        should_fetch_historical = True
+                        print(f"[VALIDATE] ⚠️ Calculated price is 0/invalid, fetching historical price as fallback")
+                    else:
+                        print(f"[VALIDATE] ✅ Using calculated price from amount/quantity: {validated_trans['price']} (NOT fetching historical price)")
+                elif validated_trans['price'] <= 0 or not price_present:
+                    # Price is missing/zero and wasn't calculated - definitely fetch
+                    should_fetch_historical = True
+                
+                if should_fetch_historical:
                     transaction_date = validated_trans.get('date', '')
                     print(f"[VALIDATE] 🔍 Fetching historical price for {validated_trans['ticker']} on transaction date: {transaction_date} (from file)")
                     fetched_price, price_source = self._fetch_price_for_transaction_with_resolution(validated_trans)
@@ -1076,8 +1088,6 @@ CRITICAL RULES:
                                 self.logger.warning(f"Failed to extract resolved ticker from source '{price_source}': {e}")
                     else:
                         print(f"[VALIDATE] ⚠️ No historical price found for {validated_trans['ticker']} on {transaction_date} (from file)")
-                elif price_was_calculated:
-                    print(f"[VALIDATE] ✅ Using calculated price from amount/quantity: {validated_trans['price']} (NOT fetching historical price)")
                 
                 validated.append(validated_trans)
                 

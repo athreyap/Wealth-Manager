@@ -2373,28 +2373,39 @@ If not found, return: NOT_FOUND"""
                                     target_dt = start_dt
                                     closest_date = None
                                     min_diff = float('inf')
-                                
-                                for date, row in hist_expanded.iterrows():
-                                    if date.tzinfo is None:
-                                        date = pytz.UTC.localize(date)
                                     
-                                    date_diff = abs((date - target_dt).days)
-                                    if date_diff < min_diff:
-                                        min_diff = date_diff
-                                        closest_date = date
-                                
-                                    # Use closest date if within 30 days
+                                    for date, row in hist_expanded.iterrows():
+                                        if date.tzinfo is None:
+                                            date = pytz.UTC.localize(date)
+                                        
+                                        date_diff = abs((date - target_dt).days)
+                                        if date_diff < min_diff:
+                                            min_diff = date_diff
+                                            closest_date = date
+                                    
+                                    # Use closest date if within 30 days (check AFTER loop completes)
                                     if closest_date and min_diff <= 30:
                                         closest_price = float(hist_expanded.loc[closest_date, 'Close'])
                                         print(f"[HIST_PRICE] 📅 {ticker}: Using closest price date {closest_date.strftime('%Y-%m-%d')} (target: {start_date}, diff: {min_diff} days)")
-                                    return [{
-                                        'asset_symbol': ticker,
-                                        'asset_type': 'stock',
-                                        'price': closest_price,
-                                        'price_date': closest_date.strftime('%Y-%m-%d'),
-                                        'volume': int(hist_expanded.loc[closest_date, 'Volume'])
-                                    }]
-                            else:
+                                        return [{
+                                            'asset_symbol': ticker,
+                                            'asset_type': 'stock',
+                                            'price': closest_price,
+                                            'price_date': closest_date.strftime('%Y-%m-%d'),
+                                            'volume': int(hist_expanded.loc[closest_date, 'Volume'])
+                                        }]
+                                    elif closest_date:
+                                        # Even if >30 days, use it as fallback
+                                        closest_price = float(hist_expanded.loc[closest_date, 'Close'])
+                                        print(f"[HIST_PRICE] ⚠️ {ticker}: Using closest price date {closest_date.strftime('%Y-%m-%d')} (target: {start_date}, diff: {min_diff} days - outside 30 day window but using as fallback)")
+                                        return [{
+                                            'asset_symbol': ticker,
+                                            'asset_type': 'stock',
+                                            'price': closest_price,
+                                            'price_date': closest_date.strftime('%Y-%m-%d'),
+                                            'volume': int(hist_expanded.loc[closest_date, 'Volume'])
+                                        }]
+                                else:
                                     # For date range, find closest dates for start and end
                                     prices = []
                                     
@@ -2419,6 +2430,15 @@ If not found, return: NOT_FOUND"""
                                             'price_date': closest_start.strftime('%Y-%m-%d'),
                                             'volume': int(hist_expanded.loc[closest_start, 'Volume'])
                                         })
+                                    elif closest_start:
+                                        # Even if >30 days, use as fallback
+                                        prices.append({
+                                            'asset_symbol': ticker,
+                                            'asset_type': 'stock',
+                                            'price': float(hist_expanded.loc[closest_start, 'Close']),
+                                            'price_date': closest_start.strftime('%Y-%m-%d'),
+                                            'volume': int(hist_expanded.loc[closest_start, 'Volume'])
+                                        })
                                     
                                     # Find closest to end_date (if different from start)
                                     if start_date != end_date:
@@ -2436,6 +2456,15 @@ If not found, return: NOT_FOUND"""
                                                     closest_end = date
                                         
                                         if closest_end and min_end_diff <= 30:
+                                            prices.append({
+                                                'asset_symbol': ticker,
+                                                'asset_type': 'stock',
+                                                'price': float(hist_expanded.loc[closest_end, 'Close']),
+                                                'price_date': closest_end.strftime('%Y-%m-%d'),
+                                                'volume': int(hist_expanded.loc[closest_end, 'Volume'])
+                                            })
+                                        elif closest_end:
+                                            # Even if >30 days, use as fallback
                                             prices.append({
                                                 'asset_symbol': ticker,
                                                 'asset_type': 'stock',
@@ -2520,16 +2549,19 @@ If not found, return: NOT_FOUND"""
                                 closest_row = hist_data.loc[closest_idx]
                                 closest_date_diff = closest_row['date_diff']
                                 
-                                # Use closest date if within 30 days
+                                # Use closest date (even if outside 30 days - better than no price)
                                 if closest_date_diff.days <= 30:
                                     print(f"[HIST_PRICE] 📅 {ticker}: Using closest NAV date {closest_row['date'].strftime('%Y-%m-%d')} (target: {start_date}, diff: {closest_date_diff.days} days)")
-                                    return [{
-                                        'asset_symbol': ticker,
-                                        'asset_type': 'mutual_fund',
-                                        'price': float(closest_row['nav']),
-                                        'price_date': closest_row['date'].strftime('%Y-%m-%d'),
-                                        'volume': None
-                                    }]
+                                else:
+                                    print(f"[HIST_PRICE] ⚠️ {ticker}: Using closest NAV date {closest_row['date'].strftime('%Y-%m-%d')} (target: {start_date}, diff: {closest_date_diff.days} days - outside 30 day window but using as fallback)")
+                                
+                                return [{
+                                    'asset_symbol': ticker,
+                                    'asset_type': 'mutual_fund',
+                                    'price': float(closest_row['nav']),
+                                    'price_date': closest_row['date'].strftime('%Y-%m-%d'),
+                                    'volume': None
+                                }]
                             else:
                                 # For date range, find closest dates for start and end
                                 prices = []
