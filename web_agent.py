@@ -3199,10 +3199,22 @@ def _tx_dataframe_to_transactions(
         stock_name = None
         if raw_stock_name:
             raw_stock_name_lower = raw_stock_name.lower().strip()
+            raw_stock_name_upper = raw_stock_name.upper().strip()
+            
+            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+            is_valid_ticker_code = (
+                raw_stock_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
+                (raw_stock_name_upper.isupper() and raw_stock_name_upper.isalnum() and len(raw_stock_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
+                (raw_stock_name_upper.isupper() and any(c.isdigit() for c in raw_stock_name_upper))  # Contains digits (likely a code)
+            )
+            
+            # Only reject if it's clearly a channel/filename AND not a valid ticker code
             is_invalid = (
-                len(raw_stock_name_lower) < 10 and ' ' not in raw_stock_name_lower or
-                raw_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
-                (raw_stock_name_lower.islower() and len(raw_stock_name_lower.split()) == 1 and raw_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+                not is_valid_ticker_code and (
+                    len(raw_stock_name_lower) < 10 and ' ' not in raw_stock_name_lower or
+                    raw_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
+                    (raw_stock_name_lower.islower() and len(raw_stock_name_lower.split()) == 1 and raw_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+                )
             )
             if not is_invalid:
                 stock_name = raw_stock_name
@@ -3212,10 +3224,22 @@ def _tx_dataframe_to_transactions(
         scheme_name = None
         if raw_scheme_name:
             raw_scheme_name_lower = raw_scheme_name.lower().strip()
+            raw_scheme_name_upper = raw_scheme_name.upper().strip()
+            
+            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+            is_valid_ticker_code = (
+                raw_scheme_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
+                (raw_scheme_name_upper.isupper() and raw_scheme_name_upper.isalnum() and len(raw_scheme_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
+                (raw_scheme_name_upper.isupper() and any(c.isdigit() for c in raw_scheme_name_upper))  # Contains digits (likely a code)
+            )
+            
+            # Only reject if it's clearly a channel/filename AND not a valid ticker code
             is_invalid = (
-                len(raw_scheme_name_lower) < 10 and ' ' not in raw_scheme_name_lower or
-                raw_scheme_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
-                (raw_scheme_name_lower.islower() and len(raw_scheme_name_lower.split()) == 1 and raw_scheme_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+                not is_valid_ticker_code and (
+                    len(raw_scheme_name_lower) < 10 and ' ' not in raw_scheme_name_lower or
+                    raw_scheme_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
+                    (raw_scheme_name_lower.islower() and len(raw_scheme_name_lower.split()) == 1 and raw_scheme_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+                )
             )
             if not is_invalid:
                 scheme_name = raw_scheme_name
@@ -3326,10 +3350,22 @@ def _tx_dataframe_to_transactions(
         # Validate final_stock_name
         if final_stock_name:
             final_stock_name_lower = final_stock_name.lower().strip()
+            final_stock_name_upper = final_stock_name.upper().strip()
+            
+            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+            is_valid_ticker_code = (
+                final_stock_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
+                (final_stock_name_upper.isupper() and final_stock_name_upper.isalnum() and len(final_stock_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
+                (final_stock_name_upper.isupper() and any(c.isdigit() for c in final_stock_name_upper))  # Contains digits (likely a code)
+            )
+            
+            # Only reject if it's clearly a channel/filename AND not a valid ticker code
             is_invalid = (
-                len(final_stock_name_lower) < 10 and ' ' not in final_stock_name_lower or
-                final_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
-                (final_stock_name_lower.islower() and len(final_stock_name_lower.split()) == 1 and final_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+                not is_valid_ticker_code and (
+                    len(final_stock_name_lower) < 10 and ' ' not in final_stock_name_lower or
+                    final_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
+                    (final_stock_name_lower.islower() and len(final_stock_name_lower.split()) == 1 and final_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+                )
             )
             if is_invalid:
                 print(f"[TX_DF] ⚠️ Ignoring invalid stock_name '{final_stock_name}' (looks like channel/filename)")
@@ -3473,11 +3509,22 @@ def _tx_build_db_transaction(
     stock_name = None
     if raw_stock_name:
         raw_stock_name_lower = raw_stock_name.lower().strip()
-        # Check if it looks like a channel/filename
+        raw_stock_name_upper = raw_stock_name.upper().strip()
+        
+        # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+        is_valid_ticker_code = (
+            raw_stock_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
+            (raw_stock_name_upper.isupper() and raw_stock_name_upper.isalnum() and len(raw_stock_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
+            (raw_stock_name_upper.isupper() and any(c.isdigit() for c in raw_stock_name_upper))  # Contains digits (likely a code)
+        )
+        
+        # Only reject if it's clearly a channel/filename AND not a valid ticker code
         is_invalid_name = (
-            len(raw_stock_name_lower) < 10 and ' ' not in raw_stock_name_lower or
-            raw_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
-            (raw_stock_name_lower.islower() and len(raw_stock_name_lower.split()) == 1 and raw_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+            not is_valid_ticker_code and (
+                len(raw_stock_name_lower) < 10 and ' ' not in raw_stock_name_lower or
+                raw_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
+                (raw_stock_name_lower.islower() and len(raw_stock_name_lower.split()) == 1 and raw_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+            )
         )
         if not is_invalid_name:
             stock_name = raw_stock_name

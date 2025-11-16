@@ -949,11 +949,32 @@ CRITICAL RULES:
         for trans in transactions:
             try:
                 # Skip if missing critical fields
-                if not trans.get('ticker') or not trans.get('date'):
+                # For mutual funds: allow transactions with fund name (stock_name/scheme_name) even if ticker is missing
+                # We can resolve ticker from name during validation/enhancement
+                has_ticker = bool(trans.get('ticker'))
+                has_fund_name = bool(trans.get('stock_name') or trans.get('scheme_name'))
+                asset_type = self._detect_asset_type(trans)
+                has_date = bool(trans.get('date'))
+                
+                # Skip if:
+                # 1. Missing date (always required)
+                # 2. Missing both ticker AND name (can't proceed without either)
+                # Exception: For mutual funds, allow if we have fund name (will resolve ticker later)
+                if not has_date:
                     skipped_count += 1
-                    if skipped_count <= 3:  # Log first 3 skipped transactions
-                        print(f"[VALIDATE] ⚠️ Skipping transaction (missing ticker or date): {trans}")
+                    if skipped_count <= 3:
+                        print(f"[VALIDATE] ⚠️ Skipping transaction (missing date): {trans}")
                     continue
+                
+                if not has_ticker and not has_fund_name:
+                    skipped_count += 1
+                    if skipped_count <= 3:
+                        print(f"[VALIDATE] ⚠️ Skipping transaction (missing both ticker and name): {trans}")
+                    continue
+                
+                # For mutual funds without ticker but with name, we'll resolve ticker during validation
+                if asset_type == 'mutual_fund' and not has_ticker and has_fund_name:
+                    print(f"[VALIDATE] ℹ️ Mutual fund transaction without ticker, will resolve from name: {trans.get('stock_name') or trans.get('scheme_name')}")
                 
                 # Normalize and validate fields
                 transaction_type_raw = (
@@ -975,14 +996,26 @@ CRITICAL RULES:
                 amount_present = original_amount is not None and str(original_amount).strip() != ''
                 
                 # CRITICAL: Validate stock_name - don't use filename/channel as stock_name
+                # BUT: Allow valid ticker codes (SGB codes, all-caps alphanumeric codes, etc.)
                 raw_stock_name = trans.get('stock_name', '') or trans.get('scheme_name', '')
                 if raw_stock_name:
                     raw_stock_name_lower = str(raw_stock_name).lower().strip()
-                    # Check if it looks like a channel/filename
+                    raw_stock_name_upper = str(raw_stock_name).upper().strip()
+                    
+                    # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+                    is_valid_ticker_code = (
+                        raw_stock_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
+                        (raw_stock_name_upper.isupper() and raw_stock_name_upper.isalnum() and len(raw_stock_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
+                        (raw_stock_name_upper.isupper() and any(c.isdigit() for c in raw_stock_name_upper))  # Contains digits (likely a code)
+                    )
+                    
+                    # Only reject if it's clearly a channel/filename AND not a valid ticker code
                     is_invalid_name = (
-                        len(raw_stock_name_lower) < 10 and ' ' not in raw_stock_name_lower or
-                        raw_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
-                        (raw_stock_name_lower.islower() and len(raw_stock_name_lower.split()) == 1 and raw_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+                        not is_valid_ticker_code and (
+                            len(raw_stock_name_lower) < 10 and ' ' not in raw_stock_name_lower or
+                            raw_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
+                            (raw_stock_name_lower.islower() and len(raw_stock_name_lower.split()) == 1 and raw_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+                        )
                     )
                     if is_invalid_name:
                         print(f"[VALIDATE] ⚠️ Ignoring invalid stock_name '{raw_stock_name}' (looks like channel/filename), will fetch from AMFI/mftool")
@@ -1076,11 +1109,12 @@ CRITICAL RULES:
                 
                 if should_fetch_historical:
                     transaction_date = validated_trans.get('date', '')
-                    print(f"[VALIDATE] 🔍 Fetching historical price for {validated_trans['ticker']} on transaction date: {transaction_date} (from file)")
+                    ticker_display = validated_trans.get('ticker') or validated_trans.get('stock_name') or validated_trans.get('scheme_name') or 'Unknown'
+                    print(f"[VALIDATE] 🔍 Fetching historical price for {ticker_display} on transaction date: {transaction_date} (from file)")
                     fetched_price, price_source = self._fetch_price_for_transaction_with_resolution(validated_trans)
                     if fetched_price and fetched_price > 0:
                         validated_trans['price'] = round(float(fetched_price), 4)
-                        print(f"[VALIDATE] ✅ Fetched historical price: ₹{validated_trans['price']} for {validated_trans['ticker']} on {transaction_date} (from file)")
+                        print(f"[VALIDATE] ✅ Fetched historical price: ₹{validated_trans['price']} for {ticker_display} on {transaction_date} (from file)")
                         
                         # Check if ticker was resolved via name-based resolution
                         # For mutual funds: source format is "amfi_name_resolved:148520"
@@ -1099,16 +1133,17 @@ CRITICAL RULES:
                                 if resolved_ticker:
                                     # Remove any trailing characters (commas, parentheses, etc.)
                                     resolved_ticker = resolved_ticker.split(',')[0].split(')')[0].split('(')[0].strip()
-                                    if resolved_ticker and resolved_ticker != validated_trans['ticker']:
-                                        print(f"[VALIDATE] 🔄 Updating ticker from {validated_trans['ticker']} to {resolved_ticker} (name-based resolution)")
+                                    current_ticker = validated_trans.get('ticker')
+                                    if resolved_ticker and resolved_ticker != current_ticker:
+                                        print(f"[VALIDATE] 🔄 Updating ticker from {current_ticker or 'None'} to {resolved_ticker} (name-based resolution)")
                                         validated_trans['ticker'] = resolved_ticker
                             except Exception as e:
                                 self.logger.warning(f"Failed to extract resolved ticker from source '{price_source}': {e}")
                     else:
-                        print(f"[VALIDATE] ⚠️ No historical price found for {validated_trans['ticker']} on {transaction_date} (from file)")
+                        print(f"[VALIDATE] ⚠️ No historical price found for {ticker_display} on {transaction_date} (from file)")
                         # Try one more time with expanded date range (up to 90 days)
                         if not fetched_price or fetched_price <= 0:
-                            print(f"[VALIDATE] 🔄 Retrying with expanded date range (up to 90 days) for {validated_trans['ticker']}...")
+                            print(f"[VALIDATE] 🔄 Retrying with expanded date range (up to 90 days) for {ticker_display}...")
                             try:
                                 from datetime import datetime, timedelta
                                 from dateutil import parser
@@ -1378,9 +1413,20 @@ CRITICAL RULES:
         ticker = trans.get('ticker')
         date = trans.get('date')
         asset_type = (trans.get('asset_type') or 'stock').lower()
+        fund_name = trans.get('stock_name') or trans.get('scheme_name')
 
-        if not ticker or not date:
+        # For mutual funds: allow fetching with just fund name (will resolve ticker during fetch)
+        # For other assets: require ticker
+        if not date:
             return None, None
+        
+        if not ticker:
+            if asset_type == 'mutual_fund' and fund_name:
+                # For mutual funds without ticker, use fund name - price fetcher will resolve ticker
+                ticker = fund_name  # Temporary - will be resolved during fetch
+                print(f"[VALIDATE] 🔍 Mutual fund without ticker, using fund name for resolution: {fund_name}")
+            else:
+                return None, None
 
         cache_key = (ticker, date, asset_type)
         if cache_key in self._price_cache:

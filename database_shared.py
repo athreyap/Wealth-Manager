@@ -462,12 +462,25 @@ class SharedDatabaseManager:
             
             # Use authoritative name if available, otherwise fall back to provided name
             # CRITICAL: Don't use provided stock_name if it looks like a channel/filename
+            # BUT: Allow valid ticker codes (SGB codes, all-caps alphanumeric codes, etc.)
             if not authoritative_name and stock_name:
                 stock_name_lower = stock_name.lower().strip()
+                stock_name_upper = stock_name.upper().strip()
+                
+                # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+                is_valid_ticker_code = (
+                    stock_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
+                    (stock_name_upper.isupper() and stock_name_upper.isalnum() and len(stock_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
+                    (stock_name_upper.isupper() and any(c.isdigit() for c in stock_name_upper))  # Contains digits (likely a code)
+                )
+                
+                # Only reject if it's clearly a channel/filename AND not a valid ticker code
                 is_invalid_name = (
-                    len(stock_name_lower) < 10 and ' ' not in stock_name_lower or
-                    stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi'] or
-                    (stock_name_lower.islower() and len(stock_name_lower.split()) == 1)
+                    not is_valid_ticker_code and (
+                        len(stock_name_lower) < 10 and ' ' not in stock_name_lower or
+                        stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi'] or
+                        (stock_name_lower.islower() and len(stock_name_lower.split()) == 1)
+                    )
                 )
                 if is_invalid_name:
                     print(f"[STOCK_CREATE] ⚠️ Ignoring invalid stock_name '{stock_name}' (looks like channel/filename), using 'Unknown'")
@@ -692,17 +705,23 @@ class SharedDatabaseManager:
         normalized_ticker = normalized_ticker.replace('MF_', '').replace('mf_', '').strip()
         
         # CRITICAL: Validate fund_name - ignore if it looks like a channel/filename
-        # Common patterns: short names (< 10 chars), lowercase only, no spaces, common channel names
+        # BUT: Allow valid ticker codes (SGB codes, all-caps alphanumeric codes, etc.)
         if fund_name:
             fund_name_lower = fund_name.lower().strip()
-            # Ignore if it looks like a channel/filename:
-            # - Too short (< 10 chars) and no spaces
-            # - Common channel names
-            # - All lowercase with no proper capitalization
+            fund_name_upper = fund_name.upper().strip()
+            
+            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+            is_valid_ticker_code = (
+                fund_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
+                (fund_name_upper.isupper() and fund_name_upper.isalnum() and len(fund_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
+                (fund_name_upper.isupper() and any(c.isdigit() for c in fund_name_upper))  # Contains digits (likely a code)
+            )
+            
+            # Only reject if it's clearly a channel/filename AND not a valid ticker code
             invalid_patterns = [
-                len(fund_name_lower) < 10 and ' ' not in fund_name_lower,  # Short single word
-                fund_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi'],  # Common channels
-                fund_name_lower.islower() and len(fund_name_lower.split()) == 1  # Single lowercase word
+                not is_valid_ticker_code and len(fund_name_lower) < 10 and ' ' not in fund_name_lower,  # Short single word
+                not is_valid_ticker_code and fund_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi'],  # Common channels
+                not is_valid_ticker_code and fund_name_lower.islower() and len(fund_name_lower.split()) == 1  # Single lowercase word
             ]
             if any(invalid_patterns):
                 print(f"[MF_INFO] ⚠️ Ignoring invalid fund_name '{fund_name}' (looks like channel/filename), fetching from AMFI/mftool")
