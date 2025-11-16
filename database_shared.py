@@ -444,7 +444,8 @@ class SharedDatabaseManager:
         ticker: str,
         stock_name: str,
         asset_type: str,
-        sector: str = None
+        sector: str = None,
+        resolved_ticker: str = None  # If ticker was resolved from name, use this instead
     ) -> Optional[str]:
         """
         Get existing stock or create new one in stock_master
@@ -452,12 +453,15 @@ class SharedDatabaseManager:
         CRITICAL: Always uses authoritative name from yfinance/AMFI/mftool to ensure ticker uniqueness
         """
         try:
-            normalised_ticker = _tx_normalize_ticker(ticker)
+            # Use resolved_ticker if provided (from name-based resolution), otherwise use original ticker
+            actual_ticker = resolved_ticker if resolved_ticker else ticker
+            normalised_ticker = _tx_normalize_ticker(actual_ticker)
             
             # CRITICAL: Fetch authoritative name from external sources FIRST
             # This ensures we always use the correct name from yfinance/AMFI/mftool
             # Pass stock_name for better AMFI mapping (uses both ticker AND name)
-            enhanced_info = self._fetch_stock_info(ticker, asset_type, stock_name)
+            # Use actual_ticker (resolved if provided) for fetching info
+            enhanced_info = self._fetch_stock_info(actual_ticker, asset_type, stock_name)
             authoritative_name = enhanced_info.get('stock_name', '').strip()
             
             # Use authoritative name if available, otherwise fall back to provided name
@@ -467,11 +471,16 @@ class SharedDatabaseManager:
                 stock_name_lower = stock_name.lower().strip()
                 stock_name_upper = stock_name.upper().strip()
                 
-                # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+                # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, bond codes, etc.)
+                # Bond codes may contain special characters like %, -, ., etc.
+                # Stock tickers can be 3-4 characters (BHEL, TCS, HDFC, etc.)
+                has_letters = any(c.isalpha() for c in stock_name_upper)
+                has_digits = any(c.isdigit() for c in stock_name_upper)
                 is_valid_ticker_code = (
                     stock_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
-                    (stock_name_upper.isupper() and stock_name_upper.isalnum() and len(stock_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
-                    (stock_name_upper.isupper() and any(c.isdigit() for c in stock_name_upper))  # Contains digits (likely a code)
+                    (stock_name_upper.isupper() and stock_name_upper.isalnum() and len(stock_name_upper) >= 3) or  # All-caps alphanumeric codes (BHEL, TATAGOLD, etc.) - allow 3+ chars
+                    (stock_name_upper.isupper() and has_digits) or  # Contains digits (likely a code)
+                    (stock_name_upper.isupper() and has_letters and (has_digits or '%' in stock_name_upper or 'BOND' in stock_name_upper))  # Bond codes with special chars (2.50%GOLDBONDS2031SR-I, etc.)
                 )
                 
                 # Only reject if it's clearly a channel/filename AND not a valid ticker code
@@ -710,11 +719,16 @@ class SharedDatabaseManager:
             fund_name_lower = fund_name.lower().strip()
             fund_name_upper = fund_name.upper().strip()
             
-            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, bond codes, etc.)
+            # Bond codes may contain special characters like %, -, ., etc.
+            # Stock tickers can be 3-4 characters (BHEL, TCS, HDFC, etc.)
+            has_letters = any(c.isalpha() for c in fund_name_upper)
+            has_digits = any(c.isdigit() for c in fund_name_upper)
             is_valid_ticker_code = (
                 fund_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
-                (fund_name_upper.isupper() and fund_name_upper.isalnum() and len(fund_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
-                (fund_name_upper.isupper() and any(c.isdigit() for c in fund_name_upper))  # Contains digits (likely a code)
+                (fund_name_upper.isupper() and fund_name_upper.isalnum() and len(fund_name_upper) >= 3) or  # All-caps alphanumeric codes (BHEL, TATAGOLD, etc.) - allow 3+ chars
+                (fund_name_upper.isupper() and has_digits) or  # Contains digits (likely a code)
+                (fund_name_upper.isupper() and has_letters and (has_digits or '%' in fund_name_upper or 'BOND' in fund_name_upper))  # Bond codes with special chars (2.50%GOLDBONDS2031SR-I, etc.)
             )
             
             # Only reject if it's clearly a channel/filename AND not a valid ticker code
@@ -1129,11 +1143,14 @@ class SharedDatabaseManager:
         """
         try:
             # Get or create stock in shared table
+            # Use resolved_ticker if provided (from name-based resolution during validation)
+            resolved_ticker = transaction_data.get('_resolved_ticker') or transaction_data.get('resolved_ticker')
             stock_id = self.get_or_create_stock(
                 transaction_data['ticker'],
                 transaction_data['stock_name'],
                 transaction_data['asset_type'],
-                transaction_data.get('sector')
+                transaction_data.get('sector'),
+                resolved_ticker=resolved_ticker
             )
             
             if not stock_id:

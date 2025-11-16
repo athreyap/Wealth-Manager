@@ -343,6 +343,7 @@ class EnhancedPriceFetcher:
                             if 'resolved_ticker' in price_data and price_data['resolved_ticker']:
                                 resolved_fund_name = price_data.get('resolved_fund_name')
                                 ticker_updates.append((stock_id, price_data['resolved_ticker'], resolved_fund_name))
+                                print(f"[PRICE_UPDATE] 🔄 Collected ticker update: {holding.get('ticker')} → {price_data['resolved_ticker']} (stock_id: {stock_id})")
                         
                         print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): Price fetched")
                         
@@ -395,7 +396,7 @@ class EnhancedPriceFetcher:
             try:
                 updated_count = 0
                 skipped_count = 0
-                for stock_id, resolved_ticker in ticker_updates:
+                for stock_id, resolved_ticker, resolved_fund_name in ticker_updates:
                     try:
                         # Check if resolved ticker already exists with a different stock_id
                         existing = db_manager.supabase.table('stock_master').select('id').eq('ticker', resolved_ticker).execute()
@@ -407,10 +408,15 @@ class EnhancedPriceFetcher:
                                 skipped_count += 1
                                 continue
                         
-                        result = db_manager.supabase.table('stock_master').update({
+                        update_data = {
                             'ticker': resolved_ticker,
                             'last_updated': datetime.now().isoformat()
-                        }).eq('id', stock_id).execute()
+                        }
+                        # Also update fund name if provided
+                        if resolved_fund_name:
+                            update_data['stock_name'] = resolved_fund_name
+                        
+                        result = db_manager.supabase.table('stock_master').update(update_data).eq('id', stock_id).execute()
                         if result.data:
                             updated_count += 1
                     except Exception as e:

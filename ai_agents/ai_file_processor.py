@@ -1002,11 +1002,16 @@ CRITICAL RULES:
                     raw_stock_name_lower = str(raw_stock_name).lower().strip()
                     raw_stock_name_upper = str(raw_stock_name).upper().strip()
                     
-                    # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+                    # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, bond codes, etc.)
+                    # Bond codes may contain special characters like %, -, ., etc.
+                    # Stock tickers can be 3-4 characters (BHEL, TCS, HDFC, etc.)
+                    has_letters = any(c.isalpha() for c in raw_stock_name_upper)
+                    has_digits = any(c.isdigit() for c in raw_stock_name_upper)
                     is_valid_ticker_code = (
                         raw_stock_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
-                        (raw_stock_name_upper.isupper() and raw_stock_name_upper.isalnum() and len(raw_stock_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
-                        (raw_stock_name_upper.isupper() and any(c.isdigit() for c in raw_stock_name_upper))  # Contains digits (likely a code)
+                        (raw_stock_name_upper.isupper() and raw_stock_name_upper.isalnum() and len(raw_stock_name_upper) >= 3) or  # All-caps alphanumeric codes (BHEL, TATAGOLD, etc.) - allow 3+ chars
+                        (raw_stock_name_upper.isupper() and has_digits) or  # Contains digits (likely a code)
+                        (raw_stock_name_upper.isupper() and has_letters and (has_digits or '%' in raw_stock_name_upper or 'BOND' in raw_stock_name_upper))  # Bond codes with special chars (2.50%GOLDBONDS2031SR-I, etc.)
                     )
                     
                     # Only reject if it's clearly a channel/filename AND not a valid ticker code
@@ -1137,6 +1142,8 @@ CRITICAL RULES:
                                     if resolved_ticker and resolved_ticker != current_ticker:
                                         print(f"[VALIDATE] 🔄 Updating ticker from {current_ticker or 'None'} to {resolved_ticker} (name-based resolution)")
                                         validated_trans['ticker'] = resolved_ticker
+                                        # Store resolved ticker for database insertion
+                                        validated_trans['_resolved_ticker'] = resolved_ticker
                             except Exception as e:
                                 self.logger.warning(f"Failed to extract resolved ticker from source '{price_source}': {e}")
                     else:

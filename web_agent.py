@@ -3201,11 +3201,15 @@ def _tx_dataframe_to_transactions(
             raw_stock_name_lower = raw_stock_name.lower().strip()
             raw_stock_name_upper = raw_stock_name.upper().strip()
             
-            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, bond codes, etc.)
+            # Bond codes may contain special characters like %, -, ., etc.
+            has_letters = any(c.isalpha() for c in raw_stock_name_upper)
+            has_digits = any(c.isdigit() for c in raw_stock_name_upper)
             is_valid_ticker_code = (
                 raw_stock_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
-                (raw_stock_name_upper.isupper() and raw_stock_name_upper.isalnum() and len(raw_stock_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
-                (raw_stock_name_upper.isupper() and any(c.isdigit() for c in raw_stock_name_upper))  # Contains digits (likely a code)
+                (raw_stock_name_upper.isupper() and raw_stock_name_upper.isalnum() and len(raw_stock_name_upper) >= 3) or  # All-caps alphanumeric codes (BHEL, TATAGOLD, etc.) - allow 3+ chars
+                (raw_stock_name_upper.isupper() and has_digits) or  # Contains digits (likely a code)
+                (raw_stock_name_upper.isupper() and has_letters and (has_digits or '%' in raw_stock_name_upper or 'BOND' in raw_stock_name_upper))  # Bond codes with special chars (2.50%GOLDBONDS2031SR-I, etc.)
             )
             
             # Only reject if it's clearly a channel/filename AND not a valid ticker code
@@ -3226,11 +3230,15 @@ def _tx_dataframe_to_transactions(
             raw_scheme_name_lower = raw_scheme_name.lower().strip()
             raw_scheme_name_upper = raw_scheme_name.upper().strip()
             
-            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, bond codes, etc.)
+            # Bond codes may contain special characters like %, -, ., etc.
+            has_letters = any(c.isalpha() for c in raw_scheme_name_upper)
+            has_digits = any(c.isdigit() for c in raw_scheme_name_upper)
             is_valid_ticker_code = (
                 raw_scheme_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
-                (raw_scheme_name_upper.isupper() and raw_scheme_name_upper.isalnum() and len(raw_scheme_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
-                (raw_scheme_name_upper.isupper() and any(c.isdigit() for c in raw_scheme_name_upper))  # Contains digits (likely a code)
+                (raw_scheme_name_upper.isupper() and raw_scheme_name_upper.isalnum() and len(raw_scheme_name_upper) >= 3) or  # All-caps alphanumeric codes (BHEL, TATAGOLD, etc.) - allow 3+ chars
+                (raw_scheme_name_upper.isupper() and has_digits) or  # Contains digits (likely a code)
+                (raw_scheme_name_upper.isupper() and has_letters and (has_digits or '%' in raw_scheme_name_upper or 'BOND' in raw_scheme_name_upper))  # Bond codes with special chars (2.50%GOLDBONDS2031SR-I, etc.)
             )
             
             # Only reject if it's clearly a channel/filename AND not a valid ticker code
@@ -3352,11 +3360,15 @@ def _tx_dataframe_to_transactions(
             final_stock_name_lower = final_stock_name.lower().strip()
             final_stock_name_upper = final_stock_name.upper().strip()
             
-            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+            # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, bond codes, etc.)
+            # Bond codes may contain special characters like %, -, ., etc.
+            has_letters = any(c.isalpha() for c in final_stock_name_upper)
+            has_digits = any(c.isdigit() for c in final_stock_name_upper)
             is_valid_ticker_code = (
                 final_stock_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
-                (final_stock_name_upper.isupper() and final_stock_name_upper.isalnum() and len(final_stock_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
-                (final_stock_name_upper.isupper() and any(c.isdigit() for c in final_stock_name_upper))  # Contains digits (likely a code)
+                (final_stock_name_upper.isupper() and final_stock_name_upper.isalnum() and len(final_stock_name_upper) >= 3) or  # All-caps alphanumeric codes (BHEL, TATAGOLD, etc.) - allow 3+ chars
+                (final_stock_name_upper.isupper() and has_digits) or  # Contains digits (likely a code)
+                (final_stock_name_upper.isupper() and has_letters and (has_digits or '%' in final_stock_name_upper or 'BOND' in final_stock_name_upper))  # Bond codes with special chars (2.50%GOLDBONDS2031SR-I, etc.)
             )
             
             # Only reject if it's clearly a channel/filename AND not a valid ticker code
@@ -3511,11 +3523,15 @@ def _tx_build_db_transaction(
         raw_stock_name_lower = raw_stock_name.lower().strip()
         raw_stock_name_upper = raw_stock_name.upper().strip()
         
-        # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, etc.)
+        # Check if it's a valid ticker code pattern (SGB codes, all-caps alphanumeric, bond codes, etc.)
+        # Bond codes may contain special characters like %, -, ., etc.
+        has_letters = any(c.isalpha() for c in raw_stock_name_upper)
+        has_digits = any(c.isdigit() for c in raw_stock_name_upper)
         is_valid_ticker_code = (
             raw_stock_name_upper.startswith('SGB') or  # Sovereign Gold Bond codes (SGBJUN31I, SGBFEB32IV)
             (raw_stock_name_upper.isupper() and raw_stock_name_upper.isalnum() and len(raw_stock_name_upper) >= 5) or  # All-caps alphanumeric codes (TATAGOLD, etc.)
-            (raw_stock_name_upper.isupper() and any(c.isdigit() for c in raw_stock_name_upper))  # Contains digits (likely a code)
+            (raw_stock_name_upper.isupper() and has_digits) or  # Contains digits (likely a code)
+            (raw_stock_name_upper.isupper() and has_letters and (has_digits or '%' in raw_stock_name_upper or 'BOND' in raw_stock_name_upper))  # Bond codes with special chars (2.50%GOLDBONDS2031SR-I, etc.)
         )
         
         # Only reject if it's clearly a channel/filename AND not a valid ticker code
@@ -6467,6 +6483,8 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     'amount': normalized_tx['amount'],
                     'filename': file_name,
                     'notes': normalized_tx.get('notes'),
+                    # Pass resolved ticker if it was resolved during validation
+                    '_resolved_ticker': normalized_tx.get('_resolved_ticker') or normalized_tx.get('resolved_ticker'),
                 }
                 try:
                     result = db.add_transaction(payload)
