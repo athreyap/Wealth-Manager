@@ -3192,8 +3192,36 @@ def _tx_dataframe_to_transactions(
         if price_value < 0:
             price_value = abs(price_value)
 
-        stock_name = _tx_safe_str(row.get('stock_name') or row.get('name'))
-        scheme_name = _tx_safe_str(row.get('scheme_name'))
+        raw_stock_name = _tx_safe_str(row.get('stock_name') or row.get('name'))
+        raw_scheme_name = _tx_safe_str(row.get('scheme_name'))
+        
+        # CRITICAL: Validate stock_name - don't use filename/channel as stock_name
+        stock_name = None
+        if raw_stock_name:
+            raw_stock_name_lower = raw_stock_name.lower().strip()
+            is_invalid = (
+                len(raw_stock_name_lower) < 10 and ' ' not in raw_stock_name_lower or
+                raw_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
+                (raw_stock_name_lower.islower() and len(raw_stock_name_lower.split()) == 1 and raw_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+            )
+            if not is_invalid:
+                stock_name = raw_stock_name
+            else:
+                print(f"[TX_DF] ⚠️ Ignoring invalid stock_name '{raw_stock_name}' (looks like channel/filename)")
+        
+        scheme_name = None
+        if raw_scheme_name:
+            raw_scheme_name_lower = raw_scheme_name.lower().strip()
+            is_invalid = (
+                len(raw_scheme_name_lower) < 10 and ' ' not in raw_scheme_name_lower or
+                raw_scheme_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
+                (raw_scheme_name_lower.islower() and len(raw_scheme_name_lower.split()) == 1 and raw_scheme_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+            )
+            if not is_invalid:
+                scheme_name = raw_scheme_name
+            else:
+                print(f"[TX_DF] ⚠️ Ignoring invalid scheme_name '{raw_scheme_name}' (looks like channel/filename)")
+        
         ticker = _tx_normalize_ticker(row.get('ticker') or row.get('symbol'))
         
         # For mutual funds, try to resolve ticker using scheme_name first
@@ -3202,7 +3230,7 @@ def _tx_dataframe_to_transactions(
             # This will be done later during import, but we can set a flag here
             ticker = _tx_normalize_ticker(scheme_name)
         
-        if not ticker:
+        if not ticker and stock_name:
             ticker = _tx_normalize_ticker(stock_name)
 
         if not ticker and not stock_name and not scheme_name:
@@ -3288,11 +3316,30 @@ def _tx_dataframe_to_transactions(
         
         notes = _tx_safe_str(row.get('notes'))
 
+        # CRITICAL: Validate stock_name - don't use ticker if stock_name looks invalid
+        final_stock_name = None
+        if asset_type == 'mutual_fund':
+            final_stock_name = scheme_name or stock_name
+        else:
+            final_stock_name = stock_name
+        
+        # Validate final_stock_name
+        if final_stock_name:
+            final_stock_name_lower = final_stock_name.lower().strip()
+            is_invalid = (
+                len(final_stock_name_lower) < 10 and ' ' not in final_stock_name_lower or
+                final_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
+                (final_stock_name_lower.islower() and len(final_stock_name_lower.split()) == 1 and final_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+            )
+            if is_invalid:
+                print(f"[TX_DF] ⚠️ Ignoring invalid stock_name '{final_stock_name}' (looks like channel/filename)")
+                final_stock_name = None
+        
         transaction = {
             'date': raw_date,
             'transaction_type': transaction_type,
             'ticker': ticker,
-            'stock_name': stock_name or ticker if asset_type != 'mutual_fund' else (scheme_name or stock_name or ticker),
+            'stock_name': final_stock_name,  # None if invalid - database will fetch from AMFI/mftool
             'scheme_name': scheme_name if asset_type == 'mutual_fund' else None,
             'quantity': quantity_value,
             'price': price_value,
@@ -3420,16 +3467,32 @@ def _tx_build_db_transaction(
         return None
 
     ticker = _tx_normalize_ticker(tx.get('ticker'))
-    stock_name = _tx_safe_str(tx.get('stock_name') or tx.get('scheme_name') or '')
+    raw_stock_name = _tx_safe_str(tx.get('stock_name') or tx.get('scheme_name') or '')
+    
+    # CRITICAL: Validate stock_name - don't use filename/channel as stock_name
+    stock_name = None
+    if raw_stock_name:
+        raw_stock_name_lower = raw_stock_name.lower().strip()
+        # Check if it looks like a channel/filename
+        is_invalid_name = (
+            len(raw_stock_name_lower) < 10 and ' ' not in raw_stock_name_lower or
+            raw_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
+            (raw_stock_name_lower.islower() and len(raw_stock_name_lower.split()) == 1 and raw_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+        )
+        if not is_invalid_name:
+            stock_name = raw_stock_name
+        else:
+            print(f"[TX_BUILD] ⚠️ Ignoring invalid stock_name '{raw_stock_name}' (looks like channel/filename), will fetch from AMFI/mftool")
+    
     if not ticker and stock_name:
         ticker = _tx_normalize_ticker(stock_name)
     if not ticker:
         return None
     if re.fullmatch(r'\d+(\.\d+)?', ticker):
-        fallback_ticker = _tx_fallback_ticker_from_name(stock_name)
-        ticker = fallback_ticker or ticker
-    if not stock_name:
-        stock_name = ticker
+        if stock_name:
+            fallback_ticker = _tx_fallback_ticker_from_name(stock_name)
+            ticker = fallback_ticker or ticker
+    # Don't set stock_name = ticker if it's None - let database fetch it
 
     # Check if values are actually present (not just zero)
     # First check metadata (from Python extraction), then fall back to transaction dict
