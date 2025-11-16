@@ -175,25 +175,39 @@ class PMS_AIF_Calculator:
             
             prompt = f"""You are a financial data expert. I need the CAGR (Compound Annual Growth Rate) for a {asset_type} (Portfolio Management Service/Alternative Investment Fund) with registration code {ticker}{name_context}{date_context}.
 
+CRITICAL: If exact data for this specific {asset_type} is not available, provide the CLOSEST available CAGR from:
+- Similar {asset_type} products from the same fund house
+- Industry average for similar strategy
+- Most recent available CAGR data for this {asset_type}
+
 Please provide:
 1. The CAGR percentage (as a decimal, e.g., 0.15 for 15%)
 2. The period this CAGR is based on (e.g., "3Y", "5Y", "Since Inception", etc.)
-3. The source of this data if known
-
-If you cannot find specific data for this {asset_type}, return null. Do NOT use estimates or random values.
+3. The source of this data (e.g., "SEBI", "Fund House", "Industry Average", "Similar Product")
+4. Whether this is exact data or closest available (use "exact" or "closest_available")
 
 Return ONLY a JSON object with this exact format:
 {{
     "cagr": 0.15,
     "period": "3Y",
-    "source": "SEBI/Public Data"
+    "source": "SEBI/Public Data",
+    "data_type": "exact"
 }}
 
-If data is not available, return:
+OR if using closest available:
+{{
+    "cagr": 0.12,
+    "period": "3Y",
+    "source": "Similar Product/Industry Average",
+    "data_type": "closest_available"
+}}
+
+If absolutely no data is available (not even similar products), return:
 {{
     "cagr": null,
     "period": null,
-    "source": "Not Found"
+    "source": "Not Found",
+    "data_type": "not_found"
 }}"""
 
             response = client.chat.completions.create(
@@ -213,10 +227,19 @@ If data is not available, return:
             if result.get('cagr') is not None and result.get('cagr') != 'null':
                 cagr = float(result['cagr'])
                 if 0 < cagr < 1:  # CAGR should be between 0% and 100%
+                    data_type = result.get('data_type', 'exact')
+                    period = result.get('period', 'AI Estimated')
+                    source = result.get('source', 'AI')
+                    
+                    # Log if using closest available data
+                    if data_type == 'closest_available':
+                        print(f"[PMS_AIF_AI] 📅 {ticker}: Using closest available CAGR {cagr*100:.1f}% ({period}) from {source}")
+                    
                     return {
                         'cagr': cagr,
-                        'period': result.get('period', 'AI Estimated'),
-                        'source': result.get('source', 'AI')
+                        'period': period,
+                        'source': source,
+                        'data_type': data_type
                     }
             
             return None

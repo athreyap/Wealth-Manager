@@ -1150,74 +1150,19 @@ def _tx_normalize_transaction_type(
 
 
 def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> str:
-    """Infer asset type from ticker/name/hint.
-    CRITICAL: For numeric tickers, checks actual data sources (AMFI, yfinance) before heuristics.
+    """
+    Infer asset type from ticker/name/hint.
+    CRITICAL: Uses actual data sources in priority order:
+    1. Check hints and obvious patterns first
+    2. Try yfinance - if returns data, it's a stock
+    3. Try mftool/AMFI - if returns data, it's a mutual fund
+    4. Use AI as last resort
     """
     hint = asset_hint.lower()
-    name = stock_name.lower()
+    name = (stock_name or '').lower()
     ticker_upper = ticker.upper()
 
-    # Check if ticker is numeric (including decimals like "10.65" - AMFI codes)
-    is_numeric = False
-    try:
-        # Remove any non-numeric characters except decimal point
-        cleaned = ticker_upper.replace(',', '').replace('$', '').strip()
-        numeric_value = float(cleaned)
-        is_numeric = True
-    except (ValueError, AttributeError):
-        pass
-
-    # For numeric tickers, check actual data sources to determine type
-    if is_numeric and ticker_upper.replace('.', '').isdigit():
-        ticker_clean = ticker_upper.replace('.', '').split('.')[0]  # Remove decimal part
-        
-        # First, check if it's in AMFI dataset (mutual fund)
-        try:
-            amfi_data = get_amfi_dataset()
-            if amfi_data and 'code_lookup' in amfi_data:
-                if ticker_clean in amfi_data['code_lookup']:
-                    return 'mutual_fund'  # Found in AMFI = mutual fund
-        except Exception:
-            pass  # AMFI check failed, continue to stock check
-        
-        # Try to fetch from yfinance (for stocks) - but only if it's a 5-6 digit number
-        if len(ticker_clean) >= 5:
-            try:
-                import yfinance as yf
-                # Try NSE first
-                nse_ticker = f"{ticker_clean}.NS"
-                stock = yf.Ticker(nse_ticker)
-                hist = stock.history(period='1d')
-                if not hist.empty:
-                    return 'stock'  # Found in yfinance NSE = stock
-                
-                # Try BSE
-                bse_ticker = f"{ticker_clean}.BO"
-                stock = yf.Ticker(bse_ticker)
-                hist = stock.history(period='1d')
-                if not hist.empty:
-                    return 'stock'  # Found in yfinance BSE = stock
-            except Exception:
-                pass  # yfinance check failed, fall back to heuristics
-        
-        # Fallback to heuristics if both checks failed
-        # Most 6-digit numbers starting with '1' are mutual funds
-        if len(ticker_clean) == 6 and ticker_clean.startswith('1'):
-            return 'mutual_fund'
-        elif len(ticker_clean) == 5:
-            # 5-digit codes: Check AMFI first (many 5-digit codes are MFs like 25872)
-            # If not in AMFI, could be BSE stock, but check name for MF keywords
-            if has_mf_keyword:
-                return 'mutual_fund'
-            # Default to stock for 5-digit if not in AMFI and no MF keywords
-            return 'stock'
-        elif len(ticker_clean) >= 6:
-            # 6+ digit codes that don't start with 1: likely BSE stocks
-            return 'stock'
-        else:
-            # Shorter numeric codes are likely stocks
-            return 'stock'
-
+    # STEP 1: Check explicit hints first
     if hint:
         if 'mutual' in hint or 'mf' in hint or hint == 'mutual_fund':
             return 'mutual_fund'
@@ -1230,57 +1175,158 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
         if 'stock' in hint or 'equity' in hint:
             return 'stock'
 
+    # STEP 2: Check obvious patterns
     if ticker_upper.startswith('INP') or 'pms' in name or 'portfolio management' in name:
         return 'pms'
     if ticker_upper.startswith('AIF') or 'aif' in name or 'alternative investment' in name:
         return 'aif'
+    if ticker_upper.startswith('SGB') or 'sgb' in name:
+        return 'bond'
+    if '.NS' in ticker_upper or '.BO' in ticker_upper:
+        return 'stock'
     
-    # For numeric tickers, check AMFI FIRST (before name keywords)
-    # This catches 5-digit codes like 25872 that are mutual funds even if name isn't checked yet
-    if is_numeric and ticker_upper.replace('.', '').isdigit():
-        ticker_clean = ticker_upper.replace('.', '').split('.')[0]
-        # Check AMFI for any numeric ticker (not just 6-digit starting with 1)
-        # This catches 5-digit codes like 25872 that are mutual funds
+    # Check if ticker is numeric (including decimals like "10.65" - AMFI codes)
+    is_numeric = False
+    ticker_clean = None
+    try:
+        cleaned = ticker_upper.replace(',', '').replace('$', '').strip()
+        numeric_value = float(cleaned)
+        is_numeric = True
+        ticker_clean = ticker_upper.replace('.', '').split('.')[0]  # Remove decimal part
+    except (ValueError, AttributeError):
+        pass
+
+    # STEP 3: For numeric tickers, check ACTUAL DATA SOURCES
+    if is_numeric and ticker_clean:
+        # Try yfinance FIRST - if it returns data, it's a stock
+        if len(ticker_clean) >= 5:
+            try:
+                import yfinance as yf
+                # Try NSE first
+                nse_ticker = f"{ticker_clean}.NS"
+                try:
+                    stock = yf.Ticker(nse_ticker)
+                    hist = stock.history(period='1d')
+                    if not hist.empty and len(hist) > 0:
+                        price = hist['Close'].iloc[-1]
+                        if price and price > 0:
+                            print(f"[ASSET_TYPE] ✅ {ticker}: Found in yfinance NSE → stock")
+                            return 'stock'
+                except Exception:
+                    pass
+                
+                # Try BSE
+                bse_ticker = f"{ticker_clean}.BO"
+                try:
+                    stock = yf.Ticker(bse_ticker)
+                    hist = stock.history(period='1d')
+                    if not hist.empty and len(hist) > 0:
+                        price = hist['Close'].iloc[-1]
+                        if price and price > 0:
+                            print(f"[ASSET_TYPE] ✅ {ticker}: Found in yfinance BSE → stock")
+                            return 'stock'
+                except Exception:
+                    pass
+            except Exception:
+                pass  # yfinance check failed, continue to MF check
+        
+        # STEP 4: Try mftool/AMFI - if it returns data, it's a mutual fund
         try:
+            # Check AMFI dataset first (faster)
             amfi_data = get_amfi_dataset()
             if amfi_data and 'code_lookup' in amfi_data:
                 if ticker_clean in amfi_data['code_lookup']:
-                    return 'mutual_fund'  # Found in AMFI = mutual fund
+                    scheme = amfi_data['code_lookup'][ticker_clean]
+                    if scheme and scheme.get('nav'):
+                        print(f"[ASSET_TYPE] ✅ {ticker}: Found in AMFI dataset → mutual_fund")
+                        return 'mutual_fund'
         except Exception:
             pass
+        
+        # Try mftool if available
+        try:
+            from mftool import Mftool
+            mf = Mftool()
+            if ticker_clean.isdigit():
+                try:
+                    quote = mf.get_scheme_quote(ticker_clean)
+                    if quote and quote.get('nav'):
+                        nav = float(quote.get('nav', 0))
+                        if nav > 0:
+                            print(f"[ASSET_TYPE] ✅ {ticker}: Found in mftool → mutual_fund")
+                            return 'mutual_fund'
+                except Exception:
+                    pass
+        except Exception:
+            pass  # mftool not available or failed
     
-    # Check for mutual fund keywords (even if "bond" is in name - bond funds are still MFs)
-    # This should happen AFTER AMFI check but BEFORE stock checks
+    # STEP 5: Use AI as last resort to determine asset type
+    try:
+        client = st.session_state.get('openai_client')
+        if not client:
+            try:
+                from openai import OpenAI
+                if "api_keys" in st.secrets and "open_ai" in st.secrets.get("api_keys", {}):
+                    client = OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
+                    st.session_state['openai_client'] = client
+            except Exception:
+                pass
+        
+        if client:
+            prompt = f"""You are a financial data expert. Determine the asset type for this Indian security:
+
+Ticker: {ticker}
+Name: {stock_name or 'Not provided'}
+
+Asset types:
+- stock: NSE/BSE listed stocks (e.g., RELIANCE, INFY, TCS)
+- mutual_fund: Mutual funds with AMFI codes (e.g., 120760, 146514)
+- bond: Government or corporate bonds (e.g., SGBJUN31I)
+- pms: Portfolio Management Service (starts with INP)
+- aif: Alternative Investment Fund (starts with AIF)
+
+Return ONLY a JSON object:
+{{"asset_type": "stock|mutual_fund|bond|pms|aif", "confidence": "high|medium|low"}}
+
+If uncertain, return asset_type based on ticker pattern and name."""
+
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "You are a financial data expert. Return only valid JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.3,
+                    max_tokens=100
+                )
+                
+                import json
+                result = json.loads(response.choices[0].message.content)
+                ai_asset_type = result.get('asset_type', '').lower()
+                
+                if ai_asset_type in ['stock', 'mutual_fund', 'bond', 'pms', 'aif']:
+                    print(f"[ASSET_TYPE] ✅ {ticker}: AI determined → {ai_asset_type} (confidence: {result.get('confidence', 'unknown')})")
+                    return ai_asset_type
+            except Exception as e:
+                pass  # AI failed, fall back to heuristics
+    except Exception:
+        pass  # AI not available, fall back to heuristics
+    
+    # STEP 6: Fallback to heuristics if all data sources fail
     mf_keywords = ['fund', 'scheme', 'growth', 'nav', 'mutual', 'mf', 'plan', 'allocation', 'hybrid', 'equity', 'debt']
     has_mf_keyword = any(keyword in name for keyword in mf_keywords)
     
     if has_mf_keyword:
         return 'mutual_fund'
     
-    # Only assume stock for numeric if it's NOT in AMFI and NOT a 6-digit starting with 1
-    if ticker_upper.isdigit() and len(ticker_upper) >= 5:
-        # Most 6-digit numbers starting with '1' are mutual funds
-        if len(ticker_upper) == 6 and ticker_upper.startswith('1'):
-            return 'mutual_fund'
-        # For other numeric codes, if name suggests MF, treat as MF
-        if has_mf_keyword:
-            return 'mutual_fund'
-    
-    # Only check for bonds if NOT a mutual fund and NOT numeric
-    # SGB (Sovereign Gold Bonds) are actual bonds, not mutual funds
-    if ticker_upper.startswith('SGB') or 'sgb' in name:
-        return 'bond'
-    # Debentures are bonds
     if 'debenture' in name and not has_mf_keyword:
         return 'bond'
-    # Other "bond" mentions might be bond mutual funds, so only classify as bond if no MF keywords
-    is_numeric = ticker_upper.replace('.', '').isdigit()
     if 'bond' in name and not has_mf_keyword and not is_numeric:
         return 'bond'
     
-    if '.NS' in ticker_upper or '.BO' in ticker_upper:
-        return 'stock'
-    
+    # Default to stock for unknown types
     return 'stock'
 
 
