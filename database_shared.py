@@ -658,11 +658,29 @@ class SharedDatabaseManager:
         """
         Fetch mutual fund info from mftool, with AMFI fallback.
         CRITICAL: Resolves ticker using BOTH ticker AND name for accurate AMFI code mapping.
+        IGNORES fund_name if it looks like a channel/filename (e.g., "pornima", short names, etc.)
         """
         # Normalize ticker: remove any prefixes/suffixes, ensure it's just the AMFI code
         normalized_ticker = str(ticker).strip()
         # Remove common prefixes
         normalized_ticker = normalized_ticker.replace('MF_', '').replace('mf_', '').strip()
+        
+        # CRITICAL: Validate fund_name - ignore if it looks like a channel/filename
+        # Common patterns: short names (< 10 chars), lowercase only, no spaces, common channel names
+        if fund_name:
+            fund_name_lower = fund_name.lower().strip()
+            # Ignore if it looks like a channel/filename:
+            # - Too short (< 10 chars) and no spaces
+            # - Common channel names
+            # - All lowercase with no proper capitalization
+            invalid_patterns = [
+                len(fund_name_lower) < 10 and ' ' not in fund_name_lower,  # Short single word
+                fund_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi'],  # Common channels
+                fund_name_lower.islower() and len(fund_name_lower.split()) == 1  # Single lowercase word
+            ]
+            if any(invalid_patterns):
+                print(f"[MF_INFO] ⚠️ Ignoring invalid fund_name '{fund_name}' (looks like channel/filename), fetching from AMFI/mftool")
+                fund_name = None
         
         # If ticker is already a valid AMFI code (numeric), use it directly
         if normalized_ticker.isdigit():

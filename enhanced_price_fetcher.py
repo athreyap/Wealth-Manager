@@ -102,7 +102,16 @@ class EnhancedPriceFetcher:
         # This prevents "VBL" from becoming "V" - only "V-BL" or "V_BL" should become "V"
         text = re.sub(r'[-_.](T0|T1|BL)(?=\.|$)', '', text, flags=re.IGNORECASE)
         text = text.replace('-', '')
-        return text.upper()
+        # CRITICAL: Preserve .NS and .BO suffixes - don't normalize them away
+        # Check if it ends with .NS or .BO before uppercasing
+        has_ns = text.upper().endswith('.NS')
+        has_bo = text.upper().endswith('.BO')
+        text = text.upper()
+        # Ensure only one suffix (remove duplicates like .NS.NS)
+        if text.endswith('.NS.NS') or text.endswith('.BO.BO') or text.endswith('.NS.BO') or text.endswith('.BO.NS'):
+            # Remove duplicate suffixes
+            text = re.sub(r'\.(NS|BO)\.(NS|BO)$', r'.\1', text)
+        return text
 
     def _base_symbol(self, value: str) -> str:
         """Collapse exchange suffixes and trade-tags to a canonical base symbol."""
@@ -244,11 +253,14 @@ class EnhancedPriceFetcher:
                 # OPTIMIZATION: Return price data for batch update instead of updating immediately
                 # Check for resolved ticker from source (for mutual funds) or from _last_resolved_ticker (for stocks)
                 resolved_ticker = None
+                resolved_fund_name = None
                 
                 # For mutual funds, extract resolved ticker from source if available
                 if asset_type == 'mutual_fund' and source and 'name_resolved:' in source:
                     try:
                         resolved_ticker = source.split('name_resolved:')[1].strip()
+                        # Get resolved fund name if available
+                        resolved_fund_name = getattr(self, "_last_resolved_fund_name", None)
                     except:
                         pass
                 
@@ -259,12 +271,15 @@ class EnhancedPriceFetcher:
                 # Only include resolved_ticker if it's different from current ticker
                 price_data = {
                     'price': current_price,
-                    'resolved_ticker': resolved_ticker if resolved_ticker and resolved_ticker != ticker else None
+                    'resolved_ticker': resolved_ticker if resolved_ticker and resolved_ticker != ticker else None,
+                    'resolved_fund_name': resolved_fund_name if resolved_fund_name else None
                 }
                 
-                # Clear _last_resolved_ticker after use
+                # Clear _last_resolved_ticker and _last_resolved_fund_name after use
                 if hasattr(self, '_last_resolved_ticker'):
                     self._last_resolved_ticker = None
+                if hasattr(self, '_last_resolved_fund_name'):
+                    self._last_resolved_fund_name = None
                 
                 return True, None, price_data
             else:
@@ -288,7 +303,7 @@ class EnhancedPriceFetcher:
         
         # OPTIMIZATION: Collect all price updates and batch them
         price_updates = []  # List of (stock_id, price) tuples
-        ticker_updates = []  # List of (stock_id, ticker) tuples for ticker normalization
+        ticker_updates = []  # List of (stock_id, ticker, fund_name) tuples for ticker normalization
         corporate_action_updates = []  # List of corporate action updates
         
         # Process holdings in parallel batches to avoid overwhelming the system
@@ -317,7 +332,8 @@ class EnhancedPriceFetcher:
                             if 'price' in price_data:
                                 price_updates.append((stock_id, price_data['price']))
                             if 'resolved_ticker' in price_data and price_data['resolved_ticker']:
-                                ticker_updates.append((stock_id, price_data['resolved_ticker']))
+                                resolved_fund_name = price_data.get('resolved_fund_name')
+                                ticker_updates.append((stock_id, price_data['resolved_ticker'], resolved_fund_name))
                         
                         print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): Price fetched")
                         
@@ -369,8 +385,19 @@ class EnhancedPriceFetcher:
         if ticker_updates:
             try:
                 updated_count = 0
+                skipped_count = 0
                 for stock_id, resolved_ticker in ticker_updates:
                     try:
+                        # Check if resolved ticker already exists with a different stock_id
+                        existing = db_manager.supabase.table('stock_master').select('id').eq('ticker', resolved_ticker).execute()
+                        if existing.data and len(existing.data) > 0:
+                            existing_stock_id = existing.data[0]['id']
+                            if existing_stock_id != stock_id:
+                                # Ticker already exists for a different stock - skip update to avoid duplicate key
+                                print(f"[PRICE_UPDATE] ⚠️ Skipping ticker update: {resolved_ticker} already exists for different stock_id")
+                                skipped_count += 1
+                                continue
+                        
                         result = db_manager.supabase.table('stock_master').update({
                             'ticker': resolved_ticker,
                             'last_updated': datetime.now().isoformat()
@@ -378,8 +405,14 @@ class EnhancedPriceFetcher:
                         if result.data:
                             updated_count += 1
                     except Exception as e:
-                        print(f"[PRICE_UPDATE] ⚠️ Failed to update ticker for stock_id {stock_id}: {str(e)}")
-                print(f"[PRICE_UPDATE] 📦 Auto-updated {updated_count}/{len(ticker_updates)} tickers in stock_master")
+                        error_msg = str(e)
+                        # Check if it's a duplicate key error
+                        if 'duplicate key' in error_msg.lower() or '23505' in error_msg:
+                            print(f"[PRICE_UPDATE] ⚠️ Skipping ticker update: {resolved_ticker} already exists (duplicate key)")
+                            skipped_count += 1
+                        else:
+                            print(f"[PRICE_UPDATE] ⚠️ Failed to update ticker for stock_id {stock_id}: {error_msg[:200]}")
+                print(f"[PRICE_UPDATE] 📦 Auto-updated {updated_count}/{len(ticker_updates)} tickers in stock_master ({skipped_count} skipped - already exist)")
             except Exception as e:
                 print(f"[PRICE_UPDATE] ⚠️ Batch ticker update error: {str(e)}")
         
@@ -1044,9 +1077,11 @@ class EnhancedPriceFetcher:
                     if variant.endswith('.NS'):
                         clean_formatted = variant
                     elif variant.endswith('.BO'):
-                        # If it's .BO, convert to .NS
-                        clean_formatted = self._normalize_base_ticker(variant.replace('.BO', '')) + '.NS'
+                        # If it's .BO, convert to .NS (remove .BO first to avoid double suffix)
+                        base = variant.replace('.BO', '')
+                        clean_formatted = self._normalize_base_ticker(base) + '.NS'
                     else:
+                        # Variant has no suffix, add .NS
                         clean_formatted = self._normalize_base_ticker(variant) + '.NS'
                     self._last_resolved_ticker = clean_formatted
                     return price, source
@@ -1068,9 +1103,11 @@ class EnhancedPriceFetcher:
                     if variant.endswith('.BO'):
                         clean_formatted = variant
                     elif variant.endswith('.NS'):
-                        # If it's .NS, convert to .BO
-                        clean_formatted = self._normalize_base_ticker(variant.replace('.NS', '')) + '.BO'
+                        # If it's .NS, convert to .BO (remove .NS first to avoid double suffix)
+                        base = variant.replace('.NS', '')
+                        clean_formatted = self._normalize_base_ticker(base) + '.BO'
                     else:
+                        # Variant has no suffix, add .BO
                         clean_formatted = self._normalize_base_ticker(variant) + '.BO'
                     self._last_resolved_ticker = clean_formatted
                     return price, source
@@ -1209,11 +1246,14 @@ class EnhancedPriceFetcher:
                             if nav_value:
                                 price = float(nav_value)
                                 if price > 0:
-                                    # Success! Log the resolution and store resolved ticker
+                                    # Success! Log the resolution and store resolved ticker + fund name
+                                    resolved_fund_name = resolved.get('name', '') or scheme_entry.get('name', '')
                                     print(f"[MF_RESOLVE] ✅ Auto-resolved {scheme_code} → {correct_code} (confidence: {confidence*100:.0f}%)")
                                     print(f"[MF_RESOLVE] 🔄 Auto-updating ticker in database from {scheme_code} to {correct_code}")
-                                    # Store resolved ticker for batch update
+                                    print(f"[MF_RESOLVE] 📝 Fund name: {resolved_fund_name}")
+                                    # Store resolved ticker and fund name for batch update
                                     self._last_resolved_ticker = correct_code
+                                    self._last_resolved_fund_name = resolved_fund_name
                                     return price, f'amfi_name_resolved:{correct_code}'
                     except Exception:
                         pass
