@@ -418,7 +418,7 @@ Look for transaction data including:
 - Channels/brokers/platforms
 
 Format the output as plain text with one transaction per line, like:
-Date: YYYY-MM-DD | Ticker: SYMBOL | Name: Stock Name | Quantity: 100 | Price: 50.00 | Amount: 5000 | Type: buy | Asset: stock | Channel: Broker Name
+Date: YYYY-MM-DD | Ticker: SYMBOL | Name: Stock Name | Quantity: 100 | Price: 50.00 | Amount: 5000 | Type: buy | Asset: stock | Channel: [Extract from "channel"/"Channel"/"Broker"/"Platform" column if present, otherwise use filename]
 
 Or if it's a table, extract all rows with transaction data.
 
@@ -762,7 +762,7 @@ Rules:
 - Determine transaction_type: "buy" for purchases/buys, "sell" for sales/redemptions
 - Infer asset_type: numeric codes → mutual_fund, .NS/.BO → stock, etc.
 - Set sector to "Unknown" if not found
-- Set channel to filename: "{filename}"
+- **Channel**: CRITICAL - Look for a "channel", "Channel", "CHANNEL", "Broker", "Platform", or "Source" column in the file. If such a column exists, extract its value for each transaction. If no channel column exists in the file, use the filename `{filename}` as the channel value. NEVER use channel value as stock_name or scheme_name.
 
 IMPORTANT:
 - Extract EVERY transaction you find, even if some fields are missing
@@ -795,7 +795,7 @@ IMPORTANT COLUMN MAPPING RULES:
 - **Price columns**: Look for "Price", "Rate", "NAV", "Per Unit Price" → map to `"price"` (if missing, we'll calculate from amount/quantity)
 - **Transaction Type**: Look for "Type", "Transaction Type", "Action", "Buy/Sell" → map to `"transaction_type"` ("BUY" → "buy", "SELL" → "sell")
 - **Exchange**: Look for "Exchange", "Exchange Name" → use for context
-- **Channel**: Use filename `{filename}` or any "Broker"/"Platform" column
+- **Channel**: CRITICAL - Look for a "channel", "Channel", "CHANNEL", "Broker", "Platform", or "Source" column in the file. If such a column exists, extract its value. If no channel column exists in the file, use the filename `{filename}` as the channel value. NEVER use channel value as stock_name or scheme_name.
 
 CRITICAL INSTRUCTIONS:
 - **Quantity is the MOST IMPORTANT field** - if the file has a "Quantity", "Units", "Number of Units", "Units Held", or similar column, extract it EXACTLY as shown, do NOT calculate it
@@ -1389,13 +1389,29 @@ CRITICAL RULES:
         
         return []
 
-    def _infer_channel_from_filename(self, filename: str, explicit_channel: Optional[str] = None) -> str:
-        """Infer channel/platform from explicit value or fallback to filename stem."""
+    def _infer_channel_from_filename(self, filename: str, explicit_channel: Optional[str] = None, file_columns: Optional[list] = None) -> str:
+        """
+        Infer channel/platform from:
+        1. Explicit channel value (from transaction data)
+        2. 'channel' or 'Channel' column in file (if file_columns provided)
+        3. Filename stem as fallback
+        
+        Args:
+            filename: Source filename
+            explicit_channel: Channel value from transaction data
+            file_columns: List of column names from the file (to check for channel column)
+        """
+        # Priority 1: Use explicit channel from transaction if provided
         if explicit_channel:
             candidate = str(explicit_channel).strip()
             if candidate:
                 return candidate
-
+        
+        # Priority 2: Check if file has a 'channel' or 'Channel' column
+        # (Note: This is a hint - actual channel value should come from the transaction data)
+        # If file_columns is provided and contains 'channel', we expect the AI to extract it
+        
+        # Priority 3: Fallback to filename
         if not filename:
             return "Direct"
 

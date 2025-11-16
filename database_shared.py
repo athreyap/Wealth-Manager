@@ -461,8 +461,11 @@ class SharedDatabaseManager:
             # This ensures we always use the correct name from yfinance/AMFI/mftool
             # Pass stock_name for better AMFI mapping (uses both ticker AND name)
             # Use actual_ticker (resolved if provided) for fetching info
+            print(f"[STOCK_CREATE] 🔍 Fetching stock info for ticker: {actual_ticker} (asset_type: {asset_type}, provided_name: {stock_name})")
             enhanced_info = self._fetch_stock_info(actual_ticker, asset_type, stock_name)
             authoritative_name = enhanced_info.get('stock_name', '').strip()
+            if authoritative_name:
+                print(f"[STOCK_CREATE] ✅ Got authoritative name: '{authoritative_name}' (source: {enhanced_info.get('source', 'unknown')})")
             
             # Use authoritative name if available, otherwise fall back to provided name
             # CRITICAL: Don't use provided stock_name if it looks like a channel/filename
@@ -681,8 +684,34 @@ class SharedDatabaseManager:
         try:
             import yfinance as yf
             
-            # Try different ticker formats
-            ticker_formats = [ticker, f"{ticker}.NS", f"{ticker}.BO"]
+            # Normalize ticker - remove any existing .NS or .BO suffix to get base symbol
+            base_ticker = ticker.upper().strip()
+            has_ns = base_ticker.endswith('.NS')
+            has_bo = base_ticker.endswith('.BO')
+            
+            if has_ns:
+                base_ticker = base_ticker[:-3]
+            elif has_bo:
+                base_ticker = base_ticker[:-3]
+            
+            # Try different ticker formats (avoid duplicates)
+            ticker_formats = []
+            # If original ticker already had a suffix, try that first
+            if has_ns:
+                ticker_formats.append(f"{base_ticker}.NS")
+            elif has_bo:
+                ticker_formats.append(f"{base_ticker}.BO")
+            else:
+                # No suffix in original - try both exchanges
+                ticker_formats.append(f"{base_ticker}.NS")
+                ticker_formats.append(f"{base_ticker}.BO")
+            
+            # Also try base ticker without suffix (for BSE stocks that might not need .BO)
+            # BUT: Only if original ticker didn't have a suffix (to avoid wrong matches)
+            # If original had .NS or .BO, we should stick with that exchange
+            if not has_ns and not has_bo:
+                if base_ticker not in ticker_formats:
+                    ticker_formats.append(base_ticker)
             
             for ticker_format in ticker_formats:
                 try:
@@ -690,16 +719,22 @@ class SharedDatabaseManager:
                     info = stock.info
                     
                     if info and info.get('longName'):
-                        return {
-                            'stock_name': info.get('longName', ''),
-                            'sector': info.get('sector', 'Unknown'),
-                            'source': 'yfinance'
-                        }
-                except:
+                        stock_name = info.get('longName', '').strip()
+                        if stock_name:
+                            print(f"[STOCK_INFO] ✅ Fetched stock name for {ticker} → '{stock_name}' using ticker format: {ticker_format}")
+                            return {
+                                'stock_name': stock_name,
+                                'sector': info.get('sector', 'Unknown'),
+                                'source': 'yfinance',
+                                'ticker_used': ticker_format
+                            }
+                except Exception as e:
+                    # Log error for debugging but continue to next format
+                    print(f"[STOCK_INFO] ⚠️ Failed to fetch info for {ticker_format}: {str(e)[:100]}")
                     continue
             
             return {}
-        except:
+        except Exception as e:
             return {}
     
     def _fetch_mf_info_mftool(self, ticker: str, fund_name: str = None) -> Dict[str, Any]:
