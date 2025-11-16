@@ -1102,8 +1102,10 @@ CRITICAL RULES:
                 # 3. OR mutual fund without ticker (need to resolve ticker from name)
                 # Always use transaction date from file, NOT current date
                 should_fetch_historical = False
+                # Check if mutual fund without ticker (ticker is None, empty string, or 'None' string)
+                ticker_value = validated_trans.get('ticker')
                 is_mf_without_ticker = (validated_trans.get('asset_type', '').lower() == 'mutual_fund' and 
-                                       not validated_trans.get('ticker'))
+                                       (not ticker_value or ticker_value == 'None' or ticker_value.strip() == ''))
                 
                 if price_was_calculated:
                     # If we calculated price, only fetch if calculated price is 0 or invalid
