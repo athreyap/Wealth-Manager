@@ -221,45 +221,24 @@ class EnhancedPriceFetcher:
                     
             elif asset_type == 'mutual_fund':
                 fund_name = holding.get('scheme_name') or holding.get('stock_name', '')
-                # Store average price for fallback if price fetch fails
+                # Store average price for fallback if price fetch fails (for regular funds only)
                 avg_price_for_fallback = holding.get('average_price', 0)
                 self._last_holding_avg_price = avg_price_for_fallback if avg_price_for_fallback > 0 else None
+                
+                # Get price - segregated fund handling is now inside _get_mf_price_with_fallback
                 current_price, source = self._get_mf_price_with_fallback(ticker, fund_name)
                 
-                # Check if this is a segregated/discontinued fund
-                is_segregated = fund_name and ('segregated' in fund_name.lower() or 'segregated portfolio' in fund_name.lower())
-                
-                # If price fetch failed, only use average price as fallback if NOT a segregated fund
-                # Segregated funds should show actual price (even if 0) or try harder to find replacement fund
-                if not current_price or current_price <= 0:
-                    if is_segregated:
-                        # For segregated funds, try name-based resolution to find replacement fund
-                        print(f"[MF_PRICE] ⚠️ {ticker} ({fund_name[:50]}): Price fetch failed - segregated fund, trying harder...")
-                        # Try to find the parent fund or replacement fund by removing "Segregated Portfolio" from name
-                        if fund_name:
-                            parent_fund_name = fund_name.replace('Segregated Portfolio', '').replace('Segregated', '').strip()
-                            parent_fund_name = re.sub(r'\s+', ' ', parent_fund_name)  # Clean up extra spaces
-                            if parent_fund_name and parent_fund_name != fund_name:
-                                print(f"[MF_PRICE] 🔍 Trying parent fund name: {parent_fund_name[:50]}")
-                                parent_price, parent_source = self._get_mf_price_with_fallback(ticker, parent_fund_name)
-                                if parent_price and parent_price > 0:
-                                    current_price = parent_price
-                                    source = f'parent_fund_{parent_source}'
-                                    print(f"[MF_PRICE] ✅ Found parent fund price: ₹{current_price}")
-                        
-                        # If still no price, don't use average - let it show as unavailable
-                        if not current_price or current_price <= 0:
-                            current_price = None
-                            source = 'segregated_fund_unavailable'
-                            print(f"[MF_PRICE] ❌ {ticker}: Segregated fund - price unavailable (not using average price fallback)")
-                        else:
-                            # Price was found (either from parent fund or resolved code) - use it!
-                            print(f"[MF_PRICE] ✅ {ticker}: Segregated fund - using resolved price ₹{current_price:.2f} from {source}")
-                    elif avg_price_for_fallback > 0:
+                # If price fetch failed and it's NOT a segregated fund, use average price as fallback
+                # (Segregated funds are already handled inside _get_mf_price_with_fallback)
+                if (not current_price or current_price <= 0) and source != 'segregated_fund_unavailable':
+                    if avg_price_for_fallback > 0:
                         # For regular funds, use average price as fallback
                         current_price = avg_price_for_fallback
                         source = 'average_price_fallback'
                         print(f"[MF_PRICE] ⚠️ {ticker}: Using average price as fallback (price fetch failed)")
+                
+                # Clear the average price after use
+                self._last_holding_avg_price = None
                 # OPTIMIZATION: Don't update DB here - will be batched later
                     
             elif asset_type in ['pms', 'aif']:
@@ -1326,7 +1305,36 @@ class EnhancedPriceFetcher:
             # AI not available
             pass
         
-        # All methods failed for MF - return average price as fallback to avoid 0% returns
+        # All methods failed for MF - check if it's a segregated fund
+        # For segregated funds, try parent fund resolution and DON'T use average_price fallback
+        is_segregated = fund_name and ('segregated' in fund_name.lower() or 'segregated portfolio' in fund_name.lower())
+        
+        if is_segregated:
+            # For segregated funds, try to find parent fund by removing segregated details
+            import re
+            if fund_name:
+                parent_fund_name = fund_name
+                # Remove segregated portfolio identifiers
+                parent_fund_name = re.sub(r'-?\s*Segregated Portfolio\s*\d+', '', parent_fund_name, flags=re.IGNORECASE)
+                parent_fund_name = re.sub(r'-?\s*\d+\.\d+%[^-]*-?\d+[A-Z]{3}\d+', '', parent_fund_name)
+                parent_fund_name = re.sub(r'-?\s*Monthly\s+Dividend\s+Plan', '', parent_fund_name, flags=re.IGNORECASE)
+                parent_fund_name = re.sub(r'-?\s*Quarterly\s+IDCW', '', parent_fund_name, flags=re.IGNORECASE)
+                parent_fund_name = re.sub(r'-?\s*IDCW\s+Option', '', parent_fund_name, flags=re.IGNORECASE)
+                parent_fund_name = re.sub(r'\s+', ' ', parent_fund_name).strip()
+                
+                if parent_fund_name and parent_fund_name != fund_name:
+                    # Try fetching parent fund price
+                    print(f"[MF_PRICE] 🔍 Segregated fund detected, trying parent: '{parent_fund_name[:50]}'")
+                    parent_price, parent_source = self._get_mf_price_with_fallback(ticker, parent_fund_name)
+                    if parent_price and parent_price > 0:
+                        print(f"[MF_PRICE] ✅ Found parent fund price: ₹{parent_price}")
+                        return parent_price, f'parent_fund_{parent_source}'
+            
+            # Segregated fund - don't use average_price fallback, return None
+            print(f"[MF_PRICE] ❌ {ticker}: Segregated fund - price unavailable (not using average price fallback)")
+            return None, 'segregated_fund_unavailable'
+        
+        # For regular funds, return average price as fallback to avoid 0% returns
         # This prevents showing 0% return when price fetch fails
         try:
             # Try to get average price from holding if available
