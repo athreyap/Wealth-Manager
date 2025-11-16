@@ -461,6 +461,18 @@ class SharedDatabaseManager:
             authoritative_name = enhanced_info.get('stock_name', '').strip()
             
             # Use authoritative name if available, otherwise fall back to provided name
+            # CRITICAL: Don't use provided stock_name if it looks like a channel/filename
+            if not authoritative_name and stock_name:
+                stock_name_lower = stock_name.lower().strip()
+                is_invalid_name = (
+                    len(stock_name_lower) < 10 and ' ' not in stock_name_lower or
+                    stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi'] or
+                    (stock_name_lower.islower() and len(stock_name_lower.split()) == 1)
+                )
+                if is_invalid_name:
+                    print(f"[STOCK_CREATE] ⚠️ Ignoring invalid stock_name '{stock_name}' (looks like channel/filename), using 'Unknown'")
+                    stock_name = None
+            
             final_stock_name = authoritative_name if authoritative_name else (stock_name or 'Unknown').strip()
             
             # If no existing stock, try to find by ticker only - wrap in retry logic
@@ -478,12 +490,26 @@ class SharedDatabaseManager:
                 
                 # ALWAYS update with authoritative name if we fetched it and it's different
                 # This ensures all stocks with the same ticker have the same name
+                # CRITICAL: Also update if existing name looks like a channel/filename (e.g., "pornima")
                 update_data = {}
                 
-                if authoritative_name and authoritative_name != existing_name:
-                    # We have an authoritative name that differs - update it
-                    update_data['stock_name'] = authoritative_name
-                    print(f"[STOCK_UPDATE] Updating {normalised_ticker}: '{existing_name}' → '{authoritative_name}' (from {enhanced_info.get('source', 'external')})")
+                # Check if existing name looks invalid (channel/filename pattern)
+                existing_name_lower = existing_name.lower().strip()
+                is_invalid_existing_name = (
+                    len(existing_name_lower) < 10 and ' ' not in existing_name_lower or
+                    existing_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi'] or
+                    (existing_name_lower.islower() and len(existing_name_lower.split()) == 1)
+                )
+                
+                # Always update if we have authoritative name AND (it differs OR existing name is invalid)
+                if authoritative_name:
+                    if authoritative_name != existing_name or is_invalid_existing_name:
+                        update_data['stock_name'] = authoritative_name
+                        reason = "invalid existing name (channel/filename)" if is_invalid_existing_name else "name differs"
+                        print(f"[STOCK_UPDATE] Updating {normalised_ticker}: '{existing_name}' → '{authoritative_name}' ({reason}, from {enhanced_info.get('source', 'external')})")
+                elif is_invalid_existing_name:
+                    # Existing name is invalid but we couldn't fetch authoritative name - try harder
+                    print(f"[STOCK_UPDATE] ⚠️ Existing name '{existing_name}' is invalid but couldn't fetch authoritative name for {normalised_ticker}")
                 
                 # Update ticker if needed (normalization)
                 if existing_stock.get('ticker') != normalised_ticker:

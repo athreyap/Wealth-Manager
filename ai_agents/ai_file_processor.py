@@ -405,6 +405,8 @@ class AIFileProcessor(BaseAgent):
                                         "type": "text",
                                         "text": f"""Extract all financial transactions from this PDF page (Page {page_num} of {len(images)} from file: {filename}).
 
+CRITICAL: Do NOT use filename "{filename}" or channel/broker name as stock_name. Extract the actual fund/security name from the document. If stock_name is missing or looks like a channel name, set it to null.
+
 Look for transaction data including:
 - Transaction dates (in any format - will be normalized)
 - Stock/scheme names and tickers/symbols
@@ -753,7 +755,7 @@ Schema (JSON array of objects):
 Rules:
 - Extract date in any format and normalize to YYYY-MM-DD
 - Extract ticker/symbol (normalize to exchange format like RELIANCE.NS if needed)
-- Extract stock name/security name
+- Extract stock name/security name (NOT filename or channel name - if missing, set to null)
 - Extract quantity (shares/units)
 - Extract price per unit
 - Extract amount (total value)
@@ -786,6 +788,8 @@ IMPORTANT COLUMN MAPPING RULES:
 - **Date columns**: Look for "Date", "Execution date", "Txn Date", "Transaction Date", "Trade Date", etc. → map to `"date"`
 - **Ticker/Symbol columns**: Look for "Symbol", "Ticker", "Scrip Symbol", "Trading Symbol", "ISIN" (use ISIN if no symbol) → map to `"ticker"`
 - **Stock Name columns**: Look for "Stock name", "Stock Name", "Security Name", "Scrip Name", "Name" → map to `"stock_name"`
+  - CRITICAL: Do NOT use filename, channel, or broker name as stock_name
+  - If stock_name column is missing or contains channel/broker name, set it to null (will be fetched from AMFI/mftool)
 - **Quantity columns**: Look for "Quantity", "Qty", "Units", "No. of Units", "Number of Units", "Units Held", "Unit Balance", "Total Units", "Current Units", "Holding Quantity", "Balance Units" → map to `"quantity"` (THIS IS CRITICAL - quantity must be extracted correctly!)
 - **Amount/Value columns**: Look for "Value", "Amount", "Total Value", "Consideration", "Trade Value" → map to `"amount"`
 - **Price columns**: Look for "Price", "Rate", "NAV", "Per Unit Price" → map to `"price"` (if missing, we'll calculate from amount/quantity)
@@ -970,10 +974,24 @@ CRITICAL RULES:
                 price_present = original_price is not None and str(original_price).strip() != ''
                 amount_present = original_amount is not None and str(original_amount).strip() != ''
                 
+                # CRITICAL: Validate stock_name - don't use filename/channel as stock_name
+                raw_stock_name = trans.get('stock_name', '') or trans.get('scheme_name', '')
+                if raw_stock_name:
+                    raw_stock_name_lower = str(raw_stock_name).lower().strip()
+                    # Check if it looks like a channel/filename
+                    is_invalid_name = (
+                        len(raw_stock_name_lower) < 10 and ' ' not in raw_stock_name_lower or
+                        raw_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
+                        (raw_stock_name_lower.islower() and len(raw_stock_name_lower.split()) == 1 and raw_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+                    )
+                    if is_invalid_name:
+                        print(f"[VALIDATE] ⚠️ Ignoring invalid stock_name '{raw_stock_name}' (looks like channel/filename), will fetch from AMFI/mftool")
+                        raw_stock_name = None
+                
                 validated_trans = {
                     'date': self._normalize_date(trans.get('date', '')),
                     'ticker': str(trans.get('ticker', '')).strip(),
-                    'stock_name': trans.get('stock_name', trans.get('ticker', 'Unknown')),
+                    'stock_name': raw_stock_name if raw_stock_name else None,  # None instead of ticker - let database fetch it
                     'scheme_name': trans.get('scheme_name'),
                     'quantity': self._safe_float(original_quantity or 0),
                     'price': self._safe_float(original_price or 0),  # 0 if missing - will be fetched
@@ -1279,10 +1297,22 @@ CRITICAL RULES:
                 
                 transactions = []
                 for _, row in df.iterrows():
+                    # CRITICAL: Validate stock_name - don't use channel/filename
+                    raw_stock_name = row.get('stock_name', row.get('Stock Name', ''))
+                    if raw_stock_name:
+                        raw_stock_name_lower = str(raw_stock_name).lower().strip()
+                        is_invalid_name = (
+                            len(raw_stock_name_lower) < 10 and ' ' not in raw_stock_name_lower or
+                            raw_stock_name_lower in ['pornima', 'zerodha', 'groww', 'paytm', 'upstox', 'angel', 'icici', 'hdfc', 'sbi', 'direct'] or
+                            (raw_stock_name_lower.islower() and len(raw_stock_name_lower.split()) == 1 and raw_stock_name_lower not in ['infosys', 'reliance', 'tcs', 'hdfc', 'icici'])
+                        )
+                        if is_invalid_name:
+                            raw_stock_name = None  # Will be fetched from AMFI/mftool
+                    
                     trans = {
                         'date': row.get('date', row.get('Date', '')),
                         'ticker': row.get('ticker', row.get('Ticker', row.get('Symbol', ''))),
-                        'stock_name': row.get('stock_name', row.get('Stock Name', '')),
+                        'stock_name': raw_stock_name if raw_stock_name else None,  # None instead of empty string
                         'quantity': self._safe_float(row.get('quantity', row.get('Quantity', 0))),
                         'price': self._safe_float(row.get('price', row.get('Price', 0))),
                         'transaction_type': str(row.get('transaction_type', row.get('Type', 'buy'))).lower(),

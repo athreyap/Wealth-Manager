@@ -105,8 +105,8 @@ IMPORTANT RULES:
 For each transaction, provide:
 - date: Transaction date (YYYY-MM-DD format)
 - ticker: Stock symbol (if applicable)
-- stock_name: Full stock name (if applicable)
-- scheme_name: Mutual fund/PMS scheme name (if applicable)
+- stock_name: Full stock name (if applicable) - NOT filename or channel name
+- scheme_name: Mutual fund/PMS scheme name (if applicable) - NOT filename or channel name
 - quantity: Number of units/shares
 - price: Price per unit/share
 - amount: Total transaction amount
@@ -114,6 +114,8 @@ For each transaction, provide:
 - asset_type: stock/mutual_fund/pms/aif
 - channel: Broker/fund house name
 - sector: Industry sector (if identifiable)
+
+CRITICAL: Do NOT use filename or channel/broker name as stock_name or scheme_name. Extract the actual fund/security name from the document content.
 
 Be conservative - only extract data you're confident about."""
                     },
@@ -197,7 +199,8 @@ GUIDELINES:
 7. If sector is identifiable, include it
 8. Be precise with numbers - no rounding unless original data is rounded
 9. If a field is not available, use null
-10. Return ONLY the JSON array, no additional text
+10. CRITICAL: Do NOT use filename "{filename}" or channel/broker name as stock_name or scheme_name. Extract the actual fund/security name from the document. If stock_name/scheme_name is missing or looks like a channel name, set it to null.
+11. Return ONLY the JSON array, no additional text
 
 Focus on accuracy over quantity. It's better to extract fewer transactions correctly than many with errors."""
     
