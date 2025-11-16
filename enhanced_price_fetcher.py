@@ -871,8 +871,10 @@ class EnhancedPriceFetcher:
                 _add(upper.replace('.BO', ''))
             else:
                 _add(upper)
-                _add(f"{upper}.NS")
-                _add(f"{upper}.BO")
+                # Only add .NS/.BO if symbol doesn't already have them
+                if not upper.endswith('.NS') and not upper.endswith('.BO'):
+                    _add(f"{upper}.NS")
+                    _add(f"{upper}.BO")
 
         return variants
 
@@ -931,11 +933,19 @@ class EnhancedPriceFetcher:
         try:
             clean_ticker = self._normalize_base_ticker(ticker_variant)
             if source_type == 'nse':
-                if not clean_ticker.endswith('.NS'):
+                # Only add .NS if ticker doesn't already have .NS or .BO
+                if not clean_ticker.endswith('.NS') and not clean_ticker.endswith('.BO'):
                     clean_ticker = clean_ticker + '.NS'
+                elif clean_ticker.endswith('.BO'):
+                    # Convert .BO to .NS
+                    clean_ticker = clean_ticker.replace('.BO', '.NS')
             elif source_type == 'bse':
-                if not clean_ticker.endswith('.BO'):
+                # Only add .BO if ticker doesn't already have .NS or .BO
+                if not clean_ticker.endswith('.BO') and not clean_ticker.endswith('.NS'):
                     clean_ticker = clean_ticker + '.BO'
+                elif clean_ticker.endswith('.NS'):
+                    # Convert .NS to .BO
+                    clean_ticker = clean_ticker.replace('.NS', '.BO')
             elif source_type == 'raw':
                 # Remove any exchange suffix
                 clean_ticker = clean_ticker.replace('.NS', '').replace('.BO', '')
@@ -965,8 +975,10 @@ class EnhancedPriceFetcher:
         base_candidates = self._generate_stock_aliases(base_ticker, stock_name_hint)
         symbol_variants = self._expand_symbol_variants(base_candidates or [base_ticker])
         symbol_variants.insert(0, base_ticker)
-        symbol_variants.insert(1, f"{base_ticker}.NS")
-        symbol_variants.insert(2, f"{base_ticker}.BO")
+        # Only add .NS/.BO if base_ticker doesn't already have them
+        if not base_ticker.endswith('.NS') and not base_ticker.endswith('.BO'):
+            symbol_variants.insert(1, f"{base_ticker}.NS")
+            symbol_variants.insert(2, f"{base_ticker}.BO")
 
         self._last_resolved_ticker = base_candidates[0] if base_candidates else base_ticker
         
@@ -1006,7 +1018,14 @@ class EnhancedPriceFetcher:
                             f.cancel()
                     price, source = result
                     variant = futures[future]
-                    clean_formatted = self._normalize_base_ticker(variant.replace('.NS', '')) + '.NS'
+                    # Only add .NS if variant doesn't already have .NS or .BO
+                    if variant.endswith('.NS'):
+                        clean_formatted = variant
+                    elif variant.endswith('.BO'):
+                        # If it's .BO, convert to .NS
+                        clean_formatted = self._normalize_base_ticker(variant.replace('.BO', '')) + '.NS'
+                    else:
+                        clean_formatted = self._normalize_base_ticker(variant) + '.NS'
                     self._last_resolved_ticker = clean_formatted
                     return price, source
         
@@ -1023,7 +1042,14 @@ class EnhancedPriceFetcher:
                             f.cancel()
                     price, source = result
                     variant = futures[future]
-                    clean_formatted = self._normalize_base_ticker(variant.replace('.BO', '')) + '.BO'
+                    # Only add .BO if variant doesn't already have .NS or .BO
+                    if variant.endswith('.BO'):
+                        clean_formatted = variant
+                    elif variant.endswith('.NS'):
+                        # If it's .NS, convert to .BO
+                        clean_formatted = self._normalize_base_ticker(variant.replace('.NS', '')) + '.BO'
+                    else:
+                        clean_formatted = self._normalize_base_ticker(variant) + '.BO'
                     self._last_resolved_ticker = clean_formatted
                     return price, source
         

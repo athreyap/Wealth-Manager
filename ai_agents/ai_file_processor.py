@@ -1047,10 +1047,33 @@ CRITICAL RULES:
                     # Only fetch if price is still missing/zero and we didn't calculate it
                     transaction_date = validated_trans.get('date', '')
                     print(f"[VALIDATE] 🔍 Fetching historical price for {validated_trans['ticker']} on transaction date: {transaction_date} (from file)")
-                    fetched_price = self._fetch_price_for_transaction(validated_trans)
+                    fetched_price, price_source = self._fetch_price_for_transaction_with_resolution(validated_trans)
                     if fetched_price and fetched_price > 0:
                         validated_trans['price'] = round(float(fetched_price), 4)
                         print(f"[VALIDATE] ✅ Fetched historical price: ₹{validated_trans['price']} for {validated_trans['ticker']} on {transaction_date} (from file)")
+                        
+                        # Check if ticker was resolved via name-based resolution
+                        # For mutual funds: source format is "amfi_name_resolved:148520"
+                        # For stocks: source format is "yfinance_nse_resolved:RELIANCE.NS"
+                        if price_source and ('name_resolved:' in price_source or '_resolved:' in price_source):
+                            # Extract resolved ticker from source string
+                            try:
+                                # Try both formats
+                                if 'name_resolved:' in price_source:
+                                    resolved_ticker = price_source.split('name_resolved:')[1].strip()
+                                elif '_resolved:' in price_source:
+                                    resolved_ticker = price_source.split('_resolved:')[1].strip()
+                                else:
+                                    resolved_ticker = None
+                                
+                                if resolved_ticker:
+                                    # Remove any trailing characters (commas, parentheses, etc.)
+                                    resolved_ticker = resolved_ticker.split(',')[0].split(')')[0].split('(')[0].strip()
+                                    if resolved_ticker and resolved_ticker != validated_trans['ticker']:
+                                        print(f"[VALIDATE] 🔄 Updating ticker from {validated_trans['ticker']} to {resolved_ticker} (name-based resolution)")
+                                        validated_trans['ticker'] = resolved_ticker
+                            except Exception as e:
+                                self.logger.warning(f"Failed to extract resolved ticker from source '{price_source}': {e}")
                     else:
                         print(f"[VALIDATE] ⚠️ No historical price found for {validated_trans['ticker']} on {transaction_date} (from file)")
                 elif price_was_calculated:
@@ -1097,15 +1120,25 @@ CRITICAL RULES:
             # Try to fetch from yfinance (for stocks)
             try:
                 import yfinance as yf
-                # Try NSE first
-                nse_ticker = f"{ticker}.NS"
+                # Try NSE first - only add .NS if ticker doesn't already have .NS or .BO
+                if ticker.endswith('.NS'):
+                    nse_ticker = ticker
+                elif ticker.endswith('.BO'):
+                    nse_ticker = ticker.replace('.BO', '.NS')
+                else:
+                    nse_ticker = f"{ticker}.NS"
                 stock = yf.Ticker(nse_ticker)
                 hist = stock.history(period='1d')
                 if not hist.empty:
                     return 'stock'  # Found in yfinance NSE = stock
                 
-                # Try BSE
-                bse_ticker = f"{ticker}.BO"
+                # Try BSE - only add .BO if ticker doesn't already have .NS or .BO
+                if ticker.endswith('.BO'):
+                    bse_ticker = ticker
+                elif ticker.endswith('.NS'):
+                    bse_ticker = ticker.replace('.NS', '.BO')
+                else:
+                    bse_ticker = f"{ticker}.BO"
                 stock = yf.Ticker(bse_ticker)
                 hist = stock.history(period='1d')
                 if not hist.empty:
@@ -1244,27 +1277,36 @@ CRITICAL RULES:
     
     def _fetch_price_for_transaction(self, trans: Dict[str, Any]) -> Optional[float]:
         """Fetch historical price for transaction date when price missing/zero."""
+        price, _ = self._fetch_price_for_transaction_with_resolution(trans)
+        return price
+    
+    def _fetch_price_for_transaction_with_resolution(self, trans: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
+        """Fetch historical price for transaction date when price missing/zero. Returns price and source."""
         price_fetcher = self._get_price_fetcher()
         if not price_fetcher:
-            return None
+            return None, None
 
         price = trans.get('price') or 0
         if price and price > 0:
-            return price
+            return price, None
 
         ticker = trans.get('ticker')
         date = trans.get('date')
         asset_type = (trans.get('asset_type') or 'stock').lower()
 
         if not ticker or not date:
-            return None
+            return None, None
 
         cache_key = (ticker, date, asset_type)
         if cache_key in self._price_cache:
-            return self._price_cache[cache_key]
+            cached = self._price_cache[cache_key]
+            if isinstance(cached, tuple):
+                return cached
+            return cached, None
 
-        fund_name = trans.get('stock_name')
+        fund_name = trans.get('stock_name') or trans.get('scheme_name')
         fetched_price = None
+        price_source = None
 
         try:
             fetched_price = price_fetcher.get_historical_price(
@@ -1275,21 +1317,30 @@ CRITICAL RULES:
             )
 
             if not fetched_price:
-                current_price, _ = price_fetcher.get_current_price(
+                current_price, source = price_fetcher.get_current_price(
                     ticker,
                     asset_type,
                     fund_name=fund_name
                 )
                 fetched_price = current_price
+                price_source = source
+                
+                # For stocks, check if ticker was resolved via name-based lookup
+                # The resolved ticker is stored in _last_resolved_ticker
+                if asset_type == 'stock' and hasattr(price_fetcher, '_last_resolved_ticker'):
+                    resolved_ticker = getattr(price_fetcher, '_last_resolved_ticker', None)
+                    if resolved_ticker and resolved_ticker != ticker:
+                        # Add resolved ticker info to source
+                        price_source = f"{source}_resolved:{resolved_ticker}"
 
             if fetched_price and fetched_price > 0:
-                self._price_cache[cache_key] = fetched_price
-                return fetched_price
+                self._price_cache[cache_key] = (fetched_price, price_source)
+                return fetched_price, price_source
         except Exception as exc:
             self.logger.warning(f"Price backfill failed for {ticker} on {date}: {exc}")
 
         self._price_cache[cache_key] = None
-        return None
+        return None, None
     
     def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze method required by BaseAgent"""
