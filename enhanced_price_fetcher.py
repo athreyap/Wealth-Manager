@@ -242,11 +242,30 @@ class EnhancedPriceFetcher:
                         pass  # Log warning but still store
                 
                 # OPTIMIZATION: Return price data for batch update instead of updating immediately
-                resolved_ticker = getattr(self, "_last_resolved_ticker", ticker)
+                # Check for resolved ticker from source (for mutual funds) or from _last_resolved_ticker (for stocks)
+                resolved_ticker = None
+                
+                # For mutual funds, extract resolved ticker from source if available
+                if asset_type == 'mutual_fund' and source and 'name_resolved:' in source:
+                    try:
+                        resolved_ticker = source.split('name_resolved:')[1].strip()
+                    except:
+                        pass
+                
+                # For stocks, use _last_resolved_ticker if set
+                if not resolved_ticker:
+                    resolved_ticker = getattr(self, "_last_resolved_ticker", None)
+                
+                # Only include resolved_ticker if it's different from current ticker
                 price_data = {
                     'price': current_price,
-                    'resolved_ticker': resolved_ticker if resolved_ticker != ticker else None
+                    'resolved_ticker': resolved_ticker if resolved_ticker and resolved_ticker != ticker else None
                 }
+                
+                # Clear _last_resolved_ticker after use
+                if hasattr(self, '_last_resolved_ticker'):
+                    self._last_resolved_ticker = None
+                
                 return True, None, price_data
             else:
                 return False, f"Failed to fetch price for {ticker}", None
@@ -349,15 +368,18 @@ class EnhancedPriceFetcher:
         # Batch update ticker normalizations
         if ticker_updates:
             try:
+                updated_count = 0
                 for stock_id, resolved_ticker in ticker_updates:
                     try:
-                        db_manager.supabase.table('stock_master').update({
+                        result = db_manager.supabase.table('stock_master').update({
                             'ticker': resolved_ticker,
                             'last_updated': datetime.now().isoformat()
                         }).eq('id', stock_id).execute()
-                    except Exception:
-                        pass
-                print(f"[PRICE_UPDATE] 📦 Batched {len(ticker_updates)} ticker updates")
+                        if result.data:
+                            updated_count += 1
+                    except Exception as e:
+                        print(f"[PRICE_UPDATE] ⚠️ Failed to update ticker for stock_id {stock_id}: {str(e)}")
+                print(f"[PRICE_UPDATE] 📦 Auto-updated {updated_count}/{len(ticker_updates)} tickers in stock_master")
             except Exception as e:
                 print(f"[PRICE_UPDATE] ⚠️ Batch ticker update error: {str(e)}")
         
@@ -1187,9 +1209,11 @@ class EnhancedPriceFetcher:
                             if nav_value:
                                 price = float(nav_value)
                                 if price > 0:
-                                    # Success! Log the resolution
+                                    # Success! Log the resolution and store resolved ticker
                                     print(f"[MF_RESOLVE] ✅ Auto-resolved {scheme_code} → {correct_code} (confidence: {confidence*100:.0f}%)")
-                                    print(f"[MF_RESOLVE] 💡 Suggestion: Update CSV - replace {scheme_code} with {correct_code}")
+                                    print(f"[MF_RESOLVE] 🔄 Auto-updating ticker in database from {scheme_code} to {correct_code}")
+                                    # Store resolved ticker for batch update
+                                    self._last_resolved_ticker = correct_code
                                     return price, f'amfi_name_resolved:{correct_code}'
                     except Exception:
                         pass

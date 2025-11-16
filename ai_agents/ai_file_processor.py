@@ -1088,6 +1088,51 @@ CRITICAL RULES:
                                 self.logger.warning(f"Failed to extract resolved ticker from source '{price_source}': {e}")
                     else:
                         print(f"[VALIDATE] ⚠️ No historical price found for {validated_trans['ticker']} on {transaction_date} (from file)")
+                        # Try one more time with expanded date range (up to 90 days)
+                        if not fetched_price or fetched_price <= 0:
+                            print(f"[VALIDATE] 🔄 Retrying with expanded date range (up to 90 days) for {validated_trans['ticker']}...")
+                            try:
+                                from datetime import datetime, timedelta
+                                from dateutil import parser
+                                
+                                # Parse transaction date
+                                trans_dt = parser.parse(transaction_date) if transaction_date else None
+                                if trans_dt:
+                                    # Try dates up to 90 days before/after
+                                    for days_offset in [1, 2, 3, 7, 14, 30, 60, 90]:
+                                        # Try before
+                                        try_date = (trans_dt - timedelta(days=days_offset)).strftime('%Y-%m-%d')
+                                        retry_price, _ = self._fetch_price_for_transaction_with_resolution({
+                                            **validated_trans,
+                                            'date': try_date
+                                        })
+                                        if retry_price and retry_price > 0:
+                                            validated_trans['price'] = round(float(retry_price), 4)
+                                            print(f"[VALIDATE] ✅ Found price on {try_date} ({(trans_dt - parser.parse(try_date)).days} days before): ₹{validated_trans['price']}")
+                                            break
+                                        
+                                        # Try after
+                                        try_date = (trans_dt + timedelta(days=days_offset)).strftime('%Y-%m-%d')
+                                        retry_price, _ = self._fetch_price_for_transaction_with_resolution({
+                                            **validated_trans,
+                                            'date': try_date
+                                        })
+                                        if retry_price and retry_price > 0:
+                                            validated_trans['price'] = round(float(retry_price), 4)
+                                            print(f"[VALIDATE] ✅ Found price on {try_date} ({(parser.parse(try_date) - trans_dt).days} days after): ₹{validated_trans['price']}")
+                                            break
+                                    
+                                    if validated_trans['price'] <= 0:
+                                        print(f"[VALIDATE] ❌ Could not find price even with 90-day range for {validated_trans['ticker']}")
+                            except Exception as e:
+                                self.logger.warning(f"Expanded date range retry failed: {e}")
+                
+                # Final check: Don't save transactions with price=0 if we have a ticker and date
+                # (unless it's explicitly a zero-price transaction like bonus shares)
+                if validated_trans['price'] <= 0 and validated_trans.get('ticker') and validated_trans.get('date'):
+                    # Only skip if we really couldn't find any price
+                    if not should_fetch_historical or (should_fetch_historical and not fetched_price):
+                        print(f"[VALIDATE] ⚠️ WARNING: Transaction {validated_trans['ticker']} on {validated_trans['date']} has price=0 - will be saved but may need manual price entry")
                 
                 validated.append(validated_trans)
                 
@@ -1319,6 +1364,18 @@ CRITICAL RULES:
         price_source = None
 
         try:
+            # Ensure date is in YYYY-MM-DD format
+            if isinstance(date, str):
+                try:
+                    # Try parsing and reformatting
+                    from dateutil import parser
+                    date_obj = parser.parse(date)
+                    date = date_obj.strftime('%Y-%m-%d')
+                except:
+                    # If parsing fails, try to clean the date string
+                    date = date.strip()
+            
+            print(f"[FETCH_PRICE] Fetching historical price for {ticker} ({asset_type}) on {date}")
             fetched_price = price_fetcher.get_historical_price(
                 ticker,
                 asset_type,
@@ -1326,7 +1383,11 @@ CRITICAL RULES:
                 fund_name=fund_name
             )
 
-            if not fetched_price:
+            if fetched_price and fetched_price > 0:
+                price_source = 'historical'
+                print(f"[FETCH_PRICE] ✅ Got historical price: ₹{fetched_price:.2f} for {ticker} on {date}")
+            elif not fetched_price:
+                print(f"[FETCH_PRICE] ⚠️ Historical price not found, trying current price...")
                 current_price, source = price_fetcher.get_current_price(
                     ticker,
                     asset_type,
