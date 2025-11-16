@@ -206,7 +206,15 @@ class EnhancedPriceFetcher:
                     
             elif asset_type == 'mutual_fund':
                 fund_name = holding.get('scheme_name') or holding.get('stock_name', '')
+                # Store average price for fallback if price fetch fails
+                avg_price_for_fallback = holding.get('average_price', 0)
+                self._last_holding_avg_price = avg_price_for_fallback if avg_price_for_fallback > 0 else None
                 current_price, source = self._get_mf_price_with_fallback(ticker, fund_name)
+                # If price fetch failed, use average price to avoid 0% returns
+                if not current_price or current_price <= 0:
+                    if avg_price_for_fallback > 0:
+                        current_price = avg_price_for_fallback
+                        source = 'average_price_fallback'
                 # OPTIMIZATION: Don't update DB here - will be batched later
                     
             elif asset_type in ['pms', 'aif']:
@@ -1158,7 +1166,15 @@ class EnhancedPriceFetcher:
             # AI not available
             pass
         
-        # All methods failed for MF
+        # All methods failed for MF - return average price as fallback to avoid 0% returns
+        # This prevents showing 0% return when price fetch fails
+        try:
+            # Try to get average price from holding if available
+            if hasattr(self, '_last_holding_avg_price') and self._last_holding_avg_price:
+                return self._last_holding_avg_price, 'average_price_fallback'
+        except Exception:
+            pass
+        
         return None, 'not_found'
     
     def _calculate_pms_aif_live_price(
@@ -1199,11 +1215,15 @@ class EnhancedPriceFetcher:
             if investment_amount <= 0 or not investment_date:
                 return None, 'cagr_invalid_transaction'
 
+            # Get PMS/AIF name for better AI context
+            pms_aif_name = holding.get('stock_name') or holding.get('scheme_name', '')
+            
             result = self.pms_aif_calculator.calculate_pms_aif_value(
                 ticker,
                 investment_date,
                 investment_amount,
-                is_aif=(asset_type == 'aif')
+                is_aif=(asset_type == 'aif'),
+                pms_aif_name=pms_aif_name
             )
 
             current_value = result.get('current_value')
@@ -1405,40 +1425,81 @@ class EnhancedPriceFetcher:
         return self._cached_scheme_maps
 
     def _resolve_amfi_code(self, ticker: str, fund_name: Optional[str]) -> Optional[str]:
-        """Resolve a mutual fund identifier to an AMFI scheme code."""
+        """
+        Resolve a mutual fund identifier to an AMFI scheme code.
+        CRITICAL: Uses BOTH ticker AND name for better matching accuracy.
+        """
         if not ticker:
             ticker = ''
         normalized_ticker = ticker.replace('MF_', '').replace('mf_', '').strip()
+        
+        # If ticker is already a valid AMFI code (numeric), return it
         if normalized_ticker.isdigit():
             return normalized_ticker
-
         if ticker and ticker.isdigit():
             return ticker
 
+        # Get AMFI dataset
         cached_codes, cached_names = self._get_cached_scheme_maps()
         dataset = self._get_amfi_dataset()
         code_lookup = dataset.get("code_lookup", {})
         name_lookup = dataset.get("name_lookup", {})
 
+        if not dataset and not cached_codes:
+            return None
+
+        # STEP 1: Try exact ticker match first (if it's a code)
         if cached_codes:
             if normalized_ticker in cached_codes:
                 return normalized_ticker
             if ticker in cached_codes:
                 return ticker
 
-        if not dataset and not cached_codes:
-            return None
-
         if normalized_ticker in code_lookup:
             return normalized_ticker
         if ticker in code_lookup:
             return ticker
 
-        if cached_codes:
-            normalized_name = self._normalize_scheme_name(fund_name or ticker)
-            if normalized_name and normalized_name in cached_names:
-                return cached_names[normalized_name]
+        # STEP 2: CRITICAL - Match by BOTH ticker AND name together
+        # This ensures we get the correct scheme when multiple schemes have similar names
+        if fund_name:
+            normalized_name = self._normalize_scheme_name(fund_name)
+            normalized_ticker_upper = normalized_ticker.upper()
+            
+            # Search through all schemes to find one that matches BOTH ticker and name
+            best_match = None
+            best_score = 0.0
+            
+            for code, scheme in code_lookup.items():
+                scheme_name = scheme.get('name', '').upper()
+                scheme_code = str(code).upper()
+                
+                # Check if ticker matches (as substring in code or name)
+                ticker_match = (
+                    normalized_ticker_upper in scheme_code or
+                    scheme_code in normalized_ticker_upper or
+                    normalized_ticker_upper in scheme_name
+                )
+                
+                # Check if name matches
+                name_match_score = 0.0
+                if normalized_name:
+                    name_match_score = difflib.SequenceMatcher(
+                        a=normalized_name.upper(),
+                        b=scheme_name
+                    ).ratio()
+                
+                # Combined score: both ticker and name must match
+                if ticker_match and name_match_score > 0.6:
+                    combined_score = name_match_score * 1.5 if ticker_match else name_match_score
+                    if combined_score > best_score:
+                        best_score = combined_score
+                        best_match = code
+            
+            if best_match:
+                return str(best_match)
 
+        # STEP 3: Fallback to name-only matching (if no ticker match found)
         search_name = fund_name or ticker
         normalized = self._normalize_scheme_name(search_name)
         if not normalized:
@@ -1450,6 +1511,7 @@ class EnhancedPriceFetcher:
             if best_scheme:
                 return best_scheme["code"]
 
+        # STEP 4: Fuzzy match by name only (last resort)
         candidates = difflib.get_close_matches(normalized, name_lookup.keys(), n=6, cutoff=0.6)
         scored_schemes: List[Tuple[Dict[str, str], float]] = []
         for candidate in candidates:

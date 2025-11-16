@@ -449,27 +449,21 @@ class SharedDatabaseManager:
         """
         Get existing stock or create new one in stock_master
         Returns stock_id (UUID)
-        FIXED: Now matches by ticker AND stock_name to prevent mismatches
+        CRITICAL: Always uses authoritative name from yfinance/AMFI/mftool to ensure ticker uniqueness
         """
         try:
             normalised_ticker = _tx_normalize_ticker(ticker)
-            normalised_name = (stock_name or '').strip()
             
-            # First, try to find exact match by ticker AND stock_name - wrap in retry logic
-            if normalised_name and normalised_name != 'Unknown':
-                def _find_exact_match():
-                    return self.supabase.table('stock_master').select('*').eq(
-                        'ticker', normalised_ticker
-                    ).eq('stock_name', normalised_name).execute()
-                
-                response = self._retry_db_operation(_find_exact_match, max_retries=3, base_delay=1.0)
-                
-                if response.data and len(response.data) > 0:
-                    # Exact match found - use it
-                    existing_stock = response.data[0]
-                    return existing_stock['id']
+            # CRITICAL: Fetch authoritative name from external sources FIRST
+            # This ensures we always use the correct name from yfinance/AMFI/mftool
+            # Pass stock_name for better AMFI mapping (uses both ticker AND name)
+            enhanced_info = self._fetch_stock_info(ticker, asset_type, stock_name)
+            authoritative_name = enhanced_info.get('stock_name', '').strip()
             
-            # If no exact match, try to find by ticker only - wrap in retry logic
+            # Use authoritative name if available, otherwise fall back to provided name
+            final_stock_name = authoritative_name if authoritative_name else (stock_name or 'Unknown').strip()
+            
+            # If no existing stock, try to find by ticker only - wrap in retry logic
             def _find_by_ticker():
                 return self.supabase.table('stock_master').select('*').eq(
                     'ticker', normalised_ticker
@@ -478,53 +472,37 @@ class SharedDatabaseManager:
             response = self._retry_db_operation(_find_by_ticker, max_retries=3, base_delay=1.0)
             
             if response.data and len(response.data) > 0:
-                # Multiple entries with same ticker - prefer one with matching name or best match
-                existing_stocks = response.data
+                # Stock with this ticker exists - ensure it has the correct authoritative name
+                existing_stock = response.data[0]
+                existing_name = (existing_stock.get('stock_name') or '').strip()
                 
-                # If we have a name, try to find best match
-                if normalised_name and normalised_name != 'Unknown':
-                    # Try to find one with similar name (fuzzy match)
-                    best_match = None
-                    for stock in existing_stocks:
-                        existing_name = (stock.get('stock_name') or '').strip().lower()
-                        if existing_name == normalised_name.lower():
-                            best_match = stock
-                            break
-                        # Partial match (contains)
-                        if normalised_name.lower() in existing_name or existing_name in normalised_name.lower():
-                            if not best_match:
-                                best_match = stock
-                    
-                    if best_match:
-                        existing_stock = best_match
-                    else:
-                        # No good match - use first one but update name if better
-                        existing_stock = existing_stocks[0]
-                else:
-                    # No name provided - use first match
-                    existing_stock = existing_stocks[0]
-                
-                # Update stock info if we have better data
+                # ALWAYS update with authoritative name if we fetched it and it's different
+                # This ensures all stocks with the same ticker have the same name
                 update_data = {}
+                
+                if authoritative_name and authoritative_name != existing_name:
+                    # We have an authoritative name that differs - update it
+                    update_data['stock_name'] = authoritative_name
+                    print(f"[STOCK_UPDATE] Updating {normalised_ticker}: '{existing_name}' → '{authoritative_name}' (from {enhanced_info.get('source', 'external')})")
+                
+                # Update ticker if needed (normalization)
                 if existing_stock.get('ticker') != normalised_ticker:
                     update_data['ticker'] = normalised_ticker
-                
-                # Update name if we have a better one
-                if normalised_name and normalised_name != 'Unknown':
-                    existing_name = (existing_stock.get('stock_name') or '').strip()
-                    # Update if existing is Unknown/empty OR if new name is more specific
-                    if not existing_name or existing_name == 'Unknown':
-                        update_data['stock_name'] = normalised_name
-                    elif len(normalised_name) > len(existing_name) and existing_name.lower() in normalised_name.lower():
-                        # New name is more complete
-                        update_data['stock_name'] = normalised_name
                 
                 # For bonds, always set sector to "bond"
                 if asset_type == 'bond':
                     if existing_stock.get('sector') != 'bond':
                         update_data['sector'] = 'bond'
+                elif enhanced_info.get('sector') and enhanced_info.get('sector') != 'Unknown':
+                    # Use authoritative sector if available
+                    if existing_stock.get('sector') != enhanced_info.get('sector'):
+                        update_data['sector'] = enhanced_info.get('sector')
                 elif sector and sector != 'Unknown' and (not existing_stock.get('sector') or existing_stock.get('sector') == 'Unknown'):
                     update_data['sector'] = sector
+                
+                # Update asset_type if it's different (shouldn't happen, but fix if it does)
+                if existing_stock.get('asset_type') != asset_type:
+                    update_data['asset_type'] = asset_type
                 
                 if update_data:
                     def _update_stock():
@@ -533,12 +511,7 @@ class SharedDatabaseManager:
                 
                 return existing_stock['id']
             
-            # If no existing stock, try to fetch better info from external sources
-            enhanced_info = self._fetch_stock_info(ticker, asset_type)
-            
-            # Use fetched info if available, otherwise use provided data
-            final_stock_name = enhanced_info.get('stock_name') or stock_name or 'Unknown'
-            
+            # If no existing stock, create new one with authoritative name
             # For bonds, always set sector to "bond"
             if asset_type == 'bond':
                 final_sector = 'bond'
@@ -573,7 +546,7 @@ class SharedDatabaseManager:
                 st.error(f"Error creating stock: {error_msg[:200]}")
             return None
     
-    def _fetch_stock_info(self, ticker: str, asset_type: str) -> Dict[str, Any]:
+    def _fetch_stock_info(self, ticker: str, asset_type: str, stock_name: str = None) -> Dict[str, Any]:
         """
         Fetch stock name and sector from external sources
         """
@@ -581,7 +554,8 @@ class SharedDatabaseManager:
             if asset_type == 'stock':
                 return self._fetch_stock_info_yfinance(ticker)
             elif asset_type == 'mutual_fund':
-                return self._fetch_mf_info_mftool(ticker)
+                # Pass stock_name for better AMFI mapping (uses both ticker AND name)
+                return self._fetch_mf_info_mftool(ticker, stock_name)
             else:
                 return {}
         except Exception as e:
@@ -655,7 +629,7 @@ class SharedDatabaseManager:
             return 'Unknown'
     
     def _fetch_stock_info_yfinance(self, ticker: str) -> Dict[str, Any]:
-        """Fetch stock info from yfinance"""
+        """Fetch stock info from yfinance - returns authoritative name"""
         try:
             import yfinance as yf
             
@@ -670,7 +644,8 @@ class SharedDatabaseManager:
                     if info and info.get('longName'):
                         return {
                             'stock_name': info.get('longName', ''),
-                            'sector': info.get('sector', 'Unknown')
+                            'sector': info.get('sector', 'Unknown'),
+                            'source': 'yfinance'
                         }
                 except:
                     continue
@@ -679,43 +654,86 @@ class SharedDatabaseManager:
         except:
             return {}
     
-    def _fetch_mf_info_mftool(self, ticker: str) -> Dict[str, Any]:
-        """Fetch mutual fund info from mftool, with AMFI fallback.
-        Resolves ticker from AMFI to ensure correct format for mftool.
+    def _fetch_mf_info_mftool(self, ticker: str, fund_name: str = None) -> Dict[str, Any]:
+        """
+        Fetch mutual fund info from mftool, with AMFI fallback.
+        CRITICAL: Resolves ticker using BOTH ticker AND name for accurate AMFI code mapping.
         """
         # Normalize ticker: remove any prefixes/suffixes, ensure it's just the AMFI code
         normalized_ticker = str(ticker).strip()
         # Remove common prefixes
         normalized_ticker = normalized_ticker.replace('MF_', '').replace('mf_', '').strip()
-        # Remove any non-digit characters (except if it's not a code)
+        
+        # If ticker is already a valid AMFI code (numeric), use it directly
         if normalized_ticker.isdigit():
-            # It's already a valid AMFI code
             scheme_code = normalized_ticker
         else:
-            # Try to resolve from AMFI dataset first
+            # CRITICAL: Resolve AMFI code using BOTH ticker AND name
             scheme_code = None
             try:
                 import importlib
+                import difflib
                 web_agent_module = importlib.import_module('web_agent')
                 if hasattr(web_agent_module, 'get_amfi_dataset'):
                     amfi_data = web_agent_module.get_amfi_dataset()
-                    if amfi_data:
-                        # Try code_lookup first (direct code match)
-                        if 'code_lookup' in amfi_data and normalized_ticker in amfi_data['code_lookup']:
+                    if amfi_data and 'code_lookup' in amfi_data:
+                        code_lookup = amfi_data['code_lookup']
+                        
+                        # STEP 1: Try exact ticker match first
+                        if normalized_ticker in code_lookup:
                             scheme_code = normalized_ticker
-                        # Try name_lookup (if ticker is actually a name)
-                        elif 'name_lookup' in amfi_data:
-                            # Search for matching scheme by name
-                            for code, scheme in amfi_data.get('code_lookup', {}).items():
-                                scheme_name = scheme.get('name', '').upper()
-                                if normalized_ticker.upper() in scheme_name or scheme_name in normalized_ticker.upper():
-                                    scheme_code = code
-                                    break
-            except:
-                pass
-            
-            # If still not resolved, use original ticker
-            if not scheme_code:
+                        else:
+                            # STEP 2: Match by BOTH ticker AND name together
+                            if fund_name:
+                                normalized_name = (fund_name or '').strip().upper()
+                                normalized_ticker_upper = normalized_ticker.upper()
+                                
+                                best_match = None
+                                best_score = 0.0
+                                
+                                for code, scheme in code_lookup.items():
+                                    scheme_name = (scheme.get('name', '') or '').upper()
+                                    scheme_code_str = str(code).upper()
+                                    
+                                    # Check ticker match (in code or scheme name)
+                                    ticker_match = (
+                                        normalized_ticker_upper in scheme_code_str or
+                                        scheme_code_str in normalized_ticker_upper or
+                                        normalized_ticker_upper in scheme_name
+                                    )
+                                    
+                                    # Check name match
+                                    name_score = 0.0
+                                    if normalized_name:
+                                        name_score = difflib.SequenceMatcher(
+                                            a=normalized_name,
+                                            b=scheme_name
+                                        ).ratio()
+                                    
+                                    # Combined score: both must match
+                                    if ticker_match and name_score > 0.6:
+                                        combined_score = name_score * 1.5
+                                        if combined_score > best_score:
+                                            best_score = combined_score
+                                            best_match = code
+                                
+                                if best_match:
+                                    scheme_code = str(best_match)
+                            
+                            # STEP 3: Fallback to name-only matching
+                            if not scheme_code and fund_name:
+                                normalized_name = (fund_name or '').strip().upper()
+                                for code, scheme in code_lookup.items():
+                                    scheme_name = (scheme.get('name', '') or '').upper()
+                                    if normalized_name in scheme_name or scheme_name in normalized_name:
+                                        scheme_code = str(code)
+                                        break
+                            
+                            # STEP 4: Last resort - use original ticker
+                            if not scheme_code:
+                                scheme_code = normalized_ticker
+            except Exception as e:
+                print(f"[AMFI_RESOLVE] ⚠️ Error resolving AMFI code: {str(e)}")
                 scheme_code = normalized_ticker
         
         # Try mftool with resolved code
@@ -731,7 +749,8 @@ class SharedDatabaseManager:
                 if scheme_info and scheme_info.get('schemeName'):
                     return {
                         'stock_name': scheme_info.get('schemeName', ''),
-                        'sector': scheme_info.get('category', 'Unknown')
+                        'sector': scheme_info.get('category', 'Unknown'),
+                        'source': 'mftool'
                     }
         except Exception as e:
             # mftool failed, try AMFI dataset fallback
@@ -752,7 +771,8 @@ class SharedDatabaseManager:
                     if scheme and scheme.get('name'):
                         return {
                             'stock_name': scheme.get('name', ''),
-                            'sector': 'Mutual Fund'
+                            'sector': 'Mutual Fund',
+                            'source': 'amfi_dataset'
                         }
         except:
             pass

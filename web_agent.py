@@ -1204,8 +1204,15 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
         # Most 6-digit numbers starting with '1' are mutual funds
         if len(ticker_clean) == 6 and ticker_clean.startswith('1'):
             return 'mutual_fund'
-        elif len(ticker_clean) >= 5:
-            # Other 5-6 digit numeric codes are likely BSE stocks
+        elif len(ticker_clean) == 5:
+            # 5-digit codes: Check AMFI first (many 5-digit codes are MFs like 25872)
+            # If not in AMFI, could be BSE stock, but check name for MF keywords
+            if has_mf_keyword:
+                return 'mutual_fund'
+            # Default to stock for 5-digit if not in AMFI and no MF keywords
+            return 'stock'
+        elif len(ticker_clean) >= 6:
+            # 6+ digit codes that don't start with 1: likely BSE stocks
             return 'stock'
         else:
             # Shorter numeric codes are likely stocks
@@ -1228,18 +1235,12 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
     if ticker_upper.startswith('AIF') or 'aif' in name or 'alternative investment' in name:
         return 'aif'
     
-    # Check for mutual fund keywords FIRST (even if "bond" is in name - bond funds are still MFs)
-    # This should happen BEFORE numeric checks to catch cases like "25872" with name "DSP Dynamic Asset Allocation Fund"
-    mf_keywords = ['fund', 'scheme', 'growth', 'nav', 'mutual', 'mf', 'plan', 'allocation', 'hybrid', 'equity', 'debt']
-    has_mf_keyword = any(keyword in name for keyword in mf_keywords)
-    
-    if has_mf_keyword:
-        return 'mutual_fund'
-    
-    # For numeric tickers, check AMFI first (before assuming stock)
+    # For numeric tickers, check AMFI FIRST (before name keywords)
+    # This catches 5-digit codes like 25872 that are mutual funds even if name isn't checked yet
     if is_numeric and ticker_upper.replace('.', '').isdigit():
         ticker_clean = ticker_upper.replace('.', '').split('.')[0]
         # Check AMFI for any numeric ticker (not just 6-digit starting with 1)
+        # This catches 5-digit codes like 25872 that are mutual funds
         try:
             amfi_data = get_amfi_dataset()
             if amfi_data and 'code_lookup' in amfi_data:
@@ -1247,6 +1248,14 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
                     return 'mutual_fund'  # Found in AMFI = mutual fund
         except Exception:
             pass
+    
+    # Check for mutual fund keywords (even if "bond" is in name - bond funds are still MFs)
+    # This should happen AFTER AMFI check but BEFORE stock checks
+    mf_keywords = ['fund', 'scheme', 'growth', 'nav', 'mutual', 'mf', 'plan', 'allocation', 'hybrid', 'equity', 'debt']
+    has_mf_keyword = any(keyword in name for keyword in mf_keywords)
+    
+    if has_mf_keyword:
+        return 'mutual_fund'
     
     # Only assume stock for numeric if it's NOT in AMFI and NOT a 6-digit starting with 1
     if ticker_upper.isdigit() and len(ticker_upper) >= 5:
@@ -6260,74 +6269,14 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
         st.caption(f"📁 [{file_idx}/{len(uploaded_files)}] Processing {file_name}...")
 
         imported = skipped = errors = 0
-        method_used = 'python'
 
         try:
-            transactions = []
-            python_debug_log: List[Dict[str, Any]] = []
+            # CRITICAL: Use the same "Convert to CSV" pipeline for ALL files (CSV, Excel, PDF)
+            # This ensures consistent normalization and processing - same as the preview
+            print(f"[FILE_PROCESS] Using 'Convert to CSV' pipeline for {file_name} to ensure consistency...")
+            normalized_rows, method_used = extract_transactions_for_csv(uploaded_file, file_name, user_id)
             
-            # For Excel files, use AI extraction first (better column mapping)
-            # For CSV/PDF, try Python first then AI
-            file_ext = Path(file_name).suffix.lower()
-            is_excel = file_ext in {'.xlsx', '.xls'}
-            
-            if is_excel and AI_AGENTS_AVAILABLE:
-                # Excel files: Use AI extraction first for better column mapping
-                method_used = 'ai'
-                print(f"[FILE_PARSE] Excel file detected - using AI extraction first for better column mapping: {file_name}")
-                try:
-                    uploaded_file.seek(0)
-                except Exception:
-                    pass
-                ai_transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
-                if ai_transactions:
-                    transactions = ai_transactions
-                    print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions from Excel file")
-                else:
-                    print(f"[FILE_PARSE] ⚠️ AI extraction found no transactions, trying Python extraction as fallback...")
-                    # Fallback to Python if AI fails
-                    try:
-                        uploaded_file.seek(0)
-                    except Exception:
-                        pass
-                    extraction_result = extract_transactions_python(uploaded_file, file_name)
-                    if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
-                        python_transactions, python_debug_log = extraction_result
-                    else:
-                        python_transactions = extraction_result or []
-                        python_debug_log = []
-                    if python_transactions:
-                        method_used = 'python'
-                        transactions = python_transactions
-                        print(f"[FILE_PARSE] ✅ Python extraction found {len(transactions)} transactions as fallback")
-            else:
-                # CSV/PDF: Try Python first, then AI
-                method_used = 'python'
-                try:
-                    uploaded_file.seek(0)
-                except Exception:
-                    pass
-                
-            extraction_result = extract_transactions_python(uploaded_file, file_name)
-            if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
-                python_transactions, python_debug_log = extraction_result
-            else:
-                python_transactions = extraction_result or []
-                python_debug_log = []
-            transactions = python_transactions or []
-            
-            # Fallback to AI only if Python found nothing (or for PDFs)
-            if not transactions:
-                method_used = 'ai'
-                try:
-                    uploaded_file.seek(0)
-                except Exception:
-                    pass
-                
-                ai_transactions = process_file_with_ai(uploaded_file, file_name, user_id) or []
-                transactions = ai_transactions
-
-            if not transactions:
+            if not normalized_rows:
                 st.error(f"   ❌ Could not extract transactions from {file_name}.")
                 processing_log.append({
                     'file': file_name,
@@ -6335,20 +6284,17 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     'skipped': 0,
                     'errors': 1,
                     'method': method_used,
-                    'debug': python_debug_log,
+                    'debug': [],
                 })
                 continue
 
+            print(f"[FILE_PROCESS] ✅ Normalized {len(normalized_rows)} transactions from {file_name} using {method_used.upper()} method")
+
             fallback_channel = (Path(file_name).stem or 'Direct').title()
 
-            for tx in transactions:
-                normalized_tx = _tx_prepare_preview_row(
-                    tx,
-                    file_name,
-                    method_used,
-                    use_price_fetcher=True,
-                    price_fetcher=price_fetcher,
-                )
+            # Process the normalized transactions (same format as "Convert to CSV" output)
+            # These are already normalized by extract_transactions_for_csv, so we can use them directly
+            for normalized_tx in normalized_rows:
                 payload = {
                     'user_id': user_id,
                     'portfolio_id': portfolio_id,
@@ -6398,7 +6344,8 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                         errors += 1
 
             if imported > 0:
-                st.success(f"   ✅ Imported {imported} transaction(s) from {file_name} (AI mapper)")
+                method_label = "Python" if method_used == 'python' else "AI"
+                st.success(f"   ✅ Imported {imported} transaction(s) from {file_name} ({method_label} method)")
                 if skipped:
                     st.info(f"   ⏭️  Skipped {skipped} duplicate transaction(s)")
                 if errors:
@@ -6415,7 +6362,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                 'skipped': skipped,
                 'errors': errors,
                 'method': method_used,
-                'debug': python_debug_log,
+                'debug': [],
             })
             total_imported += imported
 

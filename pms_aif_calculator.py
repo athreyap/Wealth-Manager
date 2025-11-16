@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional, List
 import requests
 from bs4 import BeautifulSoup
 import re
+import json
 
 
 class PMS_AIF_Calculator:
@@ -20,24 +21,26 @@ class PMS_AIF_Calculator:
     
     def __init__(self):
         self.sebi_cache = {}
-        self.conservative_pms_cagr = 0.10  # 10% conservative estimate
-        self.conservative_aif_cagr = 0.12  # 12% conservative estimate
+        self._openai_client = None
+        self._openai_initialized = False
     
     def calculate_pms_aif_value(
         self,
         ticker: str,
         investment_date: str,
         investment_amount: float,
-        is_aif: bool = False
+        is_aif: bool = False,
+        pms_aif_name: str = None
     ) -> Dict[str, Any]:
         """
-        Calculate current value and generate 52-week history for PMS/AIF
+        Calculate current value and generate 52-week history for PMS/AIF using AI
         
         Args:
             ticker: PMS/AIF registration code (e.g., INP000005000)
             investment_date: Purchase date (YYYY-MM-DD)
             investment_amount: Initial investment (₹)
             is_aif: True if AIF, False if PMS
+            pms_aif_name: Optional name of PMS/AIF for better AI context
         
         Returns:
             Dict with current_value, weekly_values, cagr_used, source
@@ -49,20 +52,29 @@ class PMS_AIF_Calculator:
             years_elapsed = (current_dt - invest_dt).days / 365.25
             months_elapsed = years_elapsed * 12
             
-            # Try to get CAGR from SEBI
-            cagr_data = self._get_sebi_cagr(ticker, is_aif)
+            # CRITICAL: Use AI to get CAGR - no random/conservative values
+            cagr_data = self._get_cagr_from_ai(ticker, is_aif, pms_aif_name, investment_date)
             
-            if cagr_data and cagr_data.get('cagr'):
-                # Use SEBI CAGR
+            if cagr_data and cagr_data.get('cagr') and cagr_data.get('cagr') > 0:
+                # Use AI-provided CAGR
                 cagr = cagr_data['cagr']
-                cagr_period = cagr_data['period']
-                source = f"SEBI ({cagr_period})"
+                cagr_period = cagr_data.get('period', 'AI Estimated')
+                source = f"AI ({cagr_period})"
             else:
-                # Use conservative estimate
-                cagr = self.conservative_aif_cagr if is_aif else self.conservative_pms_cagr
-                cagr_period = "Conservative Estimate"
-                source = "Estimated (SEBI data unavailable)"
-                # Using conservative CAGR
+                # If AI fails, return error - don't use random values
+                return {
+                    'ticker': ticker,
+                    'initial_investment': investment_amount,
+                    'current_value': investment_amount,  # Return original investment if AI fails
+                    'absolute_gain': 0,
+                    'percentage_gain': 0,
+                    'years_elapsed': years_elapsed,
+                    'cagr_used': 0,
+                    'cagr_period': 'AI Unavailable',
+                    'source': 'AI fetch failed - using investment value',
+                    'weekly_values': [],
+                    'error': 'AI CAGR calculation failed'
+                }
             
             # Calculate current value
             current_value = investment_amount * ((1 + cagr) ** years_elapsed)
@@ -114,6 +126,104 @@ class PMS_AIF_Calculator:
                 'weekly_values': [],
                 'error': str(e)
             }
+    
+    def _get_openai_client(self):
+        """Lazy initialization of OpenAI client"""
+        if self._openai_initialized:
+            return self._openai_client
+        
+        self._openai_initialized = True
+        try:
+            from openai import OpenAI
+            if "api_keys" not in st.secrets:
+                raise KeyError("'api_keys' not found in st.secrets")
+            if "open_ai" not in st.secrets.get("api_keys", {}):
+                raise KeyError("'open_ai' not found in st.secrets['api_keys']")
+            self._openai_client = OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
+            return self._openai_client
+        except Exception as e:
+            self._openai_client = None
+            return None
+    
+    def _get_cagr_from_ai(
+        self,
+        ticker: str,
+        is_aif: bool,
+        pms_aif_name: str = None,
+        investment_date: str = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get CAGR for PMS/AIF using AI
+        
+        Args:
+            ticker: Registration code (e.g., INP000005000)
+            is_aif: True for AIF, False for PMS
+            pms_aif_name: Optional name for better context
+            investment_date: Investment date for context
+        
+        Returns:
+            Dict with cagr, period, source or None
+        """
+        client = self._get_openai_client()
+        if not client:
+            return None
+        
+        try:
+            asset_type = "AIF" if is_aif else "PMS"
+            name_context = f" named '{pms_aif_name}'" if pms_aif_name else ""
+            date_context = f" invested on {investment_date}" if investment_date else ""
+            
+            prompt = f"""You are a financial data expert. I need the CAGR (Compound Annual Growth Rate) for a {asset_type} (Portfolio Management Service/Alternative Investment Fund) with registration code {ticker}{name_context}{date_context}.
+
+Please provide:
+1. The CAGR percentage (as a decimal, e.g., 0.15 for 15%)
+2. The period this CAGR is based on (e.g., "3Y", "5Y", "Since Inception", etc.)
+3. The source of this data if known
+
+If you cannot find specific data for this {asset_type}, return null. Do NOT use estimates or random values.
+
+Return ONLY a JSON object with this exact format:
+{{
+    "cagr": 0.15,
+    "period": "3Y",
+    "source": "SEBI/Public Data"
+}}
+
+If data is not available, return:
+{{
+    "cagr": null,
+    "period": null,
+    "source": "Not Found"
+}}"""
+
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are a financial data expert. Provide accurate CAGR data for Indian PMS/AIF products. Return only valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.3,
+                max_tokens=200
+            )
+            
+            content = response.choices[0].message.content
+            result = json.loads(content)
+            
+            if result.get('cagr') is not None and result.get('cagr') != 'null':
+                cagr = float(result['cagr'])
+                if 0 < cagr < 1:  # CAGR should be between 0% and 100%
+                    return {
+                        'cagr': cagr,
+                        'period': result.get('period', 'AI Estimated'),
+                        'source': result.get('source', 'AI')
+                    }
+            
+            return None
+            
+        except Exception as e:
+            print(f"[PMS_AIF_AI] ⚠️ AI CAGR fetch failed for {ticker}: {str(e)}")
+            return None
     
     def _get_sebi_cagr(self, ticker: str, is_aif: bool) -> Optional[Dict[str, Any]]:
         """
