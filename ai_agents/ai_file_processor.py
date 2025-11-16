@@ -1099,18 +1099,31 @@ CRITICAL RULES:
                 # CRITICAL: Fetch historical price if:
                 # 1. Price was NOT calculated from amount/quantity (use calculated price if available)
                 # 2. OR price is still 0/missing even after calculations (amount/quantity may be 0/invalid)
+                # 3. OR mutual fund without ticker (need to resolve ticker from name)
                 # Always use transaction date from file, NOT current date
                 should_fetch_historical = False
+                is_mf_without_ticker = (validated_trans.get('asset_type', '').lower() == 'mutual_fund' and 
+                                       not validated_trans.get('ticker'))
+                
                 if price_was_calculated:
                     # If we calculated price, only fetch if calculated price is 0 or invalid
+                    # BUT: For mutual funds without ticker, always fetch to resolve ticker
                     if validated_trans['price'] <= 0:
                         should_fetch_historical = True
                         print(f"[VALIDATE] ⚠️ Calculated price is 0/invalid, fetching historical price as fallback")
+                    elif is_mf_without_ticker:
+                        # Mutual fund without ticker - fetch to resolve ticker (even though we have calculated price)
+                        should_fetch_historical = True
+                        print(f"[VALIDATE] 🔍 Mutual fund without ticker - fetching to resolve ticker from name (price already calculated: ₹{validated_trans['price']})")
                     else:
                         print(f"[VALIDATE] ✅ Using calculated price from amount/quantity: {validated_trans['price']} (NOT fetching historical price)")
                 elif validated_trans['price'] <= 0 or not price_present:
                     # Price is missing/zero and wasn't calculated - definitely fetch
                     should_fetch_historical = True
+                elif is_mf_without_ticker:
+                    # Mutual fund without ticker - fetch to resolve ticker
+                    should_fetch_historical = True
+                    print(f"[VALIDATE] 🔍 Mutual fund without ticker - fetching to resolve ticker from name")
                 
                 if should_fetch_historical:
                     transaction_date = validated_trans.get('date', '')
@@ -1118,8 +1131,12 @@ CRITICAL RULES:
                     print(f"[VALIDATE] 🔍 Fetching historical price for {ticker_display} on transaction date: {transaction_date} (from file)")
                     fetched_price, price_source = self._fetch_price_for_transaction_with_resolution(validated_trans)
                     if fetched_price and fetched_price > 0:
-                        validated_trans['price'] = round(float(fetched_price), 4)
-                        print(f"[VALIDATE] ✅ Fetched historical price: ₹{validated_trans['price']} for {ticker_display} on {transaction_date} (from file)")
+                        # Only update price if it wasn't already calculated (preserve calculated price)
+                        if not price_was_calculated:
+                            validated_trans['price'] = round(float(fetched_price), 4)
+                            print(f"[VALIDATE] ✅ Fetched historical price: ₹{validated_trans['price']} for {ticker_display} on {transaction_date} (from file)")
+                        else:
+                            print(f"[VALIDATE] ✅ Price already calculated (₹{validated_trans['price']}), but fetched to resolve ticker for {ticker_display}")
                         
                         # Check if ticker was resolved via name-based resolution
                         # For mutual funds: source format is "amfi_name_resolved:148520"
@@ -1458,9 +1475,17 @@ CRITICAL RULES:
                     # If parsing fails, try to clean the date string
                     date = date.strip()
             
-            print(f"[FETCH_PRICE] Fetching historical price for {ticker} ({asset_type}) on {date}")
+            # For mutual funds without ticker, use fund_name for resolution
+            # The price fetcher will resolve the ticker from the name
+            # Use fund_name as ticker if ticker is None/empty for mutual funds
+            if asset_type == 'mutual_fund' and (not ticker or ticker == 'None' or ticker.strip() == ''):
+                ticker_for_fetch = fund_name or 'UNKNOWN'
+                print(f"[FETCH_PRICE] Mutual fund without ticker, using fund name for resolution: {fund_name}")
+            else:
+                ticker_for_fetch = ticker
+            print(f"[FETCH_PRICE] Fetching historical price for {ticker_for_fetch} ({asset_type}) on {date}")
             fetched_price = price_fetcher.get_historical_price(
-                ticker,
+                ticker_for_fetch,
                 asset_type,
                 date,
                 fund_name=fund_name
@@ -1468,24 +1493,35 @@ CRITICAL RULES:
 
             if fetched_price and fetched_price > 0:
                 price_source = 'historical'
-                print(f"[FETCH_PRICE] ✅ Got historical price: ₹{fetched_price:.2f} for {ticker} on {date}")
+                print(f"[FETCH_PRICE] ✅ Got historical price: ₹{fetched_price:.2f} for {ticker_for_fetch} on {date}")
             elif not fetched_price:
                 print(f"[FETCH_PRICE] ⚠️ Historical price not found, trying current price...")
                 current_price, source = price_fetcher.get_current_price(
-                    ticker,
+                    ticker_for_fetch,
                     asset_type,
                     fund_name=fund_name
                 )
                 fetched_price = current_price
                 price_source = source
                 
-                # For stocks, check if ticker was resolved via name-based lookup
+                # Check if ticker was resolved via name-based lookup (for both stocks and mutual funds)
                 # The resolved ticker is stored in _last_resolved_ticker
-                if asset_type == 'stock' and hasattr(price_fetcher, '_last_resolved_ticker'):
+                if hasattr(price_fetcher, '_last_resolved_ticker'):
                     resolved_ticker = getattr(price_fetcher, '_last_resolved_ticker', None)
                     if resolved_ticker and resolved_ticker != ticker:
                         # Add resolved ticker info to source
                         price_source = f"{source}_resolved:{resolved_ticker}"
+                        print(f"[FETCH_PRICE] 🔄 Ticker resolved: {ticker} → {resolved_ticker}")
+            
+            # For mutual funds: also check if ticker was resolved during historical price fetch
+            # (historical price fetch can also trigger resolution)
+            if asset_type == 'mutual_fund' and hasattr(price_fetcher, '_last_resolved_ticker'):
+                resolved_ticker = getattr(price_fetcher, '_last_resolved_ticker', None)
+                if resolved_ticker and resolved_ticker != ticker:
+                    # Add resolved ticker info to source if not already present
+                    if '_resolved:' not in price_source and 'name_resolved:' not in price_source:
+                        price_source = f"{price_source}_resolved:{resolved_ticker}"
+                        print(f"[FETCH_PRICE] 🔄 Mutual fund ticker resolved: {ticker} → {resolved_ticker}")
 
             if fetched_price and fetched_price > 0:
                 self._price_cache[cache_key] = (fetched_price, price_source)

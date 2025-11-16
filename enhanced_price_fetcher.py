@@ -2650,8 +2650,21 @@ If not found, return: NOT_FOUND"""
                 try:
                     mf = self._mftool or self._get_shared_mftool()
                     if mf:
-                        normalized_code = self._resolve_amfi_code(ticker, fund_name) or ticker
-                        scheme_code = normalized_code.replace('MF_', '') if normalized_code.startswith('MF_') else normalized_code
+                        # For mutual funds without ticker (just fund name), try to resolve ticker first
+                        if not ticker or (not ticker.isdigit() and fund_name and ticker != fund_name):
+                            # Try name-based resolution to get the correct scheme code
+                            resolved = self._resolve_mf_code_by_name(ticker or '', fund_name)
+                            if resolved and resolved.get('code'):
+                                scheme_code = resolved['code']
+                                self._last_resolved_ticker = scheme_code
+                                self._last_resolved_fund_name = resolved.get('name', '')
+                                print(f"[HIST_PRICE] 🔄 Resolved MF ticker from name: '{fund_name}' → {scheme_code}")
+                            else:
+                                normalized_code = self._resolve_amfi_code(ticker, fund_name) or ticker
+                                scheme_code = normalized_code.replace('MF_', '') if normalized_code.startswith('MF_') else normalized_code
+                        else:
+                            normalized_code = self._resolve_amfi_code(ticker, fund_name) or ticker
+                            scheme_code = normalized_code.replace('MF_', '') if normalized_code.startswith('MF_') else normalized_code
                         hist_data = mf.get_scheme_historical_nav(scheme_code, as_Dataframe=True)
                         
                         if hist_data is not None and not hist_data.empty:
