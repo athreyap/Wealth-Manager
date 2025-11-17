@@ -842,11 +842,31 @@ Output ONLY the JSON array—no commentary or explanation.
             content_length = len(file_content)
             print(f"[AI_EXTRACT] Content length: {content_length} chars, processing with AI...")
             
+            # Determine if we need batch processing
+            # Estimate: ~200 chars per transaction, so 12,000 chars ≈ 60 transactions
+            # If content is larger, process in batches
+            MAX_CONTENT_PER_BATCH = 12000  # Characters per batch
+            needs_batching = content_length > MAX_CONTENT_PER_BATCH
+            
+            if needs_batching:
+                print(f"[AI_EXTRACT] 📦 Large file detected ({content_length} chars) - processing in batches...")
+                return self._process_large_file_in_batches(file_content, filename, file_type, is_vision_api_text, prompt_template=prompt)
+            
+            # For smaller files, process normally
             # Call OpenAI without timeout - let it take as long as needed
             openai_client = self._get_openai_client()
             if not openai_client:
                 self.logger.error("OpenAI client not available")
                 return []
+            
+            # Update prompt to use full content (not truncated)
+            if not is_vision_api_text:
+                # Replace truncated content with full content
+                prompt = prompt.replace(
+                    f"{file_content[:12000] if len(file_content) <= 12000 else file_content[:10000] + '\n... (truncated) ...'}",
+                    file_content
+                )
+            
             response = openai_client.chat.completions.create(
                 model="gpt-4o",  # GPT-4o for better file processing
                 messages=[
@@ -881,7 +901,9 @@ CRITICAL RULES:
                         "content": prompt
                     }
                 ],
-                max_completion_tokens=4000
+                # No token limit - use maximum allowed by model (GPT-4o supports up to 16,384 tokens)
+                # Setting to None or very high value to allow full responses
+                max_completion_tokens=16384  # Maximum for GPT-4o
                 # Note: No timeout - let the API take as long as needed
             )
             
@@ -920,23 +942,418 @@ CRITICAL RULES:
             # Try fallback parsing
             return self._fallback_extraction(file_content, file_type)
     
-    def _extract_json(self, ai_response: str) -> List[Dict[str, Any]]:
-        """Extract JSON array from AI response"""
+    def _process_large_file_in_batches(self, file_content: str, filename: str, file_type: str, is_vision_api_text: bool, prompt_template: str = None) -> List[Dict[str, Any]]:
+        """Process large files in batches to avoid token limits"""
+        
+        MAX_CONTENT_PER_BATCH = 12000  # Characters per batch
+        all_transactions = []
+        
+        # Split content into batches
+        # For CSV/Excel/PDF with structured text, try to split at line boundaries
+        # This preserves data structure better than character-based splitting
+        if file_type in ['csv', 'xlsx', 'xls', 'pdf'] and '\n' in file_content:
+            lines = file_content.split('\n')
+            header = lines[0] if lines else ''
+            
+            # Group lines into batches (include header in each batch)
+            batch_lines = []
+            current_batch_size = len(header)
+            
+            for line in lines[1:]:  # Skip header for now
+                line_size = len(line) + 1  # +1 for newline
+                
+                if current_batch_size + line_size > MAX_CONTENT_PER_BATCH and batch_lines:
+                    # Process current batch
+                    batch_content = header + '\n' + '\n'.join(batch_lines)
+                    print(f"[AI_EXTRACT] 📦 Processing batch {len(all_transactions) + 1} ({len(batch_lines)} lines, {len(batch_content)} chars)...")
+                    
+                    batch_transactions = self._process_single_batch(batch_content, filename, file_type, is_vision_api_text, prompt_template)
+                    all_transactions.extend(batch_transactions)
+                    
+                    # Start new batch
+                    batch_lines = [line]
+                    current_batch_size = len(header) + line_size
+                else:
+                    batch_lines.append(line)
+                    current_batch_size += line_size
+            
+            # Process last batch
+            if batch_lines:
+                batch_content = header + '\n' + '\n'.join(batch_lines)
+                print(f"[AI_EXTRACT] 📦 Processing final batch ({len(batch_lines)} lines, {len(batch_content)} chars)...")
+                batch_transactions = self._process_single_batch(batch_content, filename, file_type, is_vision_api_text, prompt_template)
+                all_transactions.extend(batch_transactions)
+        else:
+            # For other formats, try to split at line boundaries if possible
+            if '\n' in file_content:
+                # Try line-based splitting even for non-CSV formats
+                lines = file_content.split('\n')
+                batch_lines = []
+                current_batch_size = 0
+                
+                for line in lines:
+                    line_size = len(line) + 1  # +1 for newline
+                    
+                    if current_batch_size + line_size > MAX_CONTENT_PER_BATCH and batch_lines:
+                        # Process current batch
+                        batch_content = '\n'.join(batch_lines)
+                        print(f"[AI_EXTRACT] 📦 Processing batch {len(all_transactions) + 1} ({len(batch_lines)} lines, {len(batch_content)} chars)...")
+                        
+                        batch_transactions = self._process_single_batch(batch_content, filename, file_type, is_vision_api_text, prompt_template)
+                        all_transactions.extend(batch_transactions)
+                        
+                        # Start new batch
+                        batch_lines = [line]
+                        current_batch_size = line_size
+                    else:
+                        batch_lines.append(line)
+                        current_batch_size += line_size
+                
+                # Process last batch
+                if batch_lines:
+                    batch_content = '\n'.join(batch_lines)
+                    print(f"[AI_EXTRACT] 📦 Processing final batch ({len(batch_lines)} lines, {len(batch_content)} chars)...")
+                    batch_transactions = self._process_single_batch(batch_content, filename, file_type, is_vision_api_text, prompt_template)
+                    all_transactions.extend(batch_transactions)
+            else:
+                # No newlines - split by character count (last resort)
+                num_batches = (len(file_content) + MAX_CONTENT_PER_BATCH - 1) // MAX_CONTENT_PER_BATCH
+                print(f"[AI_EXTRACT] 📦 Splitting into {num_batches} batches (no line breaks found)...")
+                
+                for i in range(num_batches):
+                    start_idx = i * MAX_CONTENT_PER_BATCH
+                    end_idx = min((i + 1) * MAX_CONTENT_PER_BATCH, len(file_content))
+                    batch_content = file_content[start_idx:end_idx]
+                    
+                    print(f"[AI_EXTRACT] 📦 Processing batch {i + 1}/{num_batches} ({len(batch_content)} chars)...")
+                    batch_transactions = self._process_single_batch(batch_content, filename, file_type, is_vision_api_text, prompt_template)
+                    all_transactions.extend(batch_transactions)
+        
+        # Count batches processed
+        batch_count = 'multiple' if len(all_transactions) > 0 else '0'
+        print(f"[AI_EXTRACT] ✅ Processed {len(all_transactions)} total transactions from {batch_count} batches")
+        return all_transactions
+    
+    def _process_single_batch(self, batch_content: str, filename: str, file_type: str, is_vision_api_text: bool, prompt_template: str = None) -> List[Dict[str, Any]]:
+        """Process a single batch of file content"""
         
         try:
-            # Find JSON array in response
+            # Build prompt for this batch
+            if is_vision_api_text:
+                prompt = f"""
+You are extracting financial transactions from Vision API extracted text. The text may be in structured format with pipe separators or line-by-line format.
+
+Extract ALL transactions from the following text and convert to JSON array.
+
+Schema (JSON array of objects):
+[
+  {{
+    "date": "YYYY-MM-DD",
+    "ticker": "exchange-ready ticker",
+    "stock_name": "full security name",
+    "scheme_name": null,
+    "quantity": 0.0,
+    "price": 0.0,
+    "amount": 0.0,
+    "transaction_type": "buy" | "sell",
+    "asset_type": "stock" | "mutual_fund" | "bond" | "pms" | "aif",
+    "sector": "Sector name or Unknown",
+    "channel": "{filename}"
+  }}
+]
+
+Extracted text:
+{batch_content}
+"""
+            else:
+                # Build prompt based on file type
+                if file_type in ['csv', 'xlsx', 'xls']:
+                    # CSV/Excel format - use full prompt structure
+                    prompt = f"""
+You are an expert at analyzing financial transaction files. The file below is in CSV format (converted from Excel).
+
+YOUR TASK:
+1. **Analyze the column headers** in the first row
+2. **Understand what each column represents** by looking at column names AND sample data
+3. **Map columns intelligently** to the standard schema below
+4. **Extract ALL transactions** from the data
+
+IMPORTANT COLUMN MAPPING RULES:
+- **Date columns**: Look for "Date", "Execution date", "Txn Date", "Transaction Date", "Trade Date", etc. → map to `"date"`
+- **Ticker/Symbol columns**: Look for "Symbol", "Ticker", "Scrip Symbol", "Trading Symbol", "ISIN" (use ISIN if no symbol) → map to `"ticker"`
+- **Stock Name columns**: Look for "Stock name", "Stock Name", "Security Name", "Scrip Name", "Name" → map to `"stock_name"`
+  - CRITICAL: Do NOT use filename, channel, or broker name as stock_name
+  - If stock_name column is missing or contains channel/broker name, set it to null (will be fetched from AMFI/mftool)
+- **Quantity columns**: Look for "Quantity", "Qty", "Units", "No. of Units", "Number of Units", "Units Held", "Unit Balance", "Total Units", "Current Units", "Holding Quantity", "Balance Units" → map to `"quantity"`
+- **Amount/Value columns**: Look for "Value", "Amount", "Total Value", "Consideration", "Trade Value" → map to `"amount"`
+- **Price columns**: Look for "Price", "Rate", "NAV", "Per Unit Price" → map to `"price"`
+- **Transaction Type**: Look for "Type", "Transaction Type", "Action", "Buy/Sell" → map to `"transaction_type"` ("BUY" → "buy", "SELL" → "sell")
+- **Channel**: CRITICAL - Look for a "channel", "Channel", "CHANNEL", "Broker", "Platform", or "Source" column. If such a column exists, extract its value. If no channel column exists, use the filename `{filename}` as the channel value. NEVER use channel value as stock_name or scheme_name.
+
+OUTPUT SCHEMA (JSON array):
+[
+  {{
+    "date": "YYYY-MM-DD",
+    "ticker": "exchange-ready ticker",
+    "stock_name": "full security name",
+    "scheme_name": null,
+    "quantity": <EXACT VALUE FROM FILE IF PRESENT, OR 0>,
+    "price": <VALUE FROM FILE OR 0>,
+    "amount": <VALUE FROM FILE OR 0>,
+    "transaction_type": "buy" | "sell",
+    "asset_type": "stock" | "mutual_fund" | "bond" | "pms" | "aif",
+    "sector": "Sector name or Unknown",
+    "channel": "{filename}"
+  }}
+]
+
+File content (CSV format with headers):
+{batch_content}
+
+Output ONLY the JSON array—no commentary or explanation.
+"""
+                elif file_type == 'pdf':
+                    # PDF format - could be structured text
+                    prompt = f"""
+Extract ALL financial transactions from this PDF text and convert to JSON array.
+
+Schema (JSON array of objects):
+[
+  {{
+    "date": "YYYY-MM-DD",
+    "ticker": "exchange-ready ticker",
+    "stock_name": "full security name",
+    "scheme_name": null,
+    "quantity": 0.0,
+    "price": 0.0,
+    "amount": 0.0,
+    "transaction_type": "buy" | "sell",
+    "asset_type": "stock" | "mutual_fund" | "bond" | "pms" | "aif",
+    "sector": "Sector name or Unknown",
+    "channel": "{filename}"
+  }}
+]
+
+Extracted text:
+{batch_content}
+
+Output ONLY the JSON array—no commentary or explanation.
+"""
+                else:
+                    # Other formats (TXT, etc.)
+                    prompt = f"""
+Extract ALL financial transactions from this text and convert to JSON array.
+
+Schema (JSON array of objects):
+[
+  {{
+    "date": "YYYY-MM-DD",
+    "ticker": "exchange-ready ticker",
+    "stock_name": "full security name",
+    "scheme_name": null,
+    "quantity": 0.0,
+    "price": 0.0,
+    "amount": 0.0,
+    "transaction_type": "buy" | "sell",
+    "asset_type": "stock" | "mutual_fund" | "bond" | "pms" | "aif",
+    "sector": "Sector name or Unknown",
+    "channel": "{filename}"
+  }}
+]
+
+Text content:
+{batch_content}
+
+Output ONLY the JSON array—no commentary or explanation.
+"""
+            
+            openai_client = self._get_openai_client()
+            if not openai_client:
+                return []
+            
+            response = openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """You are an expert financial data extraction AI. Extract ALL transactions from the provided data and return as JSON array."""
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                max_completion_tokens=16384
+            )
+            
+            ai_response = response.choices[0].message.content.strip()
+            transactions = self._extract_json(ai_response)
+            
+            if transactions:
+                print(f"[AI_EXTRACT] ✅ Batch extracted {len(transactions)} transactions")
+            else:
+                print(f"[AI_EXTRACT] ⚠️ Batch extracted 0 transactions")
+            
+            return transactions
+            
+        except Exception as e:
+            self.logger.error(f"Batch processing failed: {e}")
+            print(f"[AI_EXTRACT] ❌ Batch processing failed: {e}")
+            return []
+    
+    def _extract_json(self, ai_response: str) -> List[Dict[str, Any]]:
+        """Extract JSON array from AI response, handling markdown code blocks"""
+        
+        try:
+            # First, try to extract JSON from markdown code blocks (```json ... ```)
+            import re
+            
+            # Pattern to match markdown code blocks with json
+            # First find code block boundaries, then extract JSON inside
+            code_block_pattern = r'```(?:json)?\s*\n?(.*?)\n?```'
+            match = re.search(code_block_pattern, ai_response, re.DOTALL)
+            if match:
+                json_str = match.group(1).strip()
+                # Find JSON array inside the code block
+                start_idx = json_str.find('[')
+                if start_idx >= 0:
+                    # Use bracket matching to find complete array
+                    bracket_count = 0
+                    in_string = False
+                    escape_next = False
+                    end_idx = start_idx
+                    
+                    for i in range(start_idx, len(json_str)):
+                        char = json_str[i]
+                        if escape_next:
+                            escape_next = False
+                            continue
+                        if char == '\\':
+                            escape_next = True
+                            continue
+                        if char == '"' and not escape_next:
+                            in_string = not in_string
+                            continue
+                        if not in_string:
+                            if char == '[':
+                                bracket_count += 1
+                            elif char == ']':
+                                bracket_count -= 1
+                                if bracket_count == 0:
+                                    end_idx = i + 1
+                                    break
+                    
+                    if end_idx > start_idx:
+                        json_array = json_str[start_idx:end_idx]
+                        try:
+                            transactions = json.loads(json_array)
+                            if isinstance(transactions, list):
+                                return transactions
+                        except json.JSONDecodeError as e:
+                            # If JSON is incomplete, try to extract what we can
+                            # Find the last complete object by looking for closing braces
+                            try:
+                                # Try to find last complete object
+                                last_brace = json_array.rfind('}')
+                                if last_brace > 0:
+                                    # Find the matching opening brace
+                                    brace_count = 0
+                                    obj_start = last_brace
+                                    for i in range(last_brace, -1, -1):
+                                        char = json_array[i]
+                                        if char == '}':
+                                            brace_count += 1
+                                        elif char == '{':
+                                            brace_count -= 1
+                                            if brace_count == 0:
+                                                obj_start = i
+                                                break
+                                    
+                                    # Extract up to last complete object
+                                    partial_json = json_array[:last_brace + 1] + ']'
+                                    transactions = json.loads(partial_json)
+                                    if isinstance(transactions, list):
+                                        self.logger.warning(f"Extracted partial JSON ({len(transactions)} transactions) - response was truncated")
+                                        return transactions
+                            except:
+                                pass
+            
+            # Also try without code blocks - just find JSON array
+            # Look for opening bracket and try to find matching closing bracket
+            start_idx = ai_response.find('[')
+            if start_idx >= 0:
+                # Try to find the matching closing bracket
+                bracket_count = 0
+                in_string = False
+                escape_next = False
+                end_idx = start_idx
+                
+                for i in range(start_idx, len(ai_response)):
+                    char = ai_response[i]
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if char == '\\':
+                        escape_next = True
+                        continue
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+                        continue
+                    if not in_string:
+                        if char == '[':
+                            bracket_count += 1
+                        elif char == ']':
+                            bracket_count -= 1
+                            if bracket_count == 0:
+                                end_idx = i + 1
+                                break
+                
+                if end_idx > start_idx:
+                    json_str = ai_response[start_idx:end_idx]
+                    try:
+                        transactions = json.loads(json_str)
+                        if isinstance(transactions, list):
+                            return transactions
+                    except json.JSONDecodeError:
+                        pass
+            
+            # Final fallback: try simple bracket matching
             start_idx = ai_response.find('[')
             end_idx = ai_response.rfind(']') + 1
             
             if start_idx >= 0 and end_idx > start_idx:
                 json_str = ai_response[start_idx:end_idx]
-                transactions = json.loads(json_str)
-                
-                if isinstance(transactions, list):
-                    return transactions
+                # Try to clean up any trailing characters
+                json_str = json_str.strip()
+                # Remove any trailing commas before closing bracket
+                json_str = re.sub(r',\s*\]', ']', json_str)
+                # Remove any incomplete trailing objects
+                # Find last complete object by counting braces
+                try:
+                    transactions = json.loads(json_str)
+                    if isinstance(transactions, list):
+                        return transactions
+                except json.JSONDecodeError:
+                    # Try to fix incomplete JSON by removing last incomplete object
+                    # Find the last complete object
+                    last_comma = json_str.rfind(',')
+                    if last_comma > 0:
+                        # Try without the last object
+                        potential_json = json_str[:last_comma] + ']'
+                        try:
+                            transactions = json.loads(potential_json)
+                            if isinstance(transactions, list):
+                                self.logger.warning("Extracted partial JSON (last object was incomplete)")
+                                return transactions
+                        except:
+                            pass
             
             return []
             
+        except json.JSONDecodeError as e:
+            self.logger.error(f"JSON decode error: {e}")
+            self.logger.error(f"Attempted to parse: {json_str[:200] if 'json_str' in locals() else 'N/A'}...")
+            return []
         except Exception as e:
             self.logger.error(f"JSON extraction error: {e}")
             return []
