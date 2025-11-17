@@ -6497,9 +6497,15 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
             # CRITICAL: Use the same "Convert to CSV" pipeline for ALL files (CSV, Excel, PDF)
             # This ensures consistent normalization and processing - same as the preview
             print(f"[FILE_PROCESS] Using 'Convert to CSV' pipeline for {file_name} to ensure consistency...")
+            
+            # Show progress in UI with detailed updates
+            status_placeholder = st.empty()
+            status_placeholder.info(f"📄 Step 1/3: Reading file {file_name}...")
+            
             normalized_rows, method_used = extract_transactions_for_csv(uploaded_file, file_name, user_id)
             
             if not normalized_rows:
+                status_placeholder.error(f"❌ Could not extract transactions from {file_name}")
                 # Check if it was a file size error or other issue
                 error_details = f"Method used: {method_used}"
                 if method_used == 'error':
@@ -6517,11 +6523,14 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                 continue
 
             print(f"[FILE_PROCESS] ✅ Normalized {len(normalized_rows)} transactions from {file_name} using {method_used.upper()} method")
+            status_placeholder.info(f"📝 Step 2/3: Extracted {len(normalized_rows)} transactions from {file_name} ({method_used.upper()})")
 
             fallback_channel = (Path(file_name).stem or 'Direct').title()
 
             # Process the normalized transactions (same format as "Convert to CSV" output)
             # These are already normalized by extract_transactions_for_csv, so we can use them directly
+            status_placeholder.info(f"💾 Step 3/3: Saving {len(normalized_rows)} transactions to database...")
+            
             for normalized_tx in normalized_rows:
                 payload = {
                     'user_id': user_id,
@@ -6574,6 +6583,9 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     else:
                         errors += 1
 
+            # Clear status placeholder and show final results
+            status_placeholder.empty()
+            
             if imported > 0:
                 method_label = "Python" if method_used == 'python' else "AI"
                 st.success(f"   ✅ Imported {imported} transaction(s) from {file_name} ({method_label} method)")
@@ -11918,9 +11930,22 @@ def process_file_with_ai(uploaded_file, filename, user_id):
         # Initialize AI File Processor
         file_processor = AIFileProcessor()
         
-        # Process file with AI
-        with st.spinner(f"🤖 AI is analyzing {filename} and extracting transactions..."):
+        # Process file with AI - show progress in UI
+        status_placeholder = st.empty()
+        status_placeholder.info(f"🤖 AI is analyzing {filename} and extracting transactions...")
+        
+        try:
             transactions = file_processor.process_file(uploaded_file, filename)
+            
+            if transactions:
+                status_placeholder.success(f"✅ Successfully extracted {len(transactions)} transactions from {filename}")
+            else:
+                status_placeholder.warning(f"⚠️ No transactions found in {filename}")
+        except Exception as e:
+            status_placeholder.error(f"❌ Error processing {filename}: {str(e)[:100]}")
+            import traceback
+            traceback.print_exc()
+            raise
         try:
             uploaded_file.seek(0)
         except Exception:
