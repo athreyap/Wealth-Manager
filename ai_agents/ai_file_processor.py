@@ -68,8 +68,12 @@ class AIFileProcessor(BaseAgent):
                 raise KeyError("'api_keys' not found in st.secrets")
             if "open_ai" not in st.secrets.get("api_keys", {}):
                 raise KeyError("'open_ai' not found in st.secrets['api_keys']")
-            self.openai_client = openai.OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
-            self.logger.info("OpenAI client initialized successfully")
+            # Initialize OpenAI client with no timeout - let API calls run completely
+            self.openai_client = openai.OpenAI(
+                api_key=st.secrets["api_keys"]["open_ai"],
+                timeout=None  # No timeout - process files completely
+            )
+            self.logger.info("OpenAI client initialized successfully (no timeout)")
             return self.openai_client
         except KeyError as e:
             self.logger.error(f"Failed to initialize OpenAI client - missing secret key: {e}")
@@ -407,6 +411,7 @@ class AIFileProcessor(BaseAgent):
                         openai_client = self._get_openai_client()
                         if not openai_client:
                             raise Exception("OpenAI client not available")
+                        # No timeout - client initialized with timeout=None to process files completely
                         response = openai_client.chat.completions.create(
                             model="gpt-4o",  # GPT-4 Vision model
                             messages=[
@@ -921,6 +926,7 @@ Output ONLY the JSON array—no commentary or explanation.
                     file_content
                 )
             
+            # No timeout - client initialized with timeout=None to process files completely
             response = openai_client.chat.completions.create(
                 model="gpt-4o",  # GPT-4o for better file processing
                 messages=[
@@ -1234,6 +1240,7 @@ Output ONLY the JSON array—no commentary or explanation.
             if not openai_client:
                 return []
             
+            # No timeout - client initialized with timeout=None to process files completely
             response = openai_client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
@@ -1859,7 +1866,7 @@ Output ONLY the JSON array—no commentary or explanation.
                         'transaction_type': str(row.get('transaction_type', row.get('Type', 'buy'))).lower(),
                         'asset_type': row.get('asset_type', row.get('Asset Type', 'stock')),
                         'sector': row.get('sector', row.get('Sector', 'Unknown')),
-                        'channel': row.get('channel', row.get('Channel', 'Direct'))
+                        'channel': row.get('channel', row.get('Channel', None))  # Will be filtered in _infer_channel_from_filename
                     }
                     transactions.append(trans)
                 

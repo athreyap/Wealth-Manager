@@ -3346,6 +3346,12 @@ def _tx_dataframe_to_transactions(
         # Quantity is the source of truth from the transaction record
 
         channel = _tx_safe_str(row.get('channel'))
+        # Filter out exchange names (NSE, BSE) - these are not channels/brokers
+        if channel:
+            channel_upper = channel.upper()
+            if channel_upper in ['NSE', 'BSE', 'NSE.', 'BSE.']:
+                channel = None  # Force fallback to filename
+        
         if not channel:
             # Extract just the filename from path (handles full paths like E:\kalyan\Files_checked\deepak.pdf)
             # Path().stem correctly handles hyphens in filenames (e.g., deepak-2.pdf -> deepak-2)
@@ -5451,6 +5457,12 @@ def _legacy_process_uploaded_files(uploaded_files, user_id, portfolio_id):
                         
                         # Extract channel from filename if not provided
                         channel = safe_value(row.get('channel'), None)
+                        # Filter out exchange names (NSE, BSE) - these are not channels/brokers
+                        if channel:
+                            channel_upper = str(channel).upper()
+                            if channel_upper in ['NSE', 'BSE', 'NSE.', 'BSE.']:
+                                channel = None  # Force fallback to filename
+                        
                         if not channel:
                             # Use filename without extension
                             import os
@@ -6087,6 +6099,16 @@ def _tx_prepare_preview_row(
         'sector': _tx_safe_str(tx.get('sector')),
         'notes': _tx_safe_str(tx.get('notes') or tx.get('remarks')),
     }
+    
+    # Filter out exchange names (NSE, BSE) - these are not channels/brokers
+    if normalized['channel']:
+        channel_upper = normalized['channel'].upper()
+        if channel_upper in ['NSE', 'BSE', 'NSE.', 'BSE.']:
+            normalized['channel'] = None  # Force fallback to filename
+    
+    # If channel is missing or was filtered out, use filename
+    if not normalized['channel'] and source_file:
+        normalized['channel'] = Path(source_file).stem or 'Direct'
 
     asset_type_lower = normalized['asset_type'].lower()
 
