@@ -1414,6 +1414,17 @@ class EnhancedPriceFetcher:
         upper_code = normalized_code.upper()
 
         # Certain wrappers (ETF/InvIT) behave like stocks even if tagged as mutual funds
+        # Check for known ETF tickers first (before checking if it's numeric)
+        known_etf_tickers = ['GROWWEV', 'SILVERBEES', 'GOLDBEES', 'NIFTYBEES', 'BANKBEES', 'JUNIORBEES', 'SHARIABEES', 'MON100', 'SETF10GILT', 'SETFNIFBK', 'SETFNN50']
+        ticker_upper_clean = ticker_clean.upper().replace('.NS', '').replace('.BO', '')
+        
+        if ticker_upper_clean in known_etf_tickers:
+            # Known ETF - treat as stock and fetch from yfinance
+            print(f"[MF_PRICE] 🔍 Detected known ETF ticker: {ticker_clean}, treating as stock (yfinance)")
+            stock_price, stock_source = self._get_stock_price_with_fallback(ticker_clean, context_name=fund_name)
+            if stock_price:
+                return stock_price, stock_source
+        
         if normalized_code and not normalized_code.isdigit():
             stock_like_keywords = ('ETF', 'INVIT', 'TRUST')
             if (

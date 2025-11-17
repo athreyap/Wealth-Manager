@@ -1367,7 +1367,11 @@ class SharedDatabaseManager:
             for h in holdings:
                 quantity_raw = h.get('total_quantity', 0)
                 try:
-                    quantity = float(quantity_raw) if quantity_raw is not None else 0.0
+                    # Handle None, empty string, or string "0"
+                    if quantity_raw is None or quantity_raw == '' or str(quantity_raw).strip() == '0':
+                        quantity = 0.0
+                    else:
+                        quantity = float(quantity_raw)
                 except (ValueError, TypeError):
                     quantity = 0.0
                 # Treat anything <= 0.0001 as effectively zero (fully sold position)
@@ -1376,7 +1380,9 @@ class SharedDatabaseManager:
                     filtered_holdings.append(h)
                 else:
                     # Debug: Log filtered holdings
-                    print(f"[GET_HOLDINGS] Filtering out zero-quantity holding: {h.get('ticker')} - {h.get('stock_name')} (calculated_qty={quantity})")
+                    ticker = h.get('ticker', 'Unknown')
+                    stock_name = h.get('stock_name', 'Unknown')
+                    print(f"[GET_HOLDINGS] Filtering out zero-quantity holding: {ticker} - {stock_name} (calculated_qty={quantity}, raw={quantity_raw})")
             holdings = filtered_holdings
 
             latest_channels = self._prefetch_latest_channels(user_id)
@@ -1423,7 +1429,11 @@ class SharedDatabaseManager:
             for h in holdings:
                 quantity_raw = h.get('total_quantity', 0)
                 try:
-                    quantity = float(quantity_raw) if quantity_raw is not None else 0.0
+                    # Handle None, empty string, or string "0"
+                    if quantity_raw is None or quantity_raw == '' or str(quantity_raw).strip() == '0':
+                        quantity = 0.0
+                    else:
+                        quantity = float(quantity_raw)
                 except (ValueError, TypeError):
                     quantity = 0.0
                 # Treat anything <= 0.0001 as effectively zero (fully sold position)
@@ -1431,8 +1441,8 @@ class SharedDatabaseManager:
                 if quantity > 0.0001:
                     filtered_holdings.append(h)
                 else:
-                    # Debug: Log filtered holdings
-                    print(f"[GET_HOLDINGS_SILENT] Filtering out zero-quantity holding: {h.get('ticker')} - {h.get('stock_name')} (calculated_qty={quantity})")
+                    # Debug: Log filtered holdings (silent mode - no print)
+                    pass
             holdings = filtered_holdings
 
             latest_channels = self._prefetch_latest_channels(user_id)

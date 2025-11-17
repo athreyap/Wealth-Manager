@@ -20,10 +20,20 @@ class PortfolioAnalytics:
         current_value = 0
         total_realized_pnl = 0
         
-        # Calculate from holdings
+        # Calculate from holdings - CRITICAL: Filter out zero-quantity holdings
         for holding in self.holdings:
             try:
-                quantity = float(holding.get('total_quantity', 0))
+                quantity_raw = holding.get('total_quantity', 0)
+                # Handle None, empty string, or string "0"
+                if quantity_raw is None or quantity_raw == '' or str(quantity_raw).strip() == '0':
+                    quantity = 0.0
+                else:
+                    quantity = float(quantity_raw)
+                
+                # Skip zero-quantity holdings (filtered out from calculations)
+                if quantity <= 0.0001:
+                    continue
+                
                 avg_price = float(holding.get('average_price', 0))
                 
                 # Handle None current_price - use avg_price as fallback
@@ -54,6 +64,10 @@ class PortfolioAnalytics:
         # Calculate returns
         total_return_pct = (total_pnl / total_investment * 100) if total_investment > 0 else 0
         
+        # Count only non-zero quantity holdings
+        valid_holdings_count = sum(1 for h in self.holdings 
+                                   if float(h.get('total_quantity', 0) or 0) > 0.0001)
+        
         return {
             'total_investment': round(total_investment, 2),
             'current_value': round(current_value, 2),
@@ -61,7 +75,7 @@ class PortfolioAnalytics:
             'realized_pnl': round(total_realized_pnl, 2),
             'total_pnl': round(total_pnl, 2),
             'total_return_pct': round(total_return_pct, 2),
-            'total_holdings': len(self.holdings)
+            'total_holdings': valid_holdings_count
         }
     
     def calculate_holding_details(self) -> pd.DataFrame:
@@ -70,7 +84,17 @@ class PortfolioAnalytics:
         
         for holding in self.holdings:
             try:
-                quantity = float(holding.get('total_quantity', 0))
+                quantity_raw = holding.get('total_quantity', 0)
+                # Handle None, empty string, or string "0"
+                if quantity_raw is None or quantity_raw == '' or str(quantity_raw).strip() == '0':
+                    quantity = 0.0
+                else:
+                    quantity = float(quantity_raw)
+                
+                # Skip zero-quantity holdings (filtered out from calculations)
+                if quantity <= 0.0001:
+                    continue
+                
                 avg_price = float(holding.get('average_price', 0))
                 
                 # Handle None current_price
@@ -115,8 +139,18 @@ class PortfolioAnalytics:
         
         for holding in self.holdings:
             try:
+                quantity_raw = holding.get('total_quantity', 0)
+                # Handle None, empty string, or string "0"
+                if quantity_raw is None or quantity_raw == '' or str(quantity_raw).strip() == '0':
+                    quantity = 0.0
+                else:
+                    quantity = float(quantity_raw)
+                
+                # Skip zero-quantity holdings (filtered out from calculations)
+                if quantity <= 0.0001:
+                    continue
+                
                 asset_type = holding['asset_type'].replace('_', ' ').title()
-                quantity = float(holding.get('total_quantity', 0))
                 avg_price = float(holding.get('average_price', 0))
                 
                 # Handle None current_price
