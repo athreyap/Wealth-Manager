@@ -97,7 +97,8 @@ class EnhancedPriceFetcher:
         text = re.sub(r'(?:[-_.]?)INSTRUMENT$', '', text, flags=re.IGNORECASE)
         text = text.replace('\u00a0', ' ')
         text = ''.join(text.split())  # remove whitespace
-        text = text.lstrip('$')
+        # Remove $ suffix (common in BSE tickers like VIVANTA$, MADHAVIPL$)
+        text = text.rstrip('$').lstrip('$')
         # FIXED: Only remove trade tags when they're separated by dash/underscore/dot
         # This prevents "VBL" from becoming "V" - only "V-BL" or "V_BL" should become "V"
         text = re.sub(r'[-_.](T0|T1|BL)(?=\.|$)', '', text, flags=re.IGNORECASE)
@@ -1001,26 +1002,33 @@ class EnhancedPriceFetcher:
         variants: List[str] = []
 
         def _add(symbol: str) -> None:
-            sym = symbol.strip()
-            if sym and sym not in variants:
-                variants.append(sym)
+            # Normalize first to handle $ suffix and duplicate suffixes
+            normalized = self._normalize_base_ticker(symbol)
+            if normalized and normalized not in variants:
+                variants.append(normalized)
 
         for symbol in base_symbols:
-            upper = symbol.upper()
-            if upper.endswith('.NS'):
-                _add(upper)
-                _add(upper.replace('.NS', '.BO'))
-                _add(upper.replace('.NS', ''))
-            elif upper.endswith('.BO'):
-                _add(upper)
-                _add(upper.replace('.BO', '.NS'))
-                _add(upper.replace('.BO', ''))
+            if not symbol:
+                continue
+            # Normalize the symbol first to handle $ suffix and ensure consistent format
+            normalized = self._normalize_base_ticker(symbol)
+            if not normalized:
+                continue
+            
+            # Check for existing suffix after normalization
+            if normalized.endswith('.NS'):
+                _add(normalized)  # Keep as-is
+                _add(normalized.replace('.NS', '.BO'))  # Convert to BSE
+                _add(normalized.replace('.NS', ''))  # Remove suffix
+            elif normalized.endswith('.BO'):
+                _add(normalized)  # Keep as-is
+                _add(normalized.replace('.BO', '.NS'))  # Convert to NSE
+                _add(normalized.replace('.BO', ''))  # Remove suffix
             else:
-                _add(upper)
-                # Only add .NS/.BO if symbol doesn't already have them
-                if not upper.endswith('.NS') and not upper.endswith('.BO'):
-                    _add(f"{upper}.NS")
-                    _add(f"{upper}.BO")
+                # No suffix - add base and both variants
+                _add(normalized)  # Base symbol
+                _add(f"{normalized}.NS")  # NSE variant
+                _add(f"{normalized}.BO")  # BSE variant
 
         return variants
 
@@ -1245,10 +1253,19 @@ class EnhancedPriceFetcher:
                     elif variant.endswith('.BO'):
                         # If it's .BO, convert to .NS (remove .BO first to avoid double suffix)
                         base = variant.replace('.BO', '')
-                        clean_formatted = self._normalize_base_ticker(base) + '.NS'
+                        # Normalize base (removes any remaining suffixes) then add .NS
+                        normalized_base = self._normalize_base_ticker(base)
+                        # Remove any existing .NS/.BO from normalized_base before adding .NS
+                        if normalized_base.endswith('.NS') or normalized_base.endswith('.BO'):
+                            normalized_base = normalized_base[:-3]  # Remove last 3 chars (.NS or .BO)
+                        clean_formatted = normalized_base + '.NS'
                     else:
-                        # Variant has no suffix, add .NS
-                        clean_formatted = self._normalize_base_ticker(variant) + '.NS'
+                        # Variant has no suffix, normalize and add .NS
+                        normalized_base = self._normalize_base_ticker(variant)
+                        # Remove any existing .NS/.BO from normalized_base before adding .NS
+                        if normalized_base.endswith('.NS') or normalized_base.endswith('.BO'):
+                            normalized_base = normalized_base[:-3]  # Remove last 3 chars (.NS or .BO)
+                        clean_formatted = normalized_base + '.NS'
                     
                     # CRITICAL: Only set resolved ticker if it's actually related to the original ticker
                     # Check if the base symbols match (without .NS/.BO suffixes) - must be exact match
@@ -1282,10 +1299,19 @@ class EnhancedPriceFetcher:
                     elif variant.endswith('.NS'):
                         # If it's .NS, convert to .BO (remove .NS first to avoid double suffix)
                         base = variant.replace('.NS', '')
-                        clean_formatted = self._normalize_base_ticker(base) + '.BO'
+                        # Normalize base (removes any remaining suffixes) then add .BO
+                        normalized_base = self._normalize_base_ticker(base)
+                        # Remove any existing .NS/.BO from normalized_base before adding .BO
+                        if normalized_base.endswith('.NS') or normalized_base.endswith('.BO'):
+                            normalized_base = normalized_base[:-3]  # Remove last 3 chars (.NS or .BO)
+                        clean_formatted = normalized_base + '.BO'
                     else:
-                        # Variant has no suffix, add .BO
-                        clean_formatted = self._normalize_base_ticker(variant) + '.BO'
+                        # Variant has no suffix, normalize and add .BO
+                        normalized_base = self._normalize_base_ticker(variant)
+                        # Remove any existing .NS/.BO from normalized_base before adding .BO
+                        if normalized_base.endswith('.NS') or normalized_base.endswith('.BO'):
+                            normalized_base = normalized_base[:-3]  # Remove last 3 chars (.NS or .BO)
+                        clean_formatted = normalized_base + '.BO'
                     
                     # CRITICAL: Only set resolved ticker if it's actually related to the original ticker
                     # Check if the base symbols match (without .NS/.BO suffixes) - must be exact match
