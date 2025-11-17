@@ -784,7 +784,9 @@ Rules:
 - Determine transaction_type: "buy" for purchases/buys, "sell" for sales/redemptions
 - Infer asset_type: numeric codes → mutual_fund, .NS/.BO → stock, etc.
 - Set sector to "Unknown" if not found
-- **Channel**: CRITICAL - Look for a "channel", "Channel", "CHANNEL", "Broker", "Platform", or "Source" column in the file. If such a column exists, extract its value for each transaction. If no channel column exists in the file, use the filename `{filename}` as the channel value. NEVER use channel value as stock_name or scheme_name.
+- **Channel**: CRITICAL - Look for a "channel", "Channel", "CHANNEL", "Broker", "Platform", or "Source" column in the file. If such a column exists, extract its value for each transaction. If no channel column exists in the file, use the filename `{filename}` as the channel value. 
+  - IMPORTANT: Do NOT use "NSE" or "BSE" as channel values - these are exchanges, not channels/brokers. If the channel column contains "NSE" or "BSE", use the filename `{filename}` instead.
+  - NEVER use channel value as stock_name or scheme_name.
 
 IMPORTANT:
 - Extract EVERY transaction you find, even if some fields are missing
@@ -823,7 +825,9 @@ IMPORTANT COLUMN MAPPING RULES:
   - "SELL" or "REDEEM" or "REDEMPTION" → "sell"
   - Normalize to lowercase: "buy" or "sell"
 - **Exchange columns**: Look for "Exchange", "Exchange Name" → use for context (helps identify NSE vs BSE for ticker normalization)
-- **Channel**: CRITICAL - Look for a "channel", "Channel", "CHANNEL", "Broker", "Platform", or "Source" column in the file. If such a column exists, extract its value. If no channel column exists in the file, use the filename `{filename}` as the channel value. NEVER use channel value as stock_name or scheme_name.
+- **Channel**: CRITICAL - Look for a "channel", "Channel", "CHANNEL", "Broker", "Platform", or "Source" column in the file. If such a column exists, extract its value. If no channel column exists in the file, use the filename `{filename}` as the channel value.
+  - IMPORTANT: Do NOT use "NSE" or "BSE" as channel values - these are exchanges, not channels/brokers. If the channel column contains "NSE" or "BSE", use the filename `{filename}` instead.
+  - NEVER use channel value as stock_name or scheme_name.
 
 CRITICAL INSTRUCTIONS:
 - **Quantity is the MOST IMPORTANT field** - if the file has a "Quantity", "Units", "Number of Units", "Units Held", or similar column, extract it EXACTLY as shown, do NOT calculate it
@@ -1145,7 +1149,9 @@ IMPORTANT COLUMN MAPPING RULES:
   - "SELL" or "REDEEM" or "REDEMPTION" → "sell"
   - Normalize to lowercase: "buy" or "sell"
 - **Exchange columns**: Look for "Exchange", "Exchange Name" → use for context (helps identify NSE vs BSE for ticker normalization)
-- **Channel**: CRITICAL - Look for a "channel", "Channel", "CHANNEL", "Broker", "Platform", or "Source" column. If such a column exists, extract its value. If no channel column exists, use the filename `{filename}` as the channel value. NEVER use channel value as stock_name or scheme_name.
+- **Channel**: CRITICAL - Look for a "channel", "Channel", "CHANNEL", "Broker", "Platform", or "Source" column. If such a column exists, extract its value. If no channel column exists, use the filename `{filename}` as the channel value.
+  - IMPORTANT: Do NOT use "NSE" or "BSE" as channel values - these are exchanges, not channels/brokers. If the channel column contains "NSE" or "BSE", use the filename `{filename}` instead.
+  - NEVER use channel value as stock_name or scheme_name.
 
 OUTPUT SCHEMA (JSON array):
 [
@@ -1866,29 +1872,39 @@ Output ONLY the JSON array—no commentary or explanation.
     def _infer_channel_from_filename(self, filename: str, explicit_channel: Optional[str] = None, file_columns: Optional[list] = None) -> str:
         """
         Infer channel/platform from:
-        1. Explicit channel value (from transaction data)
-        2. 'channel' or 'Channel' column in file (if file_columns provided)
-        3. Filename stem as fallback
+        1. Explicit channel value (from transaction data) - but filter out NSE/BSE
+        2. Filename stem as fallback (if no valid channel column exists)
         
         Args:
             filename: Source filename
             explicit_channel: Channel value from transaction data
             file_columns: List of column names from the file (to check for channel column)
         """
-        # Priority 1: Use explicit channel from transaction if provided
+        # Priority 1: Use explicit channel from transaction if provided (but filter out NSE/BSE)
         if explicit_channel:
             candidate = str(explicit_channel).strip()
-            if candidate:
+            # Filter out exchange names (NSE, BSE) - these are not channels/brokers
+            candidate_upper = candidate.upper()
+            if candidate and candidate_upper not in ['NSE', 'BSE', 'NSE.', 'BSE.']:
                 return candidate
         
-        # Priority 2: Check if file has a 'channel' or 'Channel' column
-        # (Note: This is a hint - actual channel value should come from the transaction data)
-        # If file_columns is provided and contains 'channel', we expect the AI to extract it
+        # Priority 2: If no valid channel column exists, use filename
+        # Check if file has a 'channel' or 'Channel' column
+        has_channel_column = False
+        if file_columns:
+            has_channel_column = any(col.lower() in ['channel', 'broker', 'platform', 'source'] for col in file_columns)
         
-        # Priority 3: Fallback to filename
+        # If no channel column exists in file, use filename
+        if not has_channel_column:
+            if not filename:
+                return "Direct"
+            stem = Path(filename).stem
+            clean = re.sub(r'[_\-\s]+', ' ', stem).strip()
+            return clean.title() if clean else "Direct"
+        
+        # If channel column exists but value was NSE/BSE or empty, fallback to filename
         if not filename:
             return "Direct"
-
         stem = Path(filename).stem
         clean = re.sub(r'[_\-\s]+', ' ', stem).strip()
         return clean.title() if clean else "Direct"
