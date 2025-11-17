@@ -6486,6 +6486,13 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
         imported = skipped = errors = 0
 
         try:
+            # CRITICAL: Reset file pointer to beginning before processing each file
+            # This ensures each file is processed completely, even if previous processing consumed the file object
+            try:
+                uploaded_file.seek(0)
+            except Exception:
+                pass  # Some file objects may not support seek, that's okay
+            
             # CRITICAL: Use the same "Convert to CSV" pipeline for ALL files (CSV, Excel, PDF)
             # This ensures consistent normalization and processing - same as the preview
             print(f"[FILE_PROCESS] Using 'Convert to CSV' pipeline for {file_name} to ensure consistency...")
@@ -6586,12 +6593,15 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
 
         except Exception as exc:
             st.error(f"   ❌ Error processing {file_name}: {str(exc)[:120]}")
+            import traceback
+            print(f"[FILE_PROCESS] ❌ Exception processing {file_name}: {exc}")
+            traceback.print_exc()
             processing_log.append({
                 'file': file_name,
                 'imported': 0,
                 'skipped': 0,
                 'errors': 1,
-                'method': method_used,
+                'method': method_used if 'method_used' in locals() else 'error',
             })
 
     if total_imported > 0:
