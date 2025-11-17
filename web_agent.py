@@ -1619,19 +1619,15 @@ def _extract_pdf_with_vision_api(uploaded_file, filename: str = "uploaded_file.p
         print(f"[PDF_VISION] Read {len(pdf_bytes)} bytes ({pdf_size_mb:.2f} MB) from PDF file: {filename}")
         diagnostic_info.append(f"📄 PDF size: {pdf_size_mb:.2f} MB")
         
-        # File size validation for Streamlit Cloud
-        MAX_FILE_SIZE_MB = 10  # Streamlit Cloud limit
-        if pdf_size_mb > MAX_FILE_SIZE_MB:
-            error_msg = f"File too large: {pdf_size_mb:.2f} MB. Maximum allowed: {MAX_FILE_SIZE_MB} MB for Streamlit Cloud."
-            print(f"[PDF_VISION] ❌ {error_msg}")
-            error_messages.append(error_msg)
-            diagnostic_info.append(f"❌ {error_msg}")
-            if show_ui_errors:
-                try:
-                    st.error(f"❌ **File Size Error**: {error_msg}\n\nPlease use a smaller PDF file or split it into multiple files.")
-                except:
-                    pass
-            return ""
+        # File size logging (no hard limit - was working fine with large files before)
+        # Streamlit Cloud doesn't have a hard 10 MB limit - files were processing fine
+        # Only log file size for monitoring, but don't block processing
+        if pdf_size_mb > 50:
+            print(f"[PDF_VISION] ⚠️ Large PDF detected: {pdf_size_mb:.2f} MB (processing anyway - no size limit)")
+            diagnostic_info.append(f"⚠️ Large PDF: {pdf_size_mb:.2f} MB (processing anyway)")
+        else:
+            print(f"[PDF_VISION] 📄 PDF size: {pdf_size_mb:.2f} MB")
+            diagnostic_info.append(f"📄 PDF size: {pdf_size_mb:.2f} MB")
         
         images = []
         image_conversion_error = None
@@ -4217,6 +4213,13 @@ def login_page():
                     summary_messages: List[str] = []
 
                     for uploaded_file in uploaded_files:
+                        # CRITICAL: Reset file pointer to beginning before processing each file
+                        # This ensures each file is processed completely, even if previous processing consumed the file object
+                        try:
+                            uploaded_file.seek(0)
+                        except Exception:
+                            pass  # Some file objects may not support seek, that's okay
+                        
                         rows, method_used = extract_transactions_for_csv(uploaded_file, uploaded_file.name, None)
                         if rows:
                             csv_rows.extend(rows)
@@ -6277,25 +6280,23 @@ def extract_transactions_for_csv(uploaded_file, file_name: str, user_id: Optiona
     transactions: List[Dict[str, Any]] = []
     method_used = 'python'
 
-    # File size validation for Streamlit Cloud
+    # File size logging (no hard limit - was working fine with large files before)
+    # Streamlit Cloud doesn't have a hard 10 MB limit - files were processing fine
+    # Only log file size for monitoring, but don't block processing
     try:
         uploaded_file.seek(0, 2)  # Seek to end
         file_size = uploaded_file.tell()
         uploaded_file.seek(0)  # Reset
         
         file_size_mb = file_size / (1024 * 1024)
-        MAX_FILE_SIZE_MB = 10  # Streamlit Cloud limit
         
-        if file_size_mb > MAX_FILE_SIZE_MB:
-            error_msg = f"File too large: {file_size_mb:.2f} MB. Maximum allowed: {MAX_FILE_SIZE_MB} MB for Streamlit Cloud."
-            print(f"[FILE_PARSE] ❌ {error_msg}")
-            try:
-                st.error(f"❌ **File Size Error**: {error_msg}\n\nPlease use a smaller file or split it into multiple files.")
-            except:
-                pass
-            return [], 'error'
+        # Log large files for monitoring, but process them anyway
+        if file_size_mb > 50:
+            print(f"[FILE_PARSE] ⚠️ Large file detected: {file_size_mb:.2f} MB (processing anyway - no size limit)")
+        else:
+            print(f"[FILE_PARSE] 📄 File size: {file_size_mb:.2f} MB")
     except Exception:
-        pass  # Skip validation if can't check size
+        pass  # Skip size check if can't determine - process anyway
 
     # For Excel files, use AI extraction first (better column mapping)
     # For CSV/PDF, try Python first then AI
@@ -6499,14 +6500,19 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
             normalized_rows, method_used = extract_transactions_for_csv(uploaded_file, file_name, user_id)
             
             if not normalized_rows:
-                st.error(f"   ❌ Could not extract transactions from {file_name}.")
+                # Check if it was a file size error or other issue
+                error_details = f"Method used: {method_used}"
+                if method_used == 'error':
+                    error_details += " (likely file size limit or extraction failure)"
+                st.error(f"   ❌ Could not extract transactions from {file_name}. {error_details}")
+                print(f"[FILE_PROCESS] ❌ Failed to extract from {file_name}: method={method_used}, rows={len(normalized_rows) if normalized_rows else 0}")
                 processing_log.append({
                     'file': file_name,
                     'imported': 0,
                     'skipped': 0,
                     'errors': 1,
                     'method': method_used,
-                    'debug': [],
+                    'debug': [error_details],
                 })
                 continue
 
@@ -12065,6 +12071,13 @@ def upload_files_page():
                 summary_messages: List[str] = []
 
                 for uploaded_file in uploaded_files:
+                    # CRITICAL: Reset file pointer to beginning before processing each file
+                    # This ensures each file is processed completely, even if previous processing consumed the file object
+                    try:
+                        uploaded_file.seek(0)
+                    except Exception:
+                        pass  # Some file objects may not support seek, that's okay
+                    
                     rows, method_used = extract_transactions_for_csv(uploaded_file, uploaded_file.name, user['id'])
                     if rows:
                         csv_rows.extend(rows)
