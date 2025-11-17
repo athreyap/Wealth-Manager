@@ -1366,14 +1366,30 @@ class SharedDatabaseManager:
             filtered_holdings = []
             for h in holdings:
                 quantity_raw = h.get('total_quantity', 0)
-                try:
-                    # Handle None, empty string, or string "0"
-                    if quantity_raw is None or quantity_raw == '' or str(quantity_raw).strip() == '0':
+                
+                # Enhanced parsing to handle all edge cases
+                quantity = 0.0
+                if quantity_raw is None:
+                    quantity = 0.0
+                elif isinstance(quantity_raw, str):
+                    # Handle string "0", "0.0", "", etc.
+                    quantity_raw = quantity_raw.strip()
+                    if not quantity_raw or quantity_raw in ['0', '0.0', '0.00', '']:
                         quantity = 0.0
                     else:
+                        try:
+                            quantity = float(quantity_raw)
+                        except (ValueError, TypeError):
+                            quantity = 0.0
+                elif isinstance(quantity_raw, (int, float)):
+                    quantity = float(quantity_raw)
+                else:
+                    # For any other type, try to convert
+                    try:
                         quantity = float(quantity_raw)
-                except (ValueError, TypeError):
-                    quantity = 0.0
+                    except (ValueError, TypeError):
+                        quantity = 0.0
+                
                 # Treat anything <= 0.0001 as effectively zero (fully sold position)
                 # This quantity represents: total_buys - total_sells from all transactions
                 if quantity > 0.0001:
@@ -1382,7 +1398,7 @@ class SharedDatabaseManager:
                     # Debug: Log filtered holdings
                     ticker = h.get('ticker', 'Unknown')
                     stock_name = h.get('stock_name', 'Unknown')
-                    print(f"[GET_HOLDINGS] Filtering out zero-quantity holding: {ticker} - {stock_name} (calculated_qty={quantity}, raw={quantity_raw})")
+                    print(f"[GET_HOLDINGS] Filtering out zero-quantity holding: {ticker} - {stock_name} (calculated_qty={quantity}, raw={quantity_raw}, type={type(quantity_raw).__name__})")
             holdings = filtered_holdings
 
             latest_channels = self._prefetch_latest_channels(user_id)
@@ -1428,14 +1444,30 @@ class SharedDatabaseManager:
             filtered_holdings = []
             for h in holdings:
                 quantity_raw = h.get('total_quantity', 0)
-                try:
-                    # Handle None, empty string, or string "0"
-                    if quantity_raw is None or quantity_raw == '' or str(quantity_raw).strip() == '0':
+                
+                # Enhanced parsing to handle all edge cases
+                quantity = 0.0
+                if quantity_raw is None:
+                    quantity = 0.0
+                elif isinstance(quantity_raw, str):
+                    # Handle string "0", "0.0", "", etc.
+                    quantity_raw = quantity_raw.strip()
+                    if not quantity_raw or quantity_raw in ['0', '0.0', '0.00', '']:
                         quantity = 0.0
                     else:
+                        try:
+                            quantity = float(quantity_raw)
+                        except (ValueError, TypeError):
+                            quantity = 0.0
+                elif isinstance(quantity_raw, (int, float)):
+                    quantity = float(quantity_raw)
+                else:
+                    # For any other type, try to convert
+                    try:
                         quantity = float(quantity_raw)
-                except (ValueError, TypeError):
-                    quantity = 0.0
+                    except (ValueError, TypeError):
+                        quantity = 0.0
+                
                 # Treat anything <= 0.0001 as effectively zero (fully sold position)
                 # This quantity represents: total_buys - total_sells from all transactions
                 if quantity > 0.0001:

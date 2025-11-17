@@ -105,10 +105,30 @@ def get_cached_holdings(user_id: str):
     filtered = []
     for h in holdings:
         quantity_raw = h.get('total_quantity', 0)
-        try:
-            quantity = float(quantity_raw) if quantity_raw is not None else 0.0
-        except (ValueError, TypeError):
+        
+        # Enhanced parsing to handle all edge cases
+        quantity = 0.0
+        if quantity_raw is None:
             quantity = 0.0
+        elif isinstance(quantity_raw, str):
+            # Handle string "0", "0.0", "", etc.
+            quantity_raw = quantity_raw.strip()
+            if not quantity_raw or quantity_raw in ['0', '0.0', '0.00', '']:
+                quantity = 0.0
+            else:
+                try:
+                    quantity = float(quantity_raw)
+                except (ValueError, TypeError):
+                    quantity = 0.0
+        elif isinstance(quantity_raw, (int, float)):
+            quantity = float(quantity_raw)
+        else:
+            # For any other type, try to convert
+            try:
+                quantity = float(quantity_raw)
+            except (ValueError, TypeError):
+                quantity = 0.0
+        
         if quantity > 0.0001:  # Only cache holdings with positive quantity
             filtered.append(h)
     return filtered
