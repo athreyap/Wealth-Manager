@@ -790,11 +790,17 @@ IMPORTANT COLUMN MAPPING RULES:
 - **Stock Name columns**: Look for "Stock name", "Stock Name", "Security Name", "Scrip Name", "Name" → map to `"stock_name"`
   - CRITICAL: Do NOT use filename, channel, or broker name as stock_name
   - If stock_name column is missing or contains channel/broker name, set it to null (will be fetched from AMFI/mftool)
+- **Scheme Name columns (for Mutual Funds)**: Look for "Scheme Name", "Scheme", "Fund Name", "Fund" → map to `"scheme_name"` (for mutual funds, this is the fund name)
+  - If scheme_name is present, also copy it to stock_name for consistency
+  - CRITICAL: Do NOT use filename, channel, or broker name as scheme_name
 - **Quantity columns**: Look for "Quantity", "Qty", "Units", "No. of Units", "Number of Units", "Units Held", "Unit Balance", "Total Units", "Current Units", "Holding Quantity", "Balance Units" → map to `"quantity"` (THIS IS CRITICAL - quantity must be extracted correctly!)
 - **Amount/Value columns**: Look for "Value", "Amount", "Total Value", "Consideration", "Trade Value" → map to `"amount"`
 - **Price columns**: Look for "Price", "Rate", "NAV", "Per Unit Price" → map to `"price"` (if missing, we'll calculate from amount/quantity)
-- **Transaction Type**: Look for "Type", "Transaction Type", "Action", "Buy/Sell" → map to `"transaction_type"` ("BUY" → "buy", "SELL" → "sell")
-- **Exchange**: Look for "Exchange", "Exchange Name" → use for context
+- **Transaction Type**: Look for "Type", "Transaction Type", "transaction_type", "transac", "Action", "Buy/Sell" → map to `"transaction_type"`
+  - "BUY" or "PURCHASE" → "buy"
+  - "SELL" or "REDEEM" or "REDEMPTION" → "sell"
+  - Normalize to lowercase: "buy" or "sell"
+- **Exchange columns**: Look for "Exchange", "Exchange Name" → use for context (helps identify NSE vs BSE for ticker normalization)
 - **Channel**: CRITICAL - Look for a "channel", "Channel", "CHANNEL", "Broker", "Platform", or "Source" column in the file. If such a column exists, extract its value. If no channel column exists in the file, use the filename `{filename}` as the channel value. NEVER use channel value as stock_name or scheme_name.
 
 CRITICAL INSTRUCTIONS:
@@ -823,8 +829,30 @@ OUTPUT SCHEMA (JSON array):
   }}
 ]
 
-EXAMPLE MAPPING:
-If CSV has: "Stock name, Symbol, Quantity, Value, Execution date and time, Type"
+EXAMPLE MAPPINGS:
+
+Example 1 (Stocks): "stock_name, ticker, date, transaction_type, quantity, price, Exchange"
+Map to:
+- "stock_name" → stock_name
+- "ticker" → ticker
+- "date" → date
+- "transaction_type" → transaction_type (BUY → buy, SELL → sell)
+- "quantity" → quantity
+- "price" → price
+- "Exchange" → use for context (NSE/BSE)
+
+Note: Also handles "transac" column if present instead of "transaction_type"
+
+Example 2 (Mutual Funds): "Scheme Name, Transaction Type, Units, NAV, Amount, Date"
+Map to:
+- "Scheme Name" → scheme_name (also copy to stock_name)
+- "Transaction Type" → transaction_type (PURCHASE → buy, REDEEM → sell)
+- "Units" → quantity
+- "NAV" → price
+- "Amount" → amount
+- "Date" → date
+
+Example 3 (Generic): "Stock name, Symbol, Quantity, Value, Execution date and time, Type"
 Map to:
 - "Stock name" → stock_name
 - "Symbol" → ticker  
@@ -1084,10 +1112,17 @@ IMPORTANT COLUMN MAPPING RULES:
 - **Stock Name columns**: Look for "Stock name", "Stock Name", "Security Name", "Scrip Name", "Name" → map to `"stock_name"`
   - CRITICAL: Do NOT use filename, channel, or broker name as stock_name
   - If stock_name column is missing or contains channel/broker name, set it to null (will be fetched from AMFI/mftool)
+- **Scheme Name columns (for Mutual Funds)**: Look for "Scheme Name", "Scheme", "Fund Name", "Fund" → map to `"scheme_name"` (for mutual funds, this is the fund name)
+  - If scheme_name is present, also copy it to stock_name for consistency
+  - CRITICAL: Do NOT use filename, channel, or broker name as scheme_name
 - **Quantity columns**: Look for "Quantity", "Qty", "Units", "No. of Units", "Number of Units", "Units Held", "Unit Balance", "Total Units", "Current Units", "Holding Quantity", "Balance Units" → map to `"quantity"`
 - **Amount/Value columns**: Look for "Value", "Amount", "Total Value", "Consideration", "Trade Value" → map to `"amount"`
 - **Price columns**: Look for "Price", "Rate", "NAV", "Per Unit Price" → map to `"price"`
-- **Transaction Type**: Look for "Type", "Transaction Type", "Action", "Buy/Sell" → map to `"transaction_type"` ("BUY" → "buy", "SELL" → "sell")
+- **Transaction Type**: Look for "Type", "Transaction Type", "transaction_type", "transac", "Action", "Buy/Sell" → map to `"transaction_type"`
+  - "BUY" or "PURCHASE" → "buy"
+  - "SELL" or "REDEEM" or "REDEMPTION" → "sell"
+  - Normalize to lowercase: "buy" or "sell"
+- **Exchange columns**: Look for "Exchange", "Exchange Name" → use for context (helps identify NSE vs BSE for ticker normalization)
 - **Channel**: CRITICAL - Look for a "channel", "Channel", "CHANNEL", "Broker", "Platform", or "Source" column. If such a column exists, extract its value. If no channel column exists, use the filename `{filename}` as the channel value. NEVER use channel value as stock_name or scheme_name.
 
 OUTPUT SCHEMA (JSON array):
