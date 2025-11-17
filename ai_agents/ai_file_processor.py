@@ -374,36 +374,52 @@ class AIFileProcessor(BaseAgent):
             
             self.logger.info(f"[VISION_API] ✅ Ready to process {len(images)} PDF pages with GPT-4 Vision")
             
-            # Process images with GPT-4 Vision (process first 10 pages to avoid token limits)
-            max_pages = min(10, len(images))
-            all_text = []
+            # Process images with GPT-4 Vision
+            # Process all pages, but in batches to avoid overwhelming the API
+            # If file is very large (>50 pages), process in batches of 20 pages
+            MAX_PAGES_PER_BATCH = 20  # Process 20 pages at a time for very large PDFs
+            total_pages = len(images)
             
-            for page_num, image in enumerate(images[:max_pages], 1):
-                try:
-                    # Convert PIL Image to base64 with compression
-                    buffered = io.BytesIO()
-                    # Use optimize=True and compress_level for smaller file size
-                    image.save(buffered, format="PNG", optimize=True, compress_level=6)
-                    img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                    
-                    # Call GPT-4 Vision API
-                    self.logger.info(f"[VISION_API] Processing page {page_num}/{max_pages} with GPT-4 Vision API...")
-                    openai_client = self._get_openai_client()
-                    if not openai_client:
-                        raise Exception("OpenAI client not available")
-                    response = openai_client.chat.completions.create(
-                        model="gpt-4o",  # GPT-4 Vision model
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
-                            },
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": f"""Extract all financial transactions from this PDF page (Page {page_num} of {len(images)} from file: {filename}).
+            if total_pages > MAX_PAGES_PER_BATCH:
+                print(f"[VISION_API] 📄 Large PDF detected ({total_pages} pages) - processing in batches of {MAX_PAGES_PER_BATCH}...")
+            
+            all_text = []
+            pages_processed = 0
+            
+            # Process in batches if needed
+            for batch_start in range(0, total_pages, MAX_PAGES_PER_BATCH):
+                batch_end = min(batch_start + MAX_PAGES_PER_BATCH, total_pages)
+                batch_images = images[batch_start:batch_end]
+                
+                if total_pages > MAX_PAGES_PER_BATCH:
+                    print(f"[VISION_API] 📦 Processing pages {batch_start + 1}-{batch_end} of {total_pages}...")
+                
+                for page_num, image in enumerate(batch_images, batch_start + 1):
+                    try:
+                        # Convert PIL Image to base64 with compression
+                        buffered = io.BytesIO()
+                        # Use optimize=True and compress_level for smaller file size
+                        image.save(buffered, format="PNG", optimize=True, compress_level=6)
+                        img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                        
+                        # Call GPT-4 Vision API
+                        self.logger.info(f"[VISION_API] Processing page {page_num}/{total_pages} with GPT-4 Vision API...")
+                        openai_client = self._get_openai_client()
+                        if not openai_client:
+                            raise Exception("OpenAI client not available")
+                        response = openai_client.chat.completions.create(
+                            model="gpt-4o",  # GPT-4 Vision model
+                            messages=[
+                                {
+                                    "role": "system",
+                                    "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
+                                },
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": f"""Extract all financial transactions from this PDF page (Page {page_num} of {len(images)} from file: {filename}).
 
 CRITICAL: Do NOT use filename "{filename}" or channel/broker name as stock_name. Extract the actual fund/security name from the document. If stock_name is missing or looks like a channel name, set it to null.
 
@@ -438,22 +454,28 @@ Return ALL transactions found on this page, even if the format is slightly diffe
                         max_tokens=4000,
                     )
                     
-                    page_text = response.choices[0].message.content
-                    if page_text and page_text.strip() and "No transactions" not in page_text:
-                        all_text.append(f"--- Page {page_num} ---\n{page_text}\n")
-                        self.logger.info(f"[VISION_API] ✅ Page {page_num}: Extracted transaction data ({len(page_text)} chars)")
-                    else:
-                        self.logger.info(f"[VISION_API] Page {page_num}: No transaction data found")
-                        
-                except Exception as page_error:
-                    self.logger.error(f"[VISION_API] ❌ GPT-4 Vision failed for page {page_num}: {str(page_error)}")
-                    import traceback
-                    self.logger.error(f"[VISION_API] Page error traceback: {traceback.format_exc()}")
-                    continue
+                        page_text = response.choices[0].message.content
+                        if page_text and page_text.strip() and "No transactions" not in page_text:
+                            all_text.append(f"--- Page {page_num} ---\n{page_text}\n")
+                            pages_processed += 1
+                            if total_pages <= MAX_PAGES_PER_BATCH:
+                                self.logger.info(f"[VISION_API] ✅ Page {page_num}: Extracted transaction data ({len(page_text)} chars)")
+                            else:
+                                self.logger.info(f"[VISION_API] ✅ Page {page_num}/{total_pages}: Extracted transaction data ({len(page_text)} chars)")
+                        else:
+                            self.logger.info(f"[VISION_API] Page {page_num}: No transaction data found")
+                            
+                    except Exception as page_error:
+                        self.logger.error(f"[VISION_API] ❌ GPT-4 Vision failed for page {page_num}: {str(page_error)}")
+                        import traceback
+                        self.logger.error(f"[VISION_API] Page error traceback: {traceback.format_exc()}")
+                        continue
             
             if all_text:
                 combined_text = "\n".join(all_text)
-                self.logger.info(f"[VISION_API] ✅ Successfully extracted {len(combined_text)} characters from {len(all_text)} pages")
+                self.logger.info(f"[VISION_API] ✅ Successfully extracted {len(combined_text)} characters from {pages_processed}/{total_pages} pages")
+                if pages_processed < total_pages:
+                    self.logger.warning(f"[VISION_API] ⚠️ Only processed {pages_processed} of {total_pages} pages (some pages may have failed)")
                 return combined_text
             else:
                 self.logger.warning("[VISION_API] ⚠️ GPT-4 Vision completed but no transaction data extracted from any pages")

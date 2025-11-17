@@ -1210,6 +1210,46 @@ class SharedDatabaseManager:
                 iso_week = trans_date.isocalendar()[1]
                 week_label = f"Wk{iso_week} {iso_year}"
             
+            # CRITICAL: Check for duplicate transaction before inserting
+            # A duplicate is defined as: same user, portfolio, stock, date, quantity, price, and type
+            # This prevents storing the same transaction from different files
+            # Use approximate matching for quantity/price to handle floating point precision
+            new_quantity = float(transaction_data['quantity'])
+            new_price = float(transaction_data['price'])
+            
+            # Get existing transactions for this user/portfolio/stock/date/type
+            existing_transactions = self._retry_db_operation(
+                lambda: self.supabase.table('user_transactions').select('id, quantity, price').eq(
+                    'user_id', transaction_data['user_id']
+                ).eq('portfolio_id', transaction_data['portfolio_id']).eq(
+                    'stock_id', stock_id
+                ).eq('transaction_date', transaction_data['transaction_date']).eq(
+                    'transaction_type', transaction_data['transaction_type']
+                ).execute(),
+                max_retries=2,
+                base_delay=0.5
+            )
+            
+            # Check if any existing transaction matches (with tolerance for floating point)
+            if existing_transactions.data:
+                for existing in existing_transactions.data:
+                    existing_qty = float(existing.get('quantity', 0) or 0)
+                    existing_price = float(existing.get('price', 0) or 0)
+                    
+                    # Match if quantity and price are within 0.01 (handles floating point precision)
+                    qty_match = abs(existing_qty - new_quantity) < 0.01
+                    price_match = abs(existing_price - new_price) < 0.01
+                    
+                    if qty_match and price_match:
+                        # Duplicate transaction found - skip insertion
+                        existing_id = existing['id']
+                        return {
+                            'success': False,
+                            'error': 'Duplicate transaction',
+                            'duplicate': True,
+                            'existing_id': existing_id
+                        }
+            
             # Create transaction with week tracking
             trans_insert = {
                 'user_id': transaction_data['user_id'],
@@ -1347,6 +1387,212 @@ class SharedDatabaseManager:
             print(f"[HOLDINGS] Error recalculating: {e}")
             return 0
     
+    def _consolidate_duplicate_holdings(self, holdings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Consolidate duplicate holdings that have the same normalized ticker but different stock_ids.
+        This happens when ticker resolution creates new stock_ids (e.g., RTNINDIA vs RTNINDIA.NS).
+        
+        Strategy:
+        1. First, drop exact duplicates (all columns match with normalized ticker)
+        2. Drop duplicates where normalized ticker + quantity + date match
+        3. Then consolidate remaining duplicates by merging quantities and recalculating average price
+        4. Keep the most authoritative stock_id (prefer one with .NS/.BO suffix)
+        """
+        if not holdings:
+            return holdings
+        
+        def normalize_ticker(ticker: str) -> str:
+            """Normalize ticker by removing exchange suffixes"""
+            if not ticker:
+                return ''
+            ticker = str(ticker).strip().upper()
+            # Remove .NS or .BO suffix
+            if ticker.endswith('.NS') or ticker.endswith('.BO'):
+                return ticker[:-3]
+            return ticker
+        
+        def get_holding_key(holding: Dict[str, Any], include_date: bool = False) -> tuple:
+            """Create a key for comparing holdings"""
+            ticker = normalize_ticker(holding.get('ticker', ''))
+            asset_type = holding.get('asset_type', 'stock')
+            stock_name = str(holding.get('stock_name', '')).strip().upper()
+            quantity = float(holding.get('total_quantity', 0) or 0)
+            
+            key_parts = [ticker, asset_type]
+            
+            if stock_name and stock_name not in ['', 'UNKNOWN', 'NONE', 'NULL']:
+                key_parts.append(stock_name)
+            
+            if include_date:
+                # Include last_updated date for exact matching
+                last_updated = holding.get('last_updated', '')
+                if last_updated:
+                    # Normalize date to just the date part (ignore time)
+                    if isinstance(last_updated, str):
+                        date_part = last_updated.split('T')[0] if 'T' in last_updated else last_updated.split(' ')[0]
+                    else:
+                        date_part = str(last_updated).split('T')[0] if 'T' in str(last_updated) else str(last_updated).split(' ')[0]
+                    key_parts.append(date_part)
+                key_parts.append(quantity)  # Include quantity when checking date
+            
+            return tuple(key_parts)
+        
+        # STEP 1: Drop exact duplicates (all columns match with normalized ticker)
+        seen_exact = {}
+        deduplicated = []
+        exact_duplicates_dropped = 0
+        
+        for holding in holdings:
+            # Create a comprehensive key that includes all relevant fields
+            ticker = normalize_ticker(holding.get('ticker', ''))
+            asset_type = holding.get('asset_type', 'stock')
+            stock_name = str(holding.get('stock_name', '')).strip().upper()
+            quantity = float(holding.get('total_quantity', 0) or 0)
+            avg_price = float(holding.get('average_price', 0) or 0)
+            current_price = float(holding.get('current_price') or holding.get('live_price') or 0)
+            sector = str(holding.get('sector', '')).strip().upper()
+            last_updated = holding.get('last_updated', '')
+            
+            # Normalize date
+            if last_updated:
+                if isinstance(last_updated, str):
+                    date_part = last_updated.split('T')[0] if 'T' in last_updated else last_updated.split(' ')[0]
+                else:
+                    date_part = str(last_updated).split('T')[0] if 'T' in str(last_updated) else str(last_updated).split(' ')[0]
+            else:
+                date_part = ''
+            
+            # Create comprehensive key for exact matching
+            exact_key = (
+                ticker,
+                asset_type,
+                stock_name,
+                round(quantity, 6),  # Round to handle floating point precision
+                round(avg_price, 6),
+                round(current_price, 6),
+                sector,
+                date_part
+            )
+            
+            if exact_key not in seen_exact:
+                seen_exact[exact_key] = holding
+                deduplicated.append(holding)
+            else:
+                exact_duplicates_dropped += 1
+                print(f"[HOLDINGS] 🗑️ Dropped exact duplicate: {holding.get('ticker')} - {holding.get('stock_name')} (all columns match)")
+        
+        if exact_duplicates_dropped > 0:
+            print(f"[HOLDINGS] ✅ Dropped {exact_duplicates_dropped} exact duplicate holdings")
+        
+        holdings = deduplicated
+        
+        # STEP 2: Drop duplicates where normalized ticker + quantity + date match
+        seen_quantity_date = {}
+        deduplicated = []
+        quantity_date_duplicates_dropped = 0
+        
+        for holding in holdings:
+            key = get_holding_key(holding, include_date=True)
+            
+            if key not in seen_quantity_date:
+                seen_quantity_date[key] = holding
+                deduplicated.append(holding)
+            else:
+                quantity_date_duplicates_dropped += 1
+                print(f"[HOLDINGS] 🗑️ Dropped duplicate (ticker+quantity+date match): {holding.get('ticker')} - {holding.get('stock_name')} (qty: {holding.get('total_quantity')}, date: {holding.get('last_updated')})")
+        
+        if quantity_date_duplicates_dropped > 0:
+            print(f"[HOLDINGS] ✅ Dropped {quantity_date_duplicates_dropped} duplicates (ticker+quantity+date match)")
+        
+        holdings = deduplicated
+        
+        # STEP 3: Group remaining holdings by normalized ticker + asset_type + stock_name
+        # This ensures we consolidate holdings that are truly the same asset
+        grouped = defaultdict(list)
+        for holding in holdings:
+            ticker = holding.get('ticker', '')
+            asset_type = holding.get('asset_type', 'stock')
+            stock_name = str(holding.get('stock_name', '')).strip().upper()
+            normalized = normalize_ticker(ticker)
+            
+            # Create a key that includes ticker, asset_type, and stock_name
+            # This ensures we only consolidate holdings that are truly the same
+            # If stock_name is missing or 'UNKNOWN', just use ticker + asset_type
+            if stock_name and stock_name not in ['', 'UNKNOWN', 'NONE', 'NULL']:
+                key = (normalized, asset_type, stock_name)
+            else:
+                # Fallback: group by ticker + asset_type only if stock_name is missing
+                key = (normalized, asset_type, None)
+            grouped[key].append(holding)
+        
+        consolidated = []
+        duplicates_found = 0
+        
+        for key, group in grouped.items():
+            normalized_ticker, asset_type = key[0], key[1]
+            if len(group) == 1:
+                # No duplicates, keep as-is
+                consolidated.append(group[0])
+            else:
+                # Multiple holdings with same normalized ticker - consolidate
+                duplicates_found += len(group) - 1
+                
+                # Prefer stock_id with .NS/.BO suffix (more authoritative)
+                group_sorted = sorted(group, key=lambda h: (
+                    1 if not str(h.get('ticker', '')).endswith(('.NS', '.BO')) else 0,
+                    h.get('last_updated', '') or ''
+                ), reverse=True)
+                
+                # Use the most authoritative holding as base
+                base_holding = group_sorted[0].copy()
+                
+                # Sum quantities and calculate weighted average price
+                total_quantity = 0.0
+                total_cost = 0.0
+                
+                for h in group:
+                    qty = float(h.get('total_quantity', 0) or 0)
+                    avg_price = float(h.get('average_price', 0) or 0)
+                    
+                    total_quantity += qty
+                    total_cost += qty * avg_price
+                
+                # Recalculate average price
+                if total_quantity > 0:
+                    new_avg_price = total_cost / total_quantity
+                else:
+                    new_avg_price = base_holding.get('average_price', 0)
+                
+                # Update consolidated holding
+                base_holding['total_quantity'] = total_quantity
+                base_holding['average_price'] = new_avg_price
+                
+                # Use the best current_price (prefer non-zero)
+                best_price = 0.0
+                for h in group:
+                    price = float(h.get('current_price') or h.get('live_price') or 0)
+                    if price > best_price:
+                        best_price = price
+                if best_price > 0:
+                    base_holding['current_price'] = best_price
+                    base_holding['live_price'] = best_price
+                
+                # Use the most complete stock_name
+                for h in group:
+                    name = h.get('stock_name', '')
+                    if name and name != 'Unknown' and len(name) > len(base_holding.get('stock_name', '')):
+                        base_holding['stock_name'] = name
+                
+                consolidated.append(base_holding)
+                
+                # Log consolidation
+                tickers = [h.get('ticker') for h in group]
+                print(f"[HOLDINGS] 🔄 Consolidated {len(group)} duplicate holdings: {tickers} → {base_holding.get('ticker')} (qty: {total_quantity:.2f})")
+        
+        if duplicates_found > 0:
+            print(f"[HOLDINGS] ✅ Consolidated {duplicates_found} duplicate holdings into {len(consolidated)} unique holdings")
+        
+        return consolidated
     
     def get_user_holdings(self, user_id: str, portfolio_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get user holdings with stock details (uses view)"""
@@ -1476,6 +1722,9 @@ class SharedDatabaseManager:
                     # Debug: Log filtered holdings (silent mode - no print)
                     pass
             holdings = filtered_holdings
+
+            # CRITICAL: Consolidate duplicate holdings (same ticker, different stock_ids)
+            holdings = self._consolidate_duplicate_holdings(holdings)
 
             latest_channels = self._prefetch_latest_channels(user_id)
             

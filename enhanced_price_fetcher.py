@@ -26,7 +26,9 @@ class EnhancedPriceFetcher:
     
     def __init__(self):
         self.price_cache = {}
-        self.cache_timeout = 300  # 5 minutes
+        # NOTE: cache_timeout is ONLY for caching - does NOT affect processing timeouts
+        # Processing has NO timeouts - will wait indefinitely for API responses
+        self.cache_timeout = 300  # 5 minutes (cache expiry only)
         self._amfi_cache: Optional[Dict[str, Any]] = None
         self._cached_scheme_maps: Optional[Tuple[Dict[str, str], Dict[str, str]]] = None
         self._stock_alias_cache: Dict[str, List[str]] = {}
@@ -956,7 +958,8 @@ class EnhancedPriceFetcher:
         session = self.http_session or self._get_http_session()
 
         try:
-            response = session.get(url, headers=headers)
+            # No timeout - process full request regardless of size
+            response = session.get(url, headers=headers, timeout=None)
             if response.status_code != 200:
                 return []
 
@@ -1862,7 +1865,8 @@ class EnhancedPriceFetcher:
         if not raw_text:
             session = self.http_session or self._get_http_session()
             try:
-                response = session.get("https://portal.amfiindia.com/spages/NAVAll.txt")
+                # No timeout - process full AMFI dataset regardless of size
+                response = session.get("https://portal.amfiindia.com/spages/NAVAll.txt", timeout=None)
                 response.raise_for_status()
                 raw_text = response.text
             except Exception:
@@ -2344,7 +2348,8 @@ If you cannot find the ticker, return exactly: NOT_FOUND"""
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                     }
                     session = self.http_session or self._get_http_session()
-                    response = session.get(source['url'], headers=headers)
+                    # No timeout - process full response regardless of size
+                    response = session.get(source['url'], headers=headers, timeout=None)
                     
                     if response.status_code == 200:
                         soup = BeautifulSoup(response.text, 'html.parser')

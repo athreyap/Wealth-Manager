@@ -5566,7 +5566,8 @@ def _legacy_process_uploaded_files(uploaded_files, user_id, portfolio_id):
                         else:
                             # Show why it failed
                             error_msg = result.get('error', 'Unknown error')
-                            if 'duplicate' in error_msg.lower():
+                            # Check for duplicate flag first (more reliable), then fallback to error message
+                            if result.get('duplicate') or 'duplicate' in error_msg.lower():
                                 skipped += 1  # Count duplicates as skipped
                             elif '502' in error_msg or 'bad gateway' in error_msg.lower():
                                 # 502 error - Supabase server issue
@@ -6532,7 +6533,8 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
                     collected_tickers[ticker_key] = asset_type_value or 'stock'
                 else:
                     error_msg = (result.get('error') or '').lower()
-                    if 'duplicate' in error_msg:
+                    # Check for duplicate flag first (more reliable), then fallback to error message
+                    if result.get('duplicate') or 'duplicate' in error_msg:
                         skipped += 1
                     else:
                         errors += 1
