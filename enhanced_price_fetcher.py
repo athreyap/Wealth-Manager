@@ -392,7 +392,7 @@ class EnhancedPriceFetcher:
         # OPTIMIZATION: Collect all price updates and batch them
         price_updates = []  # List of (stock_id, price) tuples
         ticker_updates = []  # List of (stock_id, ticker, fund_name) tuples for ticker normalization
-        corporate_action_updates = []  # List of corporate action updates
+        # Corporate actions are detected in UI only, not auto-applied during price updates
         
         # Process holdings in parallel batches to avoid overwhelming the system
         max_workers = min(20, len(holdings))
@@ -426,15 +426,8 @@ class EnhancedPriceFetcher:
                         
                         print(f"[PRICE_UPDATE] ✅ {ticker} ({asset_type}): Price fetched")
                         
-                        # Check for corporate actions (splits, bonuses, etc.) for stocks
-                        if asset_type == 'stock' and success:
-                            try:
-                                ca_update = self._check_and_apply_corporate_actions(holding, db_manager)
-                                if ca_update:
-                                    corporate_action_updates.append(ca_update)
-                                    print(f"[CORP_ACTION] 🔄 {ticker}: Found corporate actions - {', '.join(ca_update['messages'])}")
-                            except Exception as e:
-                                print(f"[CORP_ACTION] ⚠️ Error checking corporate actions for {ticker}: {str(e)}")
+                        # Corporate actions are now detected and suggested in UI only (not auto-applied)
+                        # Detection happens in web_agent.py via detect_corporate_actions() function
                     else:
                         failed_count += 1
                         ticker = holding.get('ticker', 'unknown')
@@ -510,44 +503,145 @@ class EnhancedPriceFetcher:
             except Exception as e:
                 print(f"[PRICE_UPDATE] ⚠️ Batch ticker update error: {str(e)}")
         
-        # Apply corporate action updates (splits, bonuses)
-        if corporate_action_updates:
-            try:
-                for ca_update in corporate_action_updates:
-                    holding_id = ca_update.get('holding_id')
-                    stock_id = ca_update['stock_id']
-                    try:
-                        # Update specific holding with new quantity and average price
-                        if holding_id:
-                            # Update specific holding by ID
-                            result = db_manager.supabase.table('holdings').update({
-                                'quantity': ca_update['quantity'],
-                                'average_price': ca_update['average_price'],
-                                'last_updated': datetime.now().isoformat()
-                            }).eq('id', holding_id).execute()
-                        else:
-                            # Fallback: update by stock_id (less precise but works if holding_id missing)
-                            result = db_manager.supabase.table('holdings').update({
-                                'quantity': ca_update['quantity'],
-                                'average_price': ca_update['average_price'],
-                                'last_updated': datetime.now().isoformat()
-                            }).eq('stock_id', stock_id).execute()
-                        
-                        if result.data:
-                            print(f"[CORP_ACTION] ✅ Applied: {', '.join(ca_update['messages'])}")
-                        else:
-                            print(f"[CORP_ACTION] ⚠️ No holding updated for stock_id {stock_id}")
-                    except Exception as e:
-                        print(f"[CORP_ACTION] ⚠️ Error applying corporate action for stock_id {stock_id}: {str(e)}")
-                print(f"[CORP_ACTION] 📦 Processed {len(corporate_action_updates)} corporate action updates")
-            except Exception as e:
-                print(f"[CORP_ACTION] ⚠️ Batch corporate action update error: {str(e)}")
-        
+        # Corporate actions are now detected and suggested in UI only (not auto-applied)
+        # Users can manually apply them via the UI when they see the suggestions
         print(f"[PRICE_UPDATE] Complete: {success_count} succeeded, {failed_count} failed")
+    
+    def _fetch_corporate_actions_from_yfinance(self, ticker: str, from_date: datetime, to_date: datetime = None) -> List[Dict[str, Any]]:
+        """
+        Fetch corporate actions from yfinance (primary source - fast and reliable).
+        
+        Args:
+            ticker: Stock ticker symbol (e.g., 'RELIANCE', 'TCS.NS')
+            from_date: Start date to check corporate actions from
+            to_date: End date (defaults to today)
+        
+        Returns:
+            List of corporate action dicts with keys: type, date, ratio, description
+        """
+        if to_date is None:
+            to_date = datetime.now()
+        
+        corporate_actions = []
+        
+        try:
+            # Try different ticker formats
+            candidates = []
+            if ticker.endswith(('.NS', '.BO')):
+                candidates.append(ticker)
+            elif ticker.isdigit():
+                candidates.append(f"{ticker}.BO")
+            else:
+                candidates.extend([f"{ticker}.NS", f"{ticker}.BO", ticker])
+            
+            ticker_obj = None
+            working_ticker = None
+            
+            for candidate in candidates:
+                try:
+                    test_ticker = yf.Ticker(candidate)
+                    # Try to get info to verify ticker is valid
+                    info = test_ticker.info
+                    if info and 'symbol' in info:
+                        ticker_obj = test_ticker
+                        working_ticker = candidate
+                        break
+                except:
+                    continue
+            
+            if not ticker_obj:
+                return corporate_actions
+            
+            # Fetch splits from yfinance
+            try:
+                splits = ticker_obj.splits
+                if splits is not None and not splits.empty:
+                    for split_date, split_ratio in splits.items():
+                        # yfinance reports split ratio as fraction (e.g., 0.5 for 2:1 split, 2.0 for 1:2 split)
+                        # Convert to our format: split_ratio = new_shares / old_shares
+                        if split_ratio < 1.0:
+                            # e.g., 0.5 means 2:1 split (1 old share becomes 2 new shares)
+                            actual_ratio = 1.0 / split_ratio
+                            old_ratio, new_ratio = 1, int(actual_ratio)
+                        else:
+                            # e.g., 2.0 means 1:2 split (1 old share becomes 2 new shares)
+                            actual_ratio = split_ratio
+                            old_ratio, new_ratio = 1, int(actual_ratio)
+                        
+                        split_date_dt = split_date.to_pydatetime() if hasattr(split_date, 'to_pydatetime') else split_date
+                        if isinstance(split_date_dt, pd.Timestamp):
+                            split_date_dt = split_date_dt.to_pydatetime()
+                        
+                        if from_date <= split_date_dt <= to_date:
+                            corporate_actions.append({
+                                'type': 'split',
+                                'date': split_date_dt,
+                                'old_ratio': old_ratio,
+                                'new_ratio': new_ratio,
+                                'split_ratio': actual_ratio,
+                                'description': f"Stock split {old_ratio}:{new_ratio} (yfinance)"
+                            })
+            except Exception as e:
+                print(f"[CORP_ACTION] ⚠️ Error fetching splits from yfinance for {ticker}: {str(e)}")
+            
+            # Fetch dividends from yfinance (for reference, though we don't auto-adjust for dividends)
+            try:
+                dividends = ticker_obj.dividends
+                if dividends is not None and not dividends.empty:
+                    for div_date, div_amount in dividends.items():
+                        div_date_dt = div_date.to_pydatetime() if hasattr(div_date, 'to_pydatetime') else div_date
+                        if isinstance(div_date_dt, pd.Timestamp):
+                            div_date_dt = div_date_dt.to_pydatetime()
+                        
+                        if from_date <= div_date_dt <= to_date:
+                            # Store dividend info for reference (not auto-adjusted)
+                            corporate_actions.append({
+                                'type': 'dividend',
+                                'date': div_date_dt,
+                                'amount': float(div_amount),
+                                'description': f"Dividend: ₹{div_amount:.2f} per share (yfinance)"
+                            })
+            except Exception as e:
+                print(f"[CORP_ACTION] ⚠️ Error fetching dividends from yfinance for {ticker}: {str(e)}")
+            
+            # Check for merger/acquisition info in ticker.info
+            try:
+                info = ticker_obj.info
+                if info:
+                    # Check for name changes or mergers
+                    long_name = info.get('longName', '')
+                    symbol = info.get('symbol', '')
+                    previous_close = info.get('previousClose', 0)
+                    
+                    # If symbol doesn't match expected ticker, might be a merger
+                    base_ticker = self._normalize_base_ticker(ticker).replace('.NS', '').replace('.BO', '')
+                    if symbol and symbol.upper() != base_ticker.upper() and symbol.upper() != working_ticker.upper():
+                        # Potential merger - add as info (user will need to confirm)
+                        corporate_actions.append({
+                            'type': 'merger',
+                            'date': from_date,  # Use from_date as placeholder
+                            'new_ticker': symbol,
+                            'exchange_ratio': 1.0,  # Default, user can adjust
+                            'cash_per_share': 0.0,
+                            'description': f"Ticker changed from {ticker} to {symbol} (yfinance info)"
+                        })
+            except Exception as e:
+                print(f"[CORP_ACTION] ⚠️ Error checking merger info from yfinance for {ticker}: {str(e)}")
+            
+            # Sort by date (oldest first)
+            corporate_actions.sort(key=lambda x: x['date'])
+            
+            if corporate_actions:
+                print(f"[CORP_ACTION] ✅ Found {len(corporate_actions)} corporate actions from yfinance for {ticker}")
+            
+        except Exception as e:
+            print(f"[CORP_ACTION] ⚠️ Error fetching corporate actions from yfinance for {ticker}: {str(e)}")
+        
+        return corporate_actions
     
     def _fetch_corporate_actions_from_moneycontrol(self, ticker: str, from_date: datetime, to_date: datetime = None) -> List[Dict[str, Any]]:
         """
-        Fetch corporate actions from Moneycontrol for a ticker.
+        Fetch corporate actions from Moneycontrol (fallback source - slower but more detailed).
         
         Args:
             ticker: Stock ticker symbol (e.g., 'RELIANCE', 'TCS.NS')
@@ -659,6 +753,86 @@ class EnhancedPriceFetcher:
                                                 'bonus_ratio': bonus_ratio,
                                                 'description': text[:200]
                                             })
+                                
+                                # Detect merger/acquisition (e.g., "Merger", "Acquisition", "Amalgamation", "Ticker Change")
+                                merger_keywords = ['merger', 'acquisition', 'amalgamation', 'merged with', 'acquired by', 'ticker change', 'name change', 'renamed']
+                                is_merger = any(keyword in text.lower() for keyword in merger_keywords)
+                                
+                                if is_merger:
+                                    # Extract date
+                                    date_match = re.search(r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})', text)
+                                    if date_match:
+                                        try:
+                                            action_date = datetime.strptime(date_match.group(1), '%d-%m-%Y')
+                                        except:
+                                            try:
+                                                action_date = datetime.strptime(date_match.group(1), '%d/%m/%Y')
+                                            except:
+                                                action_date = None
+                                        
+                                        if action_date and from_date <= action_date <= to_date:
+                                            # Try to extract new ticker/company name
+                                            new_ticker_match = re.search(r'(?:to|into|as|renamed|changed to)\s+([A-Z0-9]+(?:\.[NS|BO])?)', text, re.I)
+                                            new_ticker = new_ticker_match.group(1).upper() if new_ticker_match else None
+                                            
+                                            # Try to extract exchange ratio (e.g., "1:2", "2 shares for 1")
+                                            ratio_match = re.search(r'(\d+)\s*(?:shares?|:)\s*(?:for|of|:)\s*(\d+)', text, re.I)
+                                            exchange_ratio = None
+                                            if ratio_match:
+                                                old_shares, new_shares = int(ratio_match.group(1)), int(ratio_match.group(2))
+                                                exchange_ratio = new_shares / old_shares if old_shares > 0 else None
+                                            
+                                            # Try to extract cash component
+                                            cash_match = re.search(r'₹?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:per share|per equity)', text, re.I)
+                                            cash_per_share = None
+                                            if cash_match:
+                                                try:
+                                                    cash_str = cash_match.group(1).replace(',', '')
+                                                    cash_per_share = float(cash_str)
+                                                except:
+                                                    pass
+                                            
+                                            corporate_actions.append({
+                                                'type': 'merger',
+                                                'date': action_date,
+                                                'new_ticker': new_ticker,
+                                                'exchange_ratio': exchange_ratio,  # e.g., 2.0 means 1 old share = 2 new shares
+                                                'cash_per_share': cash_per_share,
+                                                'description': text[:300]
+                                            })
+                                
+                                # Detect delisting (e.g., "Delisted", "Delisting", "Suspended")
+                                delisting_keywords = ['delisted', 'delisting', 'suspended', 'voluntary delisting']
+                                is_delisting = any(keyword in text.lower() for keyword in delisting_keywords)
+                                
+                                if is_delisting:
+                                    date_match = re.search(r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})', text)
+                                    if date_match:
+                                        try:
+                                            action_date = datetime.strptime(date_match.group(1), '%d-%m-%Y')
+                                        except:
+                                            try:
+                                                action_date = datetime.strptime(date_match.group(1), '%d/%m/%Y')
+                                            except:
+                                                action_date = None
+                                        
+                                        if action_date and from_date <= action_date <= to_date:
+                                            # Try to extract exit price (buyback/delisting price)
+                                            price_match = re.search(r'₹?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:per share|per equity|exit price)', text, re.I)
+                                            exit_price = None
+                                            if price_match:
+                                                try:
+                                                    price_str = price_match.group(1).replace(',', '')
+                                                    exit_price = float(price_str)
+                                                except:
+                                                    pass
+                                            
+                                            corporate_actions.append({
+                                                'type': 'delisting',
+                                                'date': action_date,
+                                                'exit_price': exit_price,
+                                                'description': text[:300]
+                                            })
                         
                         # If we found actions, break
                         if corporate_actions:
@@ -702,6 +876,7 @@ class EnhancedPriceFetcher:
         current_quantity = original_quantity
         current_avg_price = original_avg_price
         messages = []
+        result = {}  # Store additional info like merger_info, delisting_info
         
         for action in corporate_actions:
             action_date = action['date']
@@ -727,12 +902,73 @@ class EnhancedPriceFetcher:
                 current_avg_price = (current_quantity * current_avg_price) / new_quantity
                 current_quantity = new_quantity
                 messages.append(f"Bonus {action.get('description', '')} on {action_date.strftime('%Y-%m-%d')}")
+            
+            elif action['type'] == 'merger':
+                # Merger/acquisition: ticker changes, may have exchange ratio and cash component
+                # This requires user confirmation as it involves ticker mapping
+                new_ticker = action.get('new_ticker')
+                exchange_ratio = action.get('exchange_ratio', 1.0)  # Default 1:1 if not specified
+                cash_per_share = action.get('cash_per_share', 0.0)
+                
+                # Calculate new quantity based on exchange ratio
+                new_quantity = current_quantity * exchange_ratio
+                
+                # Adjust average price: account for cash component
+                # If cash is received, it reduces the cost basis
+                total_cash = current_quantity * cash_per_share
+                total_cost = current_quantity * current_avg_price
+                adjusted_cost = total_cost - total_cash
+                
+                if new_quantity > 0:
+                    current_avg_price = adjusted_cost / new_quantity
+                else:
+                    current_avg_price = 0
+                
+                current_quantity = new_quantity
+                
+                action_desc = f"Merger to {new_ticker}" if new_ticker else "Merger"
+                if exchange_ratio != 1.0:
+                    action_desc += f" (1:{exchange_ratio:.2f} exchange)"
+                if cash_per_share > 0:
+                    action_desc += f" + ₹{cash_per_share:.2f} cash/share"
+                
+                messages.append(f"{action_desc} on {action_date.strftime('%Y-%m-%d')}")
+                # Store new ticker for later use
+                result['new_ticker'] = new_ticker
+                result['merger_info'] = {
+                    'old_ticker': holding.get('ticker'),
+                    'new_ticker': new_ticker,
+                    'exchange_ratio': exchange_ratio,
+                    'cash_per_share': cash_per_share,
+                    'action_date': action_date
+                }
+            
+            elif action['type'] == 'delisting':
+                # Delisting: stock is no longer traded
+                # If exit price is provided, treat as sale at that price
+                exit_price = action.get('exit_price')
+                if exit_price:
+                    # Mark for sale at exit price
+                    messages.append(f"Delisted on {action_date.strftime('%Y-%m-%d')} (Exit price: ₹{exit_price:.2f})")
+                    result['delisting_info'] = {
+                        'exit_price': exit_price,
+                        'action_date': action_date,
+                        'quantity': current_quantity
+                    }
+                else:
+                    messages.append(f"Delisted on {action_date.strftime('%Y-%m-%d')}")
+                result['delisting_info'] = {
+                    'exit_price': exit_price,
+                    'action_date': action_date,
+                    'quantity': current_quantity
+                }
         
         return {
             'quantity': current_quantity,
             'average_price': current_avg_price,
             'messages': messages,
-            'has_changes': current_quantity != original_quantity or current_avg_price != original_avg_price
+            'has_changes': current_quantity != original_quantity or current_avg_price != original_avg_price,
+            **result  # Include merger_info or delisting_info if present
         }
     
     def _check_and_apply_corporate_actions(self, holding: Dict, db_manager) -> Dict[str, Any]:
@@ -740,19 +976,38 @@ class EnhancedPriceFetcher:
         Check for corporate actions and apply them to a holding.
         
         Args:
-            holding: Holding dict with id, ticker, purchase_date, stock_id
+            holding: Holding dict with id, ticker, purchase_date (or first_transaction_date), stock_id
             db_manager: Database manager
         
         Returns:
             Dict with update info or None if no actions needed
         """
         ticker = holding.get('ticker')
-        purchase_date = holding.get('purchase_date')
+        purchase_date = holding.get('purchase_date') or holding.get('first_transaction_date') or holding.get('earliest_date')
         stock_id = holding.get('stock_id')
         holding_id = holding.get('id')  # Specific holding ID
         
-        if not ticker or not purchase_date or not stock_id:
+        if not ticker or not stock_id:
+            print(f"[CORP_ACTION] ⚠️ Skipping {ticker}: missing ticker or stock_id")
             return None
+        
+        # If no purchase_date, try to get earliest transaction date from database
+        if not purchase_date:
+            try:
+                # Get earliest transaction for this holding
+                transactions = db_manager.supabase.table('user_transactions').select('transaction_date').eq(
+                    'stock_id', stock_id
+                ).eq('user_id', holding.get('user_id')).order('transaction_date', desc=False).limit(1).execute()
+                
+                if transactions.data and len(transactions.data) > 0:
+                    purchase_date = transactions.data[0]['transaction_date']
+                    print(f"[CORP_ACTION] 📅 Using earliest transaction date for {ticker}: {purchase_date}")
+                else:
+                    print(f"[CORP_ACTION] ⚠️ Skipping {ticker}: no purchase_date and no transactions found")
+                    return None
+            except Exception as e:
+                print(f"[CORP_ACTION] ⚠️ Skipping {ticker}: error fetching purchase_date: {str(e)}")
+                return None
         
         try:
             # Parse purchase date
@@ -760,17 +1015,47 @@ class EnhancedPriceFetcher:
                 purchase_date = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
             
             # Fetch corporate actions from purchase date to today
-            corporate_actions = self._fetch_corporate_actions_from_moneycontrol(
+            print(f"[CORP_ACTION] 🔍 Checking corporate actions for {ticker} (purchased: {purchase_date})")
+            
+            # Try yfinance first (fast, reliable), then Moneycontrol as fallback
+            corporate_actions = self._fetch_corporate_actions_from_yfinance(
                 ticker, purchase_date, datetime.now()
             )
             
+            print(f"[CORP_ACTION] 📊 yfinance found {len(corporate_actions)} actions for {ticker}")
+            
+            # If yfinance didn't find much, try Moneycontrol for more detailed info (mergers, delistings)
+            if not corporate_actions or all(ca.get('type') in ['split', 'dividend'] for ca in corporate_actions):
+                print(f"[CORP_ACTION] 🔄 Trying Moneycontrol for {ticker}...")
+                moneycontrol_actions = self._fetch_corporate_actions_from_moneycontrol(
+                    ticker, purchase_date, datetime.now()
+                )
+                print(f"[CORP_ACTION] 📊 Moneycontrol found {len(moneycontrol_actions)} actions for {ticker}")
+                
+                # Merge results, avoiding duplicates
+                existing_dates = {ca['date']: ca for ca in corporate_actions}
+                for mc_action in moneycontrol_actions:
+                    mc_date = mc_action['date']
+                    if mc_date not in existing_dates or existing_dates[mc_date].get('type') != mc_action.get('type'):
+                        corporate_actions.append(mc_action)
+                        existing_dates[mc_date] = mc_action
+                
+                # Re-sort after merging
+                corporate_actions.sort(key=lambda x: x['date'])
+            
             if not corporate_actions:
+                print(f"[CORP_ACTION] ℹ️ No corporate actions found for {ticker}")
                 return None
+            
+            print(f"[CORP_ACTION] ✅ Found {len(corporate_actions)} corporate actions for {ticker}: {[ca.get('type') for ca in corporate_actions]}")
             
             # Apply corporate actions
             result = self._apply_corporate_actions_to_holding(holding, corporate_actions, db_manager)
             
-            if result['has_changes']:
+            print(f"[CORP_ACTION] 📝 Application result for {ticker}: has_changes={result.get('has_changes')}, messages={result.get('messages')}")
+            
+            if result.get('has_changes'):
+                print(f"[CORP_ACTION] ✅ Will update {ticker}: qty {holding.get('quantity')} → {result['quantity']}, price {holding.get('average_price')} → {result['average_price']}")
                 return {
                     'holding_id': holding_id,  # Use holding_id for specific update
                     'stock_id': stock_id,
@@ -778,6 +1063,9 @@ class EnhancedPriceFetcher:
                     'average_price': result['average_price'],
                     'messages': result['messages']
                 }
+            else:
+                print(f"[CORP_ACTION] ℹ️ No changes needed for {ticker} (actions found but already applied or not applicable)")
+                return None
             
         except Exception as e:
             print(f"[CORP_ACTION] ⚠️ Error checking corporate actions for {ticker}: {str(e)}")

@@ -4211,10 +4211,10 @@ if 'last_fetch_time' not in st.session_state:
 if not hasattr(st.session_state.db, "get_channel_weekly_history") or not hasattr(st.session_state.db, "get_sector_weekly_history"):
     st.session_state.db = SharedDatabaseManager()
 
-# Function to detect corporate actions (splits/bonus)
+# Function to detect corporate actions (splits/bonus/mergers)
 def detect_corporate_actions(user_id, db, holdings=None):
     """
-    Detect stock splits and bonus shares by comparing CSV prices with current prices
+    Detect stock splits, bonus shares, and mergers by comparing CSV prices with current prices
     Returns list of stocks with likely corporate actions
     """
     try:
@@ -4254,6 +4254,30 @@ def detect_corporate_actions(user_id, db, holdings=None):
                     return info
             return None
 
+        def _check_ticker_exists(ticker: str) -> bool:
+            """Check if ticker still exists and is active"""
+            try:
+                candidates = []
+                if ticker.endswith(('.NS', '.BO')):
+                    candidates.append(ticker)
+                elif ticker.isdigit():
+                    candidates.append(f"{ticker}.BO")
+                else:
+                    candidates.extend([f"{ticker}.NS", f"{ticker}.BO", ticker])
+                
+                for candidate in candidates:
+                    try:
+                        ticker_obj = yf.Ticker(candidate)
+                        info = ticker_obj.info
+                        # Check if ticker is valid (has basic info)
+                        if info and 'symbol' in info:
+                            return True
+                    except:
+                        continue
+                return False
+            except:
+                return False
+
         for holding in holdings:
             if holding.get('asset_type') != 'stock':
                 continue
@@ -4263,7 +4287,54 @@ def detect_corporate_actions(user_id, db, holdings=None):
             current_price = holding.get('current_price')
             quantity = holding.get('total_quantity', 0)
 
-            if avg_price == 0 or not current_price:
+            if avg_price == 0:
+                continue
+
+            # Check if ticker still exists (might be merged/delisted)
+            ticker_exists = _check_ticker_exists(ticker)
+            
+            if not ticker_exists:
+                # Ticker might be delisted or merged
+                # Check if we can find a successor ticker via yfinance
+                try:
+                    base_ticker = ticker.replace('.NS', '').replace('.BO', '')
+                    for suffix in ['.NS', '.BO', '']:
+                        test_ticker = f"{base_ticker}{suffix}" if suffix else base_ticker
+                        try:
+                            ticker_obj = yf.Ticker(test_ticker)
+                            info = ticker_obj.info
+                            if info and 'symbol' in info:
+                                # Check if there's a different symbol (merger indicator)
+                                if info['symbol'].upper() != test_ticker.upper():
+                                    corporate_actions.append({
+                                        'ticker': ticker,
+                                        'stock_name': holding.get('stock_name'),
+                                        'stock_id': holding.get('stock_id'),
+                                        'avg_price': avg_price,
+                                        'current_price': current_price or 0,
+                                        'quantity': quantity,
+                                        'new_ticker': info['symbol'],
+                                        'action_type': 'merger',
+                                        'description': f"Ticker changed from {ticker} to {info['symbol']}"
+                                    })
+                                    break
+                        except:
+                            continue
+                except:
+                    pass
+                
+                # If still no price and ticker doesn't exist, might be delisted
+                if not current_price:
+                    corporate_actions.append({
+                        'ticker': ticker,
+                        'stock_name': holding.get('stock_name'),
+                        'stock_id': holding.get('stock_id'),
+                        'avg_price': avg_price,
+                        'current_price': 0,
+                        'quantity': quantity,
+                        'action_type': 'delisting',
+                        'description': f"Ticker {ticker} appears to be delisted"
+                    })
                 continue
 
             current_price = float(current_price)
@@ -4294,25 +4365,37 @@ def detect_corporate_actions(user_id, db, holdings=None):
             })
         
         if corporate_actions:
-            print(f"[CORPORATE_ACTIONS] Detected {len(corporate_actions)} stocks with splits/bonus")
+            print(f"[CORPORATE_ACTIONS] Detected {len(corporate_actions)} stocks with corporate actions")
             for action in corporate_actions:
-                print(f"  - {action['ticker']}: 1:{action['split_ratio']} {action['action_type']} on {action.get('split_date')}")
+                action_type = action.get('action_type', 'unknown')
+                if action_type == 'split':
+                    print(f"  - {action['ticker']}: 1:{action['split_ratio']} {action_type} on {action.get('split_date')}")
+                elif action_type == 'merger':
+                    print(f"  - {action['ticker']}: Merger to {action.get('new_ticker', 'unknown')}")
+                elif action_type == 'delisting':
+                    print(f"  - {action['ticker']}: Delisted")
         
         return corporate_actions
 
     except Exception as e:
         print(f"[CORPORATE_ACTIONS] Error detecting: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
-def adjust_for_corporate_action(user_id, stock_id, split_ratio, db):
+def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type='split', new_ticker=None, exchange_ratio=1.0, cash_per_share=0.0):
     """
-    Adjust transaction quantities and prices for a stock split/bonus
+    Adjust transaction quantities and prices for a stock split/bonus/merger
     
     Args:
         user_id: User ID
         stock_id: Stock master ID
-        split_ratio: Split ratio (e.g., 20 for 1:20 split)
+        split_ratio: Split ratio (e.g., 20 for 1:20 split) - for splits/bonus
         db: Database manager
+        action_type: Type of action ('split', 'bonus', 'merger', 'delisting')
+        new_ticker: New ticker symbol (for mergers)
+        exchange_ratio: Exchange ratio for mergers (e.g., 2.0 means 1 old = 2 new)
+        cash_per_share: Cash component per share (for mergers)
     """
     try:
         # Get all transactions for this stock and user
@@ -4324,28 +4407,138 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db):
             return 0
         
         updated_count = 0
+        new_stock_id = None
+        
+        # For mergers, get or create new stock
+        if action_type == 'merger' and new_ticker:
+            new_stock = db.get_or_create_stock(
+                ticker=new_ticker,
+                stock_name=None,  # Will be fetched automatically
+                asset_type='stock',
+                sector=None
+            )
+            new_stock_id = new_stock['id']
+        
         for txn in transactions.data:
             old_quantity = float(txn['quantity'])
             old_price = float(txn['price'])
             
-            # Adjust for split
-            new_quantity = old_quantity * split_ratio
-            new_price = old_price / split_ratio
+            if action_type == 'split':
+                # Stock split: quantity increases, price decreases
+                new_quantity = old_quantity * split_ratio
+                new_price = old_price / split_ratio
+                notes = f"Auto-adjusted for 1:{split_ratio} stock split"
+                
+            elif action_type == 'bonus':
+                # Bonus issue: quantity increases, price adjusts
+                bonus_ratio = split_ratio  # Reuse split_ratio parameter
+                new_quantity = old_quantity * (1 + bonus_ratio)
+                new_price = (old_quantity * old_price) / new_quantity
+                notes = f"Auto-adjusted for 1:{bonus_ratio} bonus issue"
+                
+            elif action_type == 'merger' and new_stock_id:
+                # Merger: apply exchange ratio and cash component
+                new_quantity = old_quantity * exchange_ratio
+                total_cash = old_quantity * cash_per_share
+                total_cost = old_quantity * old_price
+                adjusted_cost = total_cost - total_cash
+                new_price = adjusted_cost / new_quantity if new_quantity > 0 else 0
+                notes = f"Merged to {new_ticker} (1:{exchange_ratio:.2f} exchange"
+                if cash_per_share > 0:
+                    notes += f", ₹{cash_per_share:.2f} cash/share"
+                notes += ")"
+                
+            elif action_type == 'delisting':
+                # Delisting: mark as sold (if exit price provided)
+                new_quantity = 0  # No longer holding
+                new_price = old_price  # Keep original price for P&L calculation
+                notes = "Delisted - holding removed"
+            else:
+                continue  # Skip unknown action types
             
             # Update transaction
-            db.supabase.table('user_transactions').update({
+            update_data = {
                 'quantity': new_quantity,
                 'price': new_price,
-                'notes': f"Auto-adjusted for 1:{split_ratio} stock split"
-            }).eq('id', txn['id']).execute()
+                'notes': notes
+            }
             
+            # For mergers, update stock_id to point to new stock
+            if action_type == 'merger' and new_stock_id:
+                update_data['stock_id'] = new_stock_id
+            
+            db.supabase.table('user_transactions').update(update_data).eq('id', txn['id']).execute()
             updated_count += 1
         
-        print(f"[CORPORATE_ACTIONS] Adjusted {updated_count} transactions for 1:{split_ratio} split")
+        # After updating transactions, recalculate holdings from transactions
+        # This ensures holdings table reflects the adjusted quantities and prices
+        if updated_count > 0:
+            try:
+                print(f"[CORP_ACTION] 🔄 Recalculating holdings after adjusting {updated_count} transactions...")
+                # Get all portfolios for this user
+                portfolios = db.supabase.table('portfolios').select('id').eq('user_id', user_id).execute()
+                
+                for portfolio in portfolios.data:
+                    portfolio_id = portfolio['id']
+                    # Recalculate holdings for this portfolio
+                    db.recalculate_holdings(user_id, portfolio_id)
+                
+                print(f"[CORP_ACTION] ✅ Holdings recalculated for {len(portfolios.data)} portfolio(s)")
+            except Exception as e:
+                print(f"[CORP_ACTION] ⚠️ Error recalculating holdings: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        
+        # For mergers, also update holdings directly (in addition to recalculation)
+        if action_type == 'merger' and new_stock_id:
+            holdings = db.supabase.table('holdings').select('*').eq(
+                'user_id', user_id
+            ).eq('stock_id', stock_id).execute()
+            
+            for holding in holdings.data:
+                old_qty = float(holding.get('quantity', 0))
+                old_avg = float(holding.get('average_price', 0))
+                
+                new_qty = old_qty * exchange_ratio
+                total_cash = old_qty * cash_per_share
+                total_cost = old_qty * old_avg
+                adjusted_cost = total_cost - total_cash
+                new_avg = adjusted_cost / new_qty if new_qty > 0 else 0
+                
+                # Update or create holding for new stock
+                existing_new = db.supabase.table('holdings').select('*').eq(
+                    'user_id', user_id
+                ).eq('stock_id', new_stock_id).execute()
+                
+                if existing_new.data:
+                    # Update existing holding
+                    db.supabase.table('holdings').update({
+                        'quantity': new_qty,
+                        'average_price': new_avg
+                    }).eq('id', existing_new.data[0]['id']).execute()
+                else:
+                    # Create new holding
+                    db.supabase.table('holdings').insert({
+                        'user_id': user_id,
+                        'stock_id': new_stock_id,
+                        'quantity': new_qty,
+                        'average_price': new_avg,
+                        'portfolio_id': holding.get('portfolio_id')
+                    }).execute()
+                
+                # Delete old holding
+                db.supabase.table('holdings').delete().eq('id', holding['id']).execute()
+        
+        action_desc = f"{action_type}"
+        if action_type == 'merger':
+            action_desc += f" to {new_ticker}"
+        print(f"[CORPORATE_ACTIONS] Adjusted {updated_count} transactions for {action_desc}")
         return updated_count
         
     except Exception as e:
         print(f"[CORPORATE_ACTIONS] Error adjusting: {e}")
+        import traceback
+        traceback.print_exc()
         return 0
 
 # Function to update bond prices using AI
@@ -4435,6 +4628,25 @@ def run_portfolio_refresh(user_id: str, *, auto: bool = False) -> None:
         st.session_state.missing_weeks_fetched = True
         st.session_state.needs_initial_refresh = False
         st.session_state.last_fetch_time = datetime.now()
+        
+        # Detect corporate actions after price refresh (not just on login)
+        try:
+            print(f"[CORP_ACTION] 🔍 Detecting corporate actions after price refresh...")
+            holdings_after_refresh = db.get_user_holdings(user_id)
+            if holdings_after_refresh:
+                corporate_actions = detect_corporate_actions(user_id, db, holdings=holdings_after_refresh)
+                if corporate_actions:
+                    print(f"[CORP_ACTION] ✅ Detected {len(corporate_actions)} corporate actions")
+                    st.session_state.corporate_actions_detected = corporate_actions
+                else:
+                    print(f"[CORP_ACTION] ℹ️ No corporate actions detected")
+                    # Don't clear existing ones - keep them if user hasn't dismissed
+                    if 'corporate_actions_detected' not in st.session_state:
+                        st.session_state.corporate_actions_detected = None
+        except Exception as e:
+            print(f"[CORP_ACTION] ⚠️ Error detecting corporate actions: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     if auto:
         st.success("✅ Portfolio refreshed automatically.")
@@ -4554,18 +4766,25 @@ def login_page():
                 st.session_state.missing_weeks_fetched = False
                 st.session_state.last_fetch_time = None
                 
-                # Detect corporate actions (splits/bonus) on login
+                # Detect corporate actions (splits/bonus/mergers) on login
                 # Pass holdings to avoid another fetch
                 try:
                     if holdings:
+                        print(f"[CORP_ACTION] 🔍 Detecting corporate actions on login for {len(holdings)} holdings...")
                         corporate_actions = detect_corporate_actions(user['id'], db, holdings=holdings)
                         if corporate_actions:
+                            print(f"[CORP_ACTION] ✅ Detected {len(corporate_actions)} corporate actions on login")
                             st.session_state.corporate_actions_detected = corporate_actions
                         else:
+                            print(f"[CORP_ACTION] ℹ️ No corporate actions detected on login")
                             st.session_state.corporate_actions_detected = None
                     else:
+                        print(f"[CORP_ACTION] ⚠️ No holdings to check for corporate actions")
                         st.session_state.corporate_actions_detected = None
-                except:
+                except Exception as e:
+                    print(f"[CORP_ACTION] ❌ Error detecting corporate actions on login: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
                     st.session_state.corporate_actions_detected = None
                 
                 st.success("Login successful!")
@@ -7273,47 +7492,79 @@ def portfolio_overview_page():
                     st.caption(f"({action['ratio']:.1f}x difference)")
                 
                 with col4:
-                    if st.button(f"✅ Fix", key=f"fix_split_{idx}_{action['ticker']}"):
-                        with st.spinner(f"Adjusting {action['ticker']}..."):
-                            adjusted = adjust_for_corporate_action(
-                                user['id'], 
-                                action['stock_id'], 
-                                action['split_ratio'],
-                                db
-                            )
-                            
-                            if adjusted > 0:
-                                st.success(f"✅ Adjusted {adjusted} transactions for {action['ticker']}")
-                                # Clear from session state
-                                st.session_state.corporate_actions_detected = [
-                                    a for a in corporate_actions if a['ticker'] != action['ticker']
-                                ]
-                                time.sleep(1)
-                                st.rerun()
-                            else:
-                                st.error(f"❌ Failed to adjust {action['ticker']}")
+                    if st.button(f"✅ Apply", key=f"fix_split_{idx}_{action['ticker']}"):
+                        with st.spinner(f"Applying corporate action for {action['ticker']}..."):
+                            try:
+                                adjusted = adjust_for_corporate_action(
+                                    user['id'], 
+                                    action['stock_id'], 
+                                    action['split_ratio'],
+                                    db,
+                                    action_type=action.get('action_type', 'split')
+                                )
+                                
+                                if adjusted > 0:
+                                    st.success(f"✅ Successfully applied corporate action for {action['ticker']}!")
+                                    st.info(f"📊 Updated {adjusted} transaction(s) and recalculated holdings")
+                                    
+                                    # Clear from session state
+                                    remaining_actions = [
+                                        a for a in corporate_actions if a['ticker'] != action['ticker']
+                                    ]
+                                    if remaining_actions:
+                                        st.session_state.corporate_actions_detected = remaining_actions
+                                    else:
+                                        st.session_state.corporate_actions_detected = None
+                                    
+                                    time.sleep(2)
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ No transactions found to adjust for {action['ticker']}")
+                            except Exception as e:
+                                st.error(f"❌ Error applying corporate action: {str(e)[:200]}")
+                                import traceback
+                                st.code(traceback.format_exc())
             
             # Add "Fix All" button
             st.markdown("---")
             col_a, col_b, col_c = st.columns([1, 1, 2])
             with col_a:
-                if st.button("✅ Fix All Splits", type="primary", use_container_width=True):
-                    with st.spinner("Adjusting all stocks..."):
+                if st.button("✅ Apply All", type="primary", use_container_width=True):
+                    with st.spinner("Applying corporate actions to all stocks..."):
                         total_adjusted = 0
+                        successful = 0
+                        failed = []
+                        
                         for action in corporate_actions:
-                            adjusted = adjust_for_corporate_action(
-                                user['id'],
-                                action['stock_id'],
-                                action['split_ratio'],
-                                db
-                            )
-                            total_adjusted += adjusted
+                            try:
+                                adjusted = adjust_for_corporate_action(
+                                    user['id'],
+                                    action['stock_id'],
+                                    action.get('split_ratio', 1.0),
+                                    db,
+                                    action_type=action.get('action_type', 'split'),
+                                    new_ticker=action.get('new_ticker'),
+                                    exchange_ratio=action.get('exchange_ratio', 1.0),
+                                    cash_per_share=action.get('cash_per_share', 0.0)
+                                )
+                                if adjusted > 0:
+                                    total_adjusted += adjusted
+                                    successful += 1
+                                else:
+                                    failed.append(action['ticker'])
+                            except Exception as e:
+                                failed.append(f"{action['ticker']} ({str(e)[:50]})")
                         
                         if total_adjusted > 0:
-                            st.success(f"✅ Adjusted {total_adjusted} total transactions across {len(corporate_actions)} stocks!")
+                            st.success(f"✅ Successfully applied corporate actions!")
+                            st.info(f"📊 Updated {total_adjusted} transaction(s) across {successful} stock(s)")
+                            if failed:
+                                st.warning(f"⚠️ {len(failed)} stock(s) could not be updated: {', '.join(failed)}")
                             st.session_state.corporate_actions_detected = None
                             time.sleep(2)
                             st.rerun()
+                        else:
+                            st.error(f"❌ No transactions were updated. Please check the logs.")
             
             with col_b:
                 if st.button("❌ Dismiss", use_container_width=True):
