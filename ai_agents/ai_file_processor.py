@@ -773,7 +773,7 @@ Return ALL transactions found on this page, even if the format is slightly diffe
                 prompt = f"""
 You are extracting financial transactions from Vision API extracted text. The text may be in structured format with pipe separators or line-by-line format.
 
-Extract ALL transactions from the following text and convert to JSON array. The text may contain:
+Extract ALL transactions from the following text and convert to JSON array. CRITICAL: Process EVERY SINGLE transaction you find - do not stop after a few. The text may contain:
 - Structured lines like: "Date: 2024-01-15 | Ticker: RELIANCE.NS | Name: Reliance Industries | Quantity: 100 | Price: 2500 | Amount: 250000 | Type: buy"
 - Or table-like text with headers and rows
 - Or unstructured transaction descriptions
@@ -909,9 +909,16 @@ Map to:
 - "Type" → transaction_type
 
 File content (CSV format with headers):
-{file_content[:12000] if len(file_content) <= 12000 else file_content[:10000] + '\n... (truncated) ...'}
+{file_content}
 
-Output ONLY the JSON array—no commentary or explanation.
+CRITICAL INSTRUCTIONS:
+1. Extract ALL transactions from the ENTIRE file - process EVERY SINGLE ROW
+2. Do NOT stop after extracting 10, 20, or 100 transactions - continue until ALL rows are processed
+3. The file may contain hundreds or thousands of transactions - extract ALL of them
+4. Count the total number of data rows (excluding header) and ensure your JSON array contains that many transaction objects
+5. If the file has 775 rows of data, your output must contain 775 transaction objects
+
+Output ONLY the JSON array—no commentary or explanation. The JSON array must contain one transaction object for each data row in the file.
 """
 
             content_length = len(file_content)
@@ -933,13 +940,7 @@ Output ONLY the JSON array—no commentary or explanation.
                 sys.stdout.flush()
                 return []
             
-            # Update prompt to use full content (not truncated)
-            if not is_vision_api_text:
-                # Replace truncated content with full content
-                prompt = prompt.replace(
-                    f"{file_content[:12000] if len(file_content) <= 12000 else file_content[:10000] + '\n... (truncated) ...'}",
-                    file_content
-                )
+            # Prompt already uses full content - no replacement needed
             
             # Log before API call - use both print and logger for Streamlit Cloud visibility
             log_msg = f"[AI_EXTRACT] 🔄 Calling OpenAI API (model: gpt-4o, content: {len(file_content)} chars)..."
@@ -972,11 +973,12 @@ INTELLIGENCE FEATURES:
 - Smart column mapping even with different naming
 
 CRITICAL RULES:
-1. Extract ALL transactions from the file
-2. Return ONLY valid JSON array
+1. Extract ALL transactions from the file - process EVERY SINGLE ROW, do not stop early
+2. Return ONLY valid JSON array with one transaction per data row
 3. Use 0 for missing prices (system handles fetching)
 4. Infer missing data intelligently
-5. Validate all data types"""
+5. Validate all data types
+6. If the file has N data rows, your JSON must contain exactly N transaction objects - no exceptions"""
                     },
                     {
                         "role": "user",
@@ -1136,7 +1138,7 @@ CRITICAL RULES:
                 prompt = f"""
 You are extracting financial transactions from Vision API extracted text. The text may be in structured format with pipe separators or line-by-line format.
 
-Extract ALL transactions from the following text and convert to JSON array.
+Extract ALL transactions from the following text and convert to JSON array. CRITICAL: Process EVERY SINGLE transaction - do not stop after a few. Extract all rows/transactions you find.
 
 Schema (JSON array of objects):
 [
@@ -1169,7 +1171,7 @@ YOUR TASK:
 1. **Analyze the column headers** in the first row
 2. **Understand what each column represents** by looking at column names AND sample data
 3. **Map columns intelligently** to the standard schema below
-4. **Extract ALL transactions** from the data
+4. **Extract ALL transactions** from the data - CRITICAL: Process EVERY SINGLE ROW in the file. Do not stop after extracting a few transactions. The file may have hundreds or thousands of rows - extract ALL of them.
 
 IMPORTANT COLUMN MAPPING RULES:
 - **Date columns**: Look for "Date", "Execution date", "Txn Date", "Transaction Date", "Trade Date", etc. → map to `"date"`
@@ -1212,12 +1214,14 @@ OUTPUT SCHEMA (JSON array):
 File content (CSV format with headers):
 {batch_content}
 
-Output ONLY the JSON array—no commentary or explanation.
+CRITICAL: Extract ALL transactions from the ENTIRE content - process EVERY SINGLE ROW. Do NOT stop after extracting 10, 20, or 100 transactions - continue until ALL rows are processed. Count the total number of data rows (excluding header) and ensure your JSON array contains that many transaction objects.
+
+Output ONLY the JSON array—no commentary or explanation. The JSON array must contain one transaction object for each data row in the content.
 """
                 elif file_type == 'pdf':
                     # PDF format - could be structured text
                     prompt = f"""
-Extract ALL financial transactions from this PDF text and convert to JSON array.
+Extract ALL financial transactions from this PDF text and convert to JSON array. CRITICAL: Process EVERY SINGLE transaction - do not stop after a few. Extract all transactions you find in the text.
 
 Schema (JSON array of objects):
 [
@@ -1239,12 +1243,14 @@ Schema (JSON array of objects):
 Extracted text:
 {batch_content}
 
-Output ONLY the JSON array—no commentary or explanation.
+CRITICAL: Extract ALL transactions from the ENTIRE content - process EVERY SINGLE transaction. Do NOT stop after extracting 10, 20, or 100 transactions - continue until ALL transactions are processed.
+
+Output ONLY the JSON array—no commentary or explanation. The JSON array must contain one transaction object for each transaction found in the content.
 """
                 else:
                     # Other formats (TXT, etc.)
                     prompt = f"""
-Extract ALL financial transactions from this text and convert to JSON array.
+Extract ALL financial transactions from this text and convert to JSON array. CRITICAL: Process EVERY SINGLE transaction - do not stop after a few. Extract all transactions you find in the text.
 
 Schema (JSON array of objects):
 [
@@ -1266,7 +1272,9 @@ Schema (JSON array of objects):
 Text content:
 {batch_content}
 
-Output ONLY the JSON array—no commentary or explanation.
+CRITICAL: Extract ALL transactions from the ENTIRE content - process EVERY SINGLE transaction. Do NOT stop after extracting 10, 20, or 100 transactions - continue until ALL transactions are processed. Count all transactions and ensure your JSON array contains that many objects.
+
+Output ONLY the JSON array—no commentary or explanation. The JSON array must contain one transaction object for each transaction found in the content.
 """
             
             openai_client = self._get_openai_client()
@@ -1279,7 +1287,7 @@ Output ONLY the JSON array—no commentary or explanation.
                 messages=[
                     {
                         "role": "system",
-                        "content": """You are an expert financial data extraction AI. Extract ALL transactions from the provided data and return as JSON array."""
+                        "content": """You are an expert financial data extraction AI. Extract ALL transactions from the provided data and return as JSON array. CRITICAL: Process EVERY SINGLE ROW/transaction - do not stop after extracting a few. If the data has N transactions, your JSON must contain exactly N transaction objects."""
                     },
                     {
                         "role": "user",
