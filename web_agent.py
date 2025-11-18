@@ -2770,6 +2770,109 @@ def _tx_auto_map_missing_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _tx_auto_map_missing_columns_relaxed(df: pd.DataFrame, missing_targets: List[str]) -> pd.DataFrame:
+    """Use relaxed heuristics (lower thresholds) to map missing critical columns."""
+    if df is None or df.empty or not missing_targets:
+        return df
+    
+    # Use same scoring functions but with lower thresholds
+    def _sample(series: pd.Series, sample_size: int = 60) -> pd.Series:
+        return series.dropna().head(sample_size)
+    
+    def _score_date(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        sample_str = sample.astype(str).str.strip()
+        parsed_dayfirst = pd.to_datetime(sample_str, errors='coerce', dayfirst=True)
+        parsed_monthfirst = pd.to_datetime(sample_str, errors='coerce', dayfirst=False)
+        return float(max(parsed_dayfirst.notna().mean(), parsed_monthfirst.notna().mean()))
+    
+    def _score_numeric(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        numeric = pd.to_numeric(sample, errors='coerce')
+        if numeric.empty:
+            return 0.0
+        return float(numeric.notna().mean())
+    
+    def _score_quantity(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        numeric = pd.to_numeric(sample, errors='coerce')
+        numeric = numeric.dropna()
+        if numeric.empty:
+            return 0.0
+        positive_ratio = (numeric > 0).mean() if not numeric.empty else 0.0
+        return float(positive_ratio)
+    
+    def _score_ticker(series: pd.Series) -> float:
+        sample = _sample(series)
+        if sample.empty:
+            return 0.0
+        values = [str(val).strip() for val in sample]
+        meaningful = sum(1 for value in values if value and len(value) >= 2)
+        return float(meaningful / len(values)) if values else 0.0
+    
+    scoring_functions = {
+        'date': _score_date,
+        'ticker': _score_ticker,
+        'quantity': _score_quantity,
+        'amount': _score_numeric,
+        'price': _score_numeric,
+    }
+    
+    existing_lower = {col.lower() for col in df.columns}
+    rename_map: Dict[str, str] = {}
+    mapping_entries: List[Dict[str, Any]] = []
+    used_sources: set[str] = set()
+    
+    for target in missing_targets:
+        if target in existing_lower:
+            continue
+        scorer = scoring_functions.get(target)
+        if not scorer:
+            continue
+        
+        best_col = None
+        best_score = 0.0
+        
+        for col in df.columns:
+            col_lower = col.lower()
+            if col_lower in _TX_CANONICAL_COLUMNS or col_lower == target:
+                continue
+            if col in rename_map or col in used_sources:
+                continue
+            score = scorer(df[col])
+            if score > best_score:
+                best_score = score
+                best_col = col
+        
+        # Lower threshold for relaxed mapping (0.3 instead of 0.7)
+        if best_col and best_score >= 0.3:
+            rename_map[best_col] = target
+            used_sources.add(best_col)
+            mapping_entries.append({
+                'source': best_col,
+                'target': target,
+                'reason': 'relaxed_heuristic',
+                'score': round(best_score, 3),
+            })
+    
+    if rename_map:
+        df = df.rename(columns=rename_map)
+        if mapping_entries:
+            df.attrs.setdefault('__tx_column_mapping', [])
+            df.attrs['__tx_column_mapping'].extend(mapping_entries)
+            print(f"[COLUMN_MAP] Relaxed heuristic mappings:")
+            for entry in mapping_entries:
+                print(f"[COLUMN_MAP]   '{entry['source']}' → '{entry['target']}' (score: {entry.get('score', 'N/A')})")
+    
+    return df
+
+
 def _tx_ai_map_columns(df: pd.DataFrame, filename: str) -> pd.DataFrame:
     """
     Use AI to intelligently map columns to canonical names.
@@ -2954,21 +3057,45 @@ def _tx_prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                     score += 0.5
             return score
 
-        header_candidates = df.head(8)
+        # Search for header row - check ALL rows until we find a valid header
+        # This handles cases where there's info/metadata before the actual table
+        print(f"[COLUMN_MAP] 🔍 Searching for header row in {len(df)} rows...")
         best_idx = None
         best_score = 0.0
-        for idx, row in header_candidates.iterrows():
+        
+        for idx, row in df.iterrows():
             score = score_row(row)
             if score > best_score:
                 best_score = score
                 best_idx = idx
+            # If we find a row with very high score (4+ matching aliases), use it immediately
+            # This means we found a clear header row, no need to keep searching
+            if score >= 12.0:  # 4+ exact alias matches (4 * 3.0)
+                best_idx = idx
+                best_score = score
+                print(f"[COLUMN_MAP] ✅ Found clear header row at index {idx} (score: {score:.1f}) - stopping search")
+                break
+        
+        if best_idx is not None:
+            print(f"[COLUMN_MAP] 📊 Best header candidate: row {best_idx} (score: {best_score:.1f})")
 
         # Only replace headers if the found row scores significantly higher than current columns
-        if best_idx is not None and best_score > matching_cols * 2.0:
+        # Lower threshold: if best_score is high enough (6+), use it even if current columns have some matches
+        threshold = max(matching_cols * 2.0, 6.0)  # At least 6.0 score required
+        if best_idx is not None and best_score >= threshold:
             header_row = df.loc[best_idx]
             new_columns = [ _tx_safe_str(val) for val in header_row.values ]
+            print(f"[COLUMN_MAP] 📋 Using row {best_idx} as header row (score: {best_score:.1f}, threshold: {threshold:.1f})")
+            print(f"[COLUMN_MAP]   Detected columns: {new_columns}")
+            print(f"[COLUMN_MAP]   Dropping {best_idx} rows before header row")
             df = df.loc[best_idx + 1 :].reset_index(drop=True)
             df.columns = new_columns
+        elif best_idx is not None:
+            print(f"[COLUMN_MAP] ⚠️ Found potential header row at index {best_idx} (score: {best_score:.1f}), but score {best_score:.1f} < threshold {threshold:.1f}")
+            print(f"[COLUMN_MAP]   Keeping original columns: {list(df.columns)}")
+        else:
+            print(f"[COLUMN_MAP] ⚠️ No suitable header row found in {len(df)} rows")
+            print(f"[COLUMN_MAP]   Using original columns: {list(df.columns)}")
 
     return df
 
@@ -3002,14 +3129,22 @@ def _tx_dataframe_to_transactions(
     prepared_df = _tx_auto_map_missing_columns(prepared_df)
     print(f"[FILE_PARSE] After _tx_auto_map_missing_columns columns: {list(prepared_df.columns)}")
     
-    # If critical columns are still missing, use AI to intelligently map them
+    # If critical columns are still missing, try one more pass with relaxed heuristics
     critical_columns = ['quantity', 'amount', 'date', 'ticker']
     missing_critical = [col for col in critical_columns if col not in [c.lower() for c in prepared_df.columns]]
     if missing_critical and not prepared_df.empty:
         print(f"[COLUMN_MAP] ⚠️ Missing critical columns after standard mapping: {missing_critical}")
-        print(f"[COLUMN_MAP] Attempting AI-powered column mapping...")
-        prepared_df = _tx_ai_map_columns(prepared_df, filename)
-        print(f"[FILE_PARSE] After _tx_ai_map_columns columns: {list(prepared_df.columns)}")
+        print(f"[COLUMN_MAP] Attempting relaxed heuristic mapping (lower thresholds)...")
+        # Try auto-mapping again with lower thresholds for missing critical columns
+        prepared_df = _tx_auto_map_missing_columns_relaxed(prepared_df, missing_critical)
+        print(f"[FILE_PARSE] After relaxed heuristic mapping columns: {list(prepared_df.columns)}")
+        
+        # Log if still missing after all Python-based attempts
+        still_missing = [col for col in critical_columns if col not in [c.lower() for c in prepared_df.columns]]
+        if still_missing:
+            print(f"[COLUMN_MAP] ⚠️ Still missing columns after all Python mapping attempts: {still_missing}")
+            print(f"[COLUMN_MAP]   Available columns: {list(prepared_df.columns)}")
+            print(f"[COLUMN_MAP]   Will attempt to extract data from available columns")
 
     if debug_log is not None:
         # Extract just the filename from path (handles full paths and hyphens correctly)
@@ -3466,11 +3601,17 @@ def extract_transactions_python(uploaded_file, filename: str) -> Tuple[List[Dict
             try:
                 # Use appropriate engine for Excel files
                 engine = 'openpyxl' if suffix == '.xlsx' else None
+                print(f"[FILE_PARSE] 📊 Reading Excel file {filename} (engine: {engine})...")
                 workbook = pd.read_excel(uploaded_file, sheet_name=None, engine=engine)
+                print(f"[FILE_PARSE] ✅ Excel file read: {len(workbook)} sheet(s)")
                 rows: List[Dict[str, Any]] = []
                 for sheet_name, sheet_df in (workbook or {}).items():
-                    rows.extend(_tx_dataframe_to_transactions(sheet_df, filename, sheet_label=sheet_name, debug_log=debug_log))
+                    print(f"[FILE_PARSE] 📋 Processing sheet '{sheet_name}': {len(sheet_df)} rows, columns: {list(sheet_df.columns)}")
+                    sheet_transactions = _tx_dataframe_to_transactions(sheet_df, filename, sheet_label=sheet_name, debug_log=debug_log)
+                    print(f"[FILE_PARSE] ✅ Sheet '{sheet_name}': Extracted {len(sheet_transactions)} transactions")
+                    rows.extend(sheet_transactions)
                 transactions = rows
+                print(f"[FILE_PARSE] ✅ Excel file {filename}: Total {len(transactions)} transactions from all sheets")
             except ImportError as e:
                 print(f"[FILE_PARSE] ❌ Missing Excel dependency for {filename}: {e}")
                 print(f"[FILE_PARSE] 💡 Install with: pip install openpyxl xlrd")
@@ -6298,61 +6439,63 @@ def extract_transactions_for_csv(uploaded_file, file_name: str, user_id: Optiona
     except Exception:
         pass  # Skip size check if can't determine - process anyway
 
-    # For Excel files, use AI extraction first (better column mapping)
-    # For CSV/PDF, try Python first then AI
+    # CSV/Excel: Use Python column mapping (fast, reliable, no AI needed)
+    # PDF: Use AI/Vision API (converts to images and extracts transactions)
     file_ext = Path(file_name).suffix.lower()
     is_excel = file_ext in {'.xlsx', '.xls'}
+    is_csv = file_ext in {'.csv', '.tsv'}
     
-    if is_excel and AI_AGENTS_AVAILABLE:
-        # Excel files: Use AI extraction first for better column mapping
-        method_used = 'ai'
-        print(f"[FILE_PARSE] Excel file detected - using AI extraction first for better column mapping: {file_name}")
+    if is_excel or is_csv:
+        # CSV/Excel files: Use Python extraction with column mapping (no AI needed - fast and reliable)
+        method_used = 'python'
+        file_type = 'Excel' if is_excel else 'CSV'
+        print(f"[FILE_PARSE] {file_type} file detected - using Python column mapping (fast, reliable): {file_name}")
         try:
             uploaded_file.seek(0)
         except Exception:
             pass
-        print(f"[FILE_PARSE] 🔄 Starting AI extraction for {file_name}...")
-        import sys
-        sys.stdout.flush()
-        transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
+        extraction_result = extract_transactions_python(uploaded_file, file_name)
+        if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+            transactions, _python_log = extraction_result
+        else:
+            transactions = extraction_result or []
+        
         if transactions:
-            print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions from Excel file")
+            print(f"[FILE_PARSE] ✅ Python extraction found {len(transactions)} transactions from {file_name}")
+            import sys
             sys.stdout.flush()
         else:
-            print(f"[FILE_PARSE] ⚠️ AI extraction found no transactions, trying Python extraction as fallback...")
-            # Fallback to Python if AI fails
-            try:
-                uploaded_file.seek(0)
-            except Exception:
-                pass
-            extraction_result = extract_transactions_python(uploaded_file, file_name)
-            if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
-                python_transactions, _python_log = extraction_result
-            else:
-                python_transactions = extraction_result or []
-            if python_transactions:
-                method_used = 'python'
-                transactions = python_transactions
-                print(f"[FILE_PARSE] ✅ Python extraction found {len(transactions)} transactions as fallback")
+            print(f"[FILE_PARSE] ⚠️ Python extraction found no transactions, trying AI extraction as fallback...")
+            # Fallback to AI only if Python fails
+            if AI_AGENTS_AVAILABLE:
+                try:
+                    uploaded_file.seek(0)
+                except Exception:
+                    pass
+                method_used = 'ai'
+                transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
+                if transactions:
+                    print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions as fallback")
     else:
-        # CSV/PDF: Try Python first, then AI
+        # PDF or other formats: Try Python first, then AI (PDF uses Vision API to convert to images)
         method_used = 'python'
-    try:
-        uploaded_file.seek(0)
-    except Exception:
-        pass
-    extraction_result = extract_transactions_python(uploaded_file, file_name)
-    if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
-        python_transactions, _python_log = extraction_result
-    else:
-        python_transactions = extraction_result or []
-    transactions = python_transactions or []
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        extraction_result = extract_transactions_python(uploaded_file, file_name)
+        if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+            transactions, _python_log = extraction_result
+        else:
+            transactions = extraction_result or []
 
     # Fall back to AI only when Python parser finds nothing
     if not transactions:
         if AI_AGENTS_AVAILABLE:
             method_used = 'ai'
             print(f"[FILE_PARSE] Python extraction found no transactions, trying AI extraction for {file_name}...")
+            if file_ext == '.pdf':
+                print(f"[FILE_PARSE]   PDF detected: Converting to images and extracting transactions using Vision API")
             # Check if Vision API text was pre-extracted
             if hasattr(uploaded_file, '_vision_api_text'):
                 print(f"[FILE_PARSE] ✅ Pre-extracted Vision API text found ({len(uploaded_file._vision_api_text)} characters) - will reuse it")
