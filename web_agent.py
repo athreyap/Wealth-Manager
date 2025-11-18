@@ -2216,13 +2216,6 @@ Return ALL transactions found on ALL pages in this batch, clearly separated by p
                 error_messages.append(error_msg)
                 failed_vision_pages.extend(batch_pages)
                 continue
-                    
-        except Exception as batch_error:
-            error_msg = f"Batch processing error: {str(batch_error)}"
-            print(f"[PDF_VISION] ❌ {error_msg}")
-            import traceback
-            print(f"[PDF_VISION] Batch processing error traceback: {traceback.format_exc()}")
-            error_messages.append(error_msg)
         
         if failed_vision_pages:
             warning_msg = f"⚠️ Failed to process {len(failed_vision_pages)} pages with Vision API: {failed_vision_pages}"
