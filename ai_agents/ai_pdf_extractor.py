@@ -88,7 +88,7 @@ class AIPDFTransactionExtractor(BaseAgent):
         
         try:
             response = self.openai_client.chat.completions.create(
-                model="gpt-5",  # GPT-5 for better PDF extraction
+                model="gpt-4o",  # gpt-4o for better PDF extraction
                 messages=[
                     {
                         "role": "system",

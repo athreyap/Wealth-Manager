@@ -94,7 +94,7 @@ Rules:
         
         try:
             response = self.client.chat.completions.create(
-                model="gpt-5",  # GPT-5 for better accuracy and structured JSON
+                model="gpt-4o",  # gpt-4o for better accuracy and structured JSON
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -193,7 +193,7 @@ Rules:
         
         try:
             response = self.client.chat.completions.create(
-                model="gpt-5",  # Upgraded to GPT-5
+                model="gpt-4o",  # gpt-4o
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}

@@ -91,7 +91,7 @@ class AIPortfolioAnalysisAgent(BaseAgent):
             current_year = datetime.now().year
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-5",  # GPT-5 for enhanced portfolio analysis
+                model="gpt-4o",  # gpt-4o for enhanced portfolio analysis
                 messages=[
                     {
                         "role": "system",

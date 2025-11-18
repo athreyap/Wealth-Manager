@@ -53,28 +53,63 @@ class PMS_AIF_Calculator:
             months_elapsed = years_elapsed * 12
             
             # CRITICAL: Use AI to get CAGR - no random/conservative values
+            print(f"[PMS_AIF] 🔍 Fetching CAGR for {ticker} ({'AIF' if is_aif else 'PMS'}) - Investment: ₹{investment_amount:,.2f} on {investment_date}")
             cagr_data = self._get_cagr_from_ai(ticker, is_aif, pms_aif_name, investment_date)
             
-            if cagr_data and cagr_data.get('cagr') and cagr_data.get('cagr') > 0:
+            if cagr_data and cagr_data.get('cagr') is not None and cagr_data.get('cagr') > 0:
                 # Use AI-provided CAGR
                 cagr = cagr_data['cagr']
                 cagr_period = cagr_data.get('period', 'AI Estimated')
                 source = f"AI ({cagr_period})"
+                print(f"[PMS_AIF] ✅ Got CAGR {cagr:.2%} ({cagr_period}) for {ticker}")
             else:
-                # If AI fails, return error - don't use random values
-                return {
-                    'ticker': ticker,
-                    'initial_investment': investment_amount,
-                    'current_value': investment_amount,  # Return original investment if AI fails
-                    'absolute_gain': 0,
-                    'percentage_gain': 0,
-                    'years_elapsed': years_elapsed,
-                    'cagr_used': 0,
-                    'cagr_period': 'AI Unavailable',
-                    'source': 'AI fetch failed - using investment value',
-                    'weekly_values': [],
-                    'error': 'AI CAGR calculation failed'
-                }
+                # If AI fails, try SEBI data as fallback
+                print(f"[PMS_AIF] ⚠️ AI CAGR failed for {ticker}, trying SEBI data...")
+                sebi_data = None
+                if not is_aif:
+                    # Try SEBI PMS data
+                    sebi_data = self._fetch_pms_from_sebi(ticker)
+                else:
+                    # Try SEBI AIF data
+                    sebi_data = self._fetch_aif_from_sebi(ticker)
+                
+                if sebi_data and not sebi_data.empty:
+                    best_cagr = self._extract_best_cagr(sebi_data)
+                    if best_cagr and best_cagr.get('cagr') and best_cagr.get('cagr') > 0:
+                        cagr = best_cagr['cagr']
+                        cagr_period = best_cagr.get('period', 'SEBI')
+                        source = f"SEBI ({cagr_period})"
+                        print(f"[PMS_AIF] ✅ Got CAGR {cagr:.2%} from SEBI ({cagr_period}) for {ticker}")
+                    else:
+                        print(f"[PMS_AIF] ❌ SEBI data available but no valid CAGR found for {ticker}")
+                        return {
+                            'ticker': ticker,
+                            'initial_investment': investment_amount,
+                            'current_value': investment_amount,  # Return original investment if all fails
+                            'absolute_gain': 0,
+                            'percentage_gain': 0,
+                            'years_elapsed': years_elapsed,
+                            'cagr_used': 0,
+                            'cagr_period': 'Unavailable',
+                            'source': 'CAGR fetch failed - using investment value',
+                            'weekly_values': [],
+                            'error': f'AI and SEBI CAGR calculation failed. AI result: {cagr_data}, SEBI result: {best_cagr}'
+                        }
+                else:
+                    print(f"[PMS_AIF] ❌ No SEBI data available for {ticker}")
+                    return {
+                        'ticker': ticker,
+                        'initial_investment': investment_amount,
+                        'current_value': investment_amount,  # Return original investment if all fails
+                        'absolute_gain': 0,
+                        'percentage_gain': 0,
+                        'years_elapsed': years_elapsed,
+                        'cagr_used': 0,
+                        'cagr_period': 'AI Unavailable',
+                        'source': 'AI fetch failed - using investment value',
+                        'weekly_values': [],
+                        'error': f'AI CAGR calculation failed. AI result: {cagr_data}'
+                    }
             
             # Calculate current value
             current_value = investment_amount * ((1 + cagr) ** years_elapsed)
@@ -216,21 +251,72 @@ OR if using closest available/estimated:
 
 CRITICAL: Always provide a CAGR value (between 0.08 and 0.25 for typical Indian PMS/AIF). Only return null if you cannot provide any reasonable estimate."""
 
-            response = client.chat.completions.create(
-                model="gpt-5",  # GPT-5 for better CAGR calculation accuracy
-                messages=[
-                    {"role": "system", "content": "You are a financial data expert. Provide accurate CAGR data for Indian PMS/AIF products. Return only valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.3,
-                max_tokens=200
-            )
+            # Use gpt-4o as primary, with gpt-4o-mini as fallback
+            models_to_try = ["gpt-4o", "gpt-4o-mini"]
+            model_to_use = None
+            response = None
+            last_error = None
+            
+            for model in models_to_try:
+                try:
+                    print(f"[PMS_AIF_AI] 🔄 Trying model: {model} for {ticker}...")
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "You are a financial data expert. Provide accurate CAGR data for Indian PMS/AIF products. Return only valid JSON."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.3,
+                        max_tokens=200
+                    )
+                    model_to_use = model
+                    print(f"[PMS_AIF_AI] ✅ {model} succeeded for {ticker}")
+                    break
+                except Exception as model_error:
+                    error_str = str(model_error).lower()
+                    last_error = model_error
+                    print(f"[PMS_AIF_AI] ⚠️ {model} failed for {ticker}: {str(model_error)[:150]}")
+                    # Continue to next model
+                    continue
+            
+            if not response:
+                print(f"[PMS_AIF_AI] ❌ All models failed for {ticker}. Last error: {str(last_error)[:200]}")
+                return None
             
             content = response.choices[0].message.content
-            print(f"[PMS_AIF_AI] Raw AI response for {ticker}: {content[:200]}")
-            result = json.loads(content)
-            print(f"[PMS_AIF_AI] Parsed result: {result}")
+            print(f"[PMS_AIF_AI] ✅ Got response from {model_to_use} for {ticker}: {content[:200]}")
+            
+            # Try to parse JSON
+            try:
+                result = json.loads(content)
+                print(f"[PMS_AIF_AI] ✅ Parsed JSON result: {result}")
+            except json.JSONDecodeError as e:
+                print(f"[PMS_AIF_AI] ❌ JSON parse error for {ticker}: {str(e)}")
+                print(f"[PMS_AIF_AI]   Raw content: {content}")
+                # Try to extract JSON from markdown code blocks
+                import re
+                json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
+                if json_match:
+                    try:
+                        result = json.loads(json_match.group(1))
+                        print(f"[PMS_AIF_AI] ✅ Extracted JSON from markdown: {result}")
+                    except:
+                        print(f"[PMS_AIF_AI] ❌ Failed to parse extracted JSON")
+                        return None
+                else:
+                    # Try to find JSON object in content
+                    json_match = re.search(r'\{[^{}]*"cagr"[^{}]*\}', content)
+                    if json_match:
+                        try:
+                            result = json.loads(json_match.group(0))
+                            print(f"[PMS_AIF_AI] ✅ Extracted JSON object: {result}")
+                        except:
+                            print(f"[PMS_AIF_AI] ❌ Failed to parse extracted JSON object")
+                            return None
+                    else:
+                        print(f"[PMS_AIF_AI] ❌ No JSON found in response")
+                        return None
             
             cagr_value = result.get('cagr')
             if cagr_value is not None and cagr_value != 'null':

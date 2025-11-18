@@ -294,6 +294,15 @@ class EnhancedPriceFetcher:
                     
             elif asset_type in ['pms', 'aif']:
                 current_price, source = self._calculate_pms_aif_live_price(ticker, asset_type, db_manager, holding)
+                # If CAGR calculation failed, use average_price as fallback
+                if not current_price or current_price <= 0:
+                    avg_price = holding.get('average_price', 0)
+                    if avg_price > 0:
+                        print(f"[PMS_AIF] ⚠️ CAGR calculation failed for {ticker}, using average_price: ₹{avg_price:,.2f}")
+                        current_price = avg_price
+                        source = 'average_price_fallback_cagr_failed'
+                    else:
+                        print(f"[PMS_AIF] ❌ CAGR calculation failed for {ticker} and no average_price available")
             
             elif asset_type == 'bond':
                 bond_name = holding.get('stock_name', '')
@@ -1346,7 +1355,7 @@ class EnhancedPriceFetcher:
 
         try:
             response = openai_client.chat.completions.create(
-                model="gpt-5-mini",
+                model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=150,
             )
@@ -1945,12 +1954,21 @@ class EnhancedPriceFetcher:
 
             current_value = result.get('current_value')
             if not current_value:
-                return None, 'cagr_no_result'
+                error_msg = result.get('error', 'Unknown error')
+                print(f"[PMS_AIF] ❌ No current_value for {ticker}: {error_msg}")
+                print(f"[PMS_AIF]   Result: {result}")
+                # If CAGR failed, return None so it falls back to average_price
+                return None, f'cagr_no_result: {error_msg}'
 
             nav = current_value / total_quantity if total_quantity > 0 else current_value
             source = result.get('source', 'cagr_calculated')
+            cagr_used = result.get('cagr_used', 0)
+            print(f"[PMS_AIF] ✅ Calculated price for {ticker}: NAV={nav:,.2f}, CAGR={cagr_used:.2%}, Source={source}")
             return nav, source
         except Exception as exc:
+            print(f"[PMS_AIF] ❌ Error calculating price for {ticker}: {str(exc)}")
+            import traceback
+            traceback.print_exc()
             return None, f'cagr_error:{exc}'
 
     def _get_pms_aif_price(self, ticker: str, asset_type: str) -> Tuple[Optional[float], str]:
@@ -2266,7 +2284,7 @@ Examples:
 If you cannot find the ticker, return exactly: NOT_FOUND"""
                     
                     response = self.openai_client.chat.completions.create(
-                        model="gpt-5-mini",  # GPT-5-mini for faster, cost-effective stock ticker resolution
+                        model="gpt-4o-mini",  # GPT-5-mini for faster, cost-effective stock ticker resolution
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt}
@@ -2587,7 +2605,7 @@ If you cannot find the ticker, return exactly: NOT_FOUND"""
             Current NAV: """
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-5-mini",  # GPT-5-mini for faster, cost-effective gold price fetching
+                model="gpt-4o-mini",  # GPT-5-mini for faster, cost-effective gold price fetching
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=50,
                 # Note: GPT-5-mini only supports default temperature (1)
@@ -2747,7 +2765,7 @@ IMPORTANT INSTRUCTIONS:
 The current 24k gold price per gram in India is:"""
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-5",  # GPT-5 for better accuracy and SGB price fetching
+                model="gpt-4o",  # gpt-4o for better accuracy and SGB price fetching
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=50,
                 # Note: GPT-5 only supports default temperature (1)
@@ -2867,7 +2885,7 @@ Example: 14786.49
 Current Market Trading Price:"""
                 
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-5",  # GPT-5 for better bond price fetching
+                    model="gpt-4o",  # gpt-4o for better bond price fetching
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -2945,7 +2963,7 @@ Current Price:"""
                 
                 # Use GPT-5-mini for non-SGB bonds (faster and cost-effective)
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-5-mini",
+                    model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -3079,7 +3097,7 @@ If not found, return: NOT_FOUND"""
             
             # Call OpenAI with optimized parameters
             response = self.openai_client.chat.completions.create(
-                model="gpt-5-mini",  # GPT-5-mini: Fast and cost-effective for PMS/AIF prices
+                model="gpt-4o-mini",  # GPT-5-mini: Fast and cost-effective for PMS/AIF prices
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -3714,7 +3732,7 @@ If you cannot estimate, return: NOT_FOUND"""
                 return None
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-5",  # GPT-5 for better historical data accuracy
+                model="gpt-4o",  # gpt-4o for better historical data accuracy
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}

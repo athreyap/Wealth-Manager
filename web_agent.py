@@ -809,7 +809,7 @@ def _run_document_analysis(
             )
 
             response = openai.chat.completions.create(
-                model="gpt-5",
+                model="gpt-4o",
                 messages=[{"role": "user", "content": analysis_prompt}],
                 max_completion_tokens=1000,
             )
@@ -1319,7 +1319,7 @@ Number each security from 1 to {len(remaining)}. If uncertain, return asset_type
 
                 try:
                     response = client.chat.completions.create(
-                        model="gpt-5",  # GPT-5 for better accuracy and faster processing
+                        model="gpt-4o",  # GPT-5 for better accuracy and faster processing
                         messages=[
                             {"role": "system", "content": "You are a financial data expert. Return only valid JSON."},
                             {"role": "user", "content": prompt}
@@ -1515,7 +1515,7 @@ If uncertain, return asset_type based on ticker pattern and name."""
 
                 try:
                     response = client.chat.completions.create(
-                        model="gpt-5",  # GPT-5 for better accuracy and faster processing
+                        model="gpt-4o",  # GPT-5 for better accuracy and faster processing
                         messages=[
                             {"role": "system", "content": "You are a financial data expert. Return only valid JSON."},
                             {"role": "user", "content": prompt}
@@ -2158,7 +2158,7 @@ Return ALL transactions found on ALL pages in this batch, clearly separated by p
             # Call GPT-5 Vision API for entire batch
             try:
                 response = openai_client.chat.completions.create(
-                    model="gpt-5",  # GPT-5 with vision support for better PDF image processing
+                    model="gpt-4o",  # GPT-5 with vision support for better PDF image processing
                     messages=[
                         {
                             "role": "system",
@@ -3150,7 +3150,7 @@ IMPORTANT:
     
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-5-mini",  # GPT-5-mini for faster, cost-effective column mapping
+            model="gpt-4o-mini",  # gpt-4o-mini for faster, cost-effective column mapping
             messages=[
                 {
                     "role": "system",
@@ -5679,9 +5679,9 @@ Return ONLY the JSON object, nothing else."""
         
         if not use_gemini:
             try:
-                st.caption(f"   🔄 Using OpenAI (gpt-5) for ticker resolution...")
+                st.caption(f"   🔄 Using OpenAI (gpt-4o) for ticker resolution...")
                 response = client.chat.completions.create(
-                    model="gpt-5",  # GPT-5 for better accuracy and reasoning
+                    model="gpt-4o",  # gpt-4o for better accuracy and reasoning
                     messages=[
                         {"role": "system", "content": "You are a financial ticker verification expert with access to real-time data. For each ticker, search online databases and verify it works with yfinance or mftool APIs. Return ONLY valid JSON with unique tickers for each holding."},
                         {"role": "user", "content": prompt}
@@ -9466,7 +9466,7 @@ def charts_page():
                             openai.api_key = st.secrets["api_keys"]["open_ai"]
                             
                             response = openai.chat.completions.create(
-                                model="gpt-5",  # Upgraded to GPT-5 for better results
+                                model="gpt-4o",  # Upgraded to GPT-5 for better results
                                 messages=[
                                     {
                                         "role": "system",
@@ -9708,7 +9708,7 @@ def charts_page():
                     """
                     
                     response = openai.chat.completions.create(
-                        model="gpt-5-mini",  # GPT-5-mini for faster risk analysis
+                        model="gpt-4o-mini",  # gpt-4o-mini for faster risk analysis
                         messages=[
                             {"role": "system", "content": "You are a professional risk analyst. Analyze the portfolio risk metrics and provide actionable risk management recommendations. Focus on diversification, position sizing, and risk mitigation strategies. Use emojis and be practical."},
                             {"role": "user", "content": risk_summary_text}
@@ -11006,7 +11006,7 @@ def ai_assistant_page():
                                 # Note: This uses AI's training knowledge, not real-time web access
                                 # For true real-time news, you'd need a news API like NewsAPI, Alpha Vantage, etc.
                                 ai_news_response = openai.chat.completions.create(
-                                    model="gpt-5",
+                                    model="gpt-4o",
                                     messages=[{
                                         "role": "user",
                                         "content": f"Provide the latest financial news and market updates {news_query}. Include recent developments, market trends, and any significant events. Format as a list of news items with titles and brief summaries."
@@ -11239,7 +11239,7 @@ Always:
                 max_iterations = 5
                 for iteration in range(max_iterations):
                     response = openai.chat.completions.create(
-                        model="gpt-5",
+                        model="gpt-4o",
                         messages=messages,
                         tools=functions,
                         tool_choice="auto"  # Let AI decide when to use functions
@@ -11399,7 +11399,7 @@ Always:
                             """
                             
                             response = openai.chat.completions.create(
-                                model="gpt-5",  # Upgraded to GPT-5 for better results
+                                model="gpt-4o",  # Upgraded to GPT-5 for better results
                                 messages=[{"role": "user", "content": analysis_prompt}],
                                 max_completion_tokens=800,
                                 # Note: GPT-5 only supports default temperature (1)

@@ -91,7 +91,7 @@ class AIMarketAnalysisAgent(BaseAgent):
             current_year = datetime.now().year
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-5",  # GPT-5 for better market analysis
+                model="gpt-4o",  # gpt-4o for better market analysis
                 messages=[
                     {
                         "role": "system",

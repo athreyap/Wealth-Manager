@@ -137,7 +137,7 @@ CRITICAL: Return ONLY the JSON array, no other text."""
 
             # Call OpenAI
             response = self.openai_client.chat.completions.create(
-                model="gpt-5",  # GPT-5 for better CSV parsing
+                model="gpt-4o",  # gpt-4o for better CSV parsing
                 messages=[
                     {
                         "role": "system",
