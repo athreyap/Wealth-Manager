@@ -1978,7 +1978,7 @@ Examples:
 If you cannot find the ticker, return exactly: NOT_FOUND"""
                     
                     response = self.openai_client.chat.completions.create(
-                        model="gpt-4o-mini",
+                        model="gpt-5-mini",  # GPT-5-mini for faster, cost-effective stock ticker resolution
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt}

@@ -217,7 +217,7 @@ OR if using closest available/estimated:
 CRITICAL: Always provide a CAGR value (between 0.08 and 0.25 for typical Indian PMS/AIF). Only return null if you cannot provide any reasonable estimate."""
 
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5",  # GPT-5 for better CAGR calculation accuracy
                 messages=[
                     {"role": "system", "content": "You are a financial data expert. Provide accurate CAGR data for Indian PMS/AIF products. Return only valid JSON."},
                     {"role": "user", "content": prompt}

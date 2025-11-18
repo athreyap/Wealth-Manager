@@ -1169,7 +1169,197 @@ def _tx_normalize_transaction_type(
     return 'buy'
 
 
-def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> str:
+def _tx_infer_asset_type_bulk(securities: List[Dict[str, str]], asset_hints: Dict[str, str] = None) -> Dict[str, str]:
+    """
+    Bulk asset type detection for multiple securities.
+    Returns a dict mapping (ticker, stock_name) -> asset_type
+    
+    Args:
+        securities: List of dicts with 'ticker' and 'stock_name' keys
+        asset_hints: Optional dict mapping (ticker, stock_name) -> hint
+    
+    Returns:
+        Dict mapping (ticker, stock_name) -> asset_type
+    """
+    if not securities:
+        return {}
+    
+    asset_hints = asset_hints or {}
+    results = {}
+    needs_ai = []
+    
+    # First pass: Quick checks (hints, patterns, heuristics)
+    for sec in securities:
+        ticker = sec.get('ticker', '')
+        stock_name = sec.get('stock_name', '')
+        key = (ticker, stock_name)
+        hint = asset_hints.get(key, '').lower()
+        name = (stock_name or '').lower()
+        ticker_upper = ticker.upper()
+        
+        # STEP 1: Check explicit hints first
+        if hint:
+            if 'mutual' in hint or 'mf' in hint or hint == 'mutual_fund':
+                results[key] = 'mutual_fund'
+                continue
+            if 'pms' in hint:
+                results[key] = 'pms'
+                continue
+            if 'aif' in hint:
+                results[key] = 'aif'
+                continue
+            if 'bond' in hint or 'debenture' in hint:
+                results[key] = 'bond'
+                continue
+            if 'stock' in hint or 'equity' in hint:
+                results[key] = 'stock'
+                continue
+        
+        # STEP 2: Check obvious patterns
+        if ticker_upper.startswith('INP') or 'pms' in name or 'portfolio management' in name:
+            results[key] = 'pms'
+            continue
+        if ticker_upper.startswith('AIF') or 'aif' in name or 'alternative investment' in name:
+            results[key] = 'aif'
+            continue
+        if ticker_upper.startswith('SGB') or 'sgb' in name:
+            results[key] = 'bond'
+            continue
+        if '.NS' in ticker_upper or '.BO' in ticker_upper:
+            results[key] = 'stock'
+            continue
+        
+        # STEP 6: Check heuristics (before expensive API calls)
+        mf_keywords = ['fund', 'scheme', 'growth', 'nav', 'mutual', 'mf', 'plan', 'allocation', 'hybrid', 'equity', 'debt']
+        has_mf_keyword = any(keyword in name for keyword in mf_keywords)
+        if has_mf_keyword:
+            results[key] = 'mutual_fund'
+            continue
+        
+        if 'debenture' in name and not has_mf_keyword:
+            results[key] = 'bond'
+            continue
+        if 'bond' in name and not has_mf_keyword:
+            results[key] = 'bond'
+            continue
+        
+        # Needs AI or data source check
+        needs_ai.append(sec)
+    
+    # Second pass: Check data sources for remaining securities
+    remaining = []
+    for sec in needs_ai:
+        ticker = sec.get('ticker', '')
+        stock_name = sec.get('stock_name', '')
+        key = (ticker, stock_name)
+        ticker_upper = ticker.upper()
+        
+        # Check if ticker is numeric
+        is_numeric = False
+        ticker_clean = None
+        try:
+            cleaned = ticker_upper.replace(',', '').replace('$', '').strip()
+            numeric_value = float(cleaned)
+            is_numeric = True
+            ticker_clean = ticker_upper.replace('.', '').split('.')[0]
+        except (ValueError, AttributeError):
+            pass
+        
+        # For numeric tickers, check data sources
+        if is_numeric and ticker_clean:
+            # Try AMFI first (fast)
+            try:
+                amfi_data = get_amfi_dataset()
+                if amfi_data and 'code_lookup' in amfi_data:
+                    if ticker_clean in amfi_data['code_lookup']:
+                        scheme = amfi_data['code_lookup'][ticker_clean]
+                        if scheme and scheme.get('nav'):
+                            results[key] = 'mutual_fund'
+                            continue
+            except Exception:
+                pass
+        
+        # Still needs AI
+        remaining.append(sec)
+    
+    # Third pass: Bulk AI call for remaining securities
+    if remaining:
+        try:
+            client = st.session_state.get('openai_client')
+            if not client:
+                try:
+                    from openai import OpenAI
+                    if "api_keys" in st.secrets and "open_ai" in st.secrets.get("api_keys", {}):
+                        client = OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
+                        st.session_state['openai_client'] = client
+                except Exception:
+                    pass
+            
+            if client:
+                # Build bulk prompt
+                securities_list = []
+                for i, sec in enumerate(remaining):
+                    securities_list.append(f"{i+1}. Ticker: {sec.get('ticker', 'N/A')}, Name: {sec.get('stock_name', 'N/A')}")
+                
+                prompt = f"""You are a financial data expert. Determine the asset type for these Indian securities:
+
+{chr(10).join(securities_list)}
+
+Asset types:
+- stock: NSE/BSE listed stocks (e.g., RELIANCE, INFY, TCS)
+- mutual_fund: Mutual funds with AMFI codes (e.g., 120760, 146514) or fund names containing "Fund", "Scheme", "Growth", etc.
+- bond: Government or corporate bonds (e.g., SGBJUN31I)
+- pms: Portfolio Management Service (starts with INP)
+- aif: Alternative Investment Fund (starts with AIF)
+
+Return ONLY a JSON object with asset types for each security:
+{{"1": {{"asset_type": "stock|mutual_fund|bond|pms|aif", "confidence": "high|medium|low"}}, "2": {{...}}, ...}}
+
+Number each security from 1 to {len(remaining)}. If uncertain, return asset_type based on ticker pattern and name."""
+
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-5",  # GPT-5 for better accuracy and faster processing
+                        messages=[
+                            {"role": "system", "content": "You are a financial data expert. Return only valid JSON."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.3,
+                        max_tokens=min(4000, len(remaining) * 50)  # ~50 tokens per security
+                    )
+                    
+                    import json
+                    result = json.loads(response.choices[0].message.content)
+                    
+                    for i, sec in enumerate(remaining):
+                        key = (sec.get('ticker', ''), sec.get('stock_name', ''))
+                        sec_num = str(i + 1)
+                        if sec_num in result:
+                            ai_result = result[sec_num]
+                            ai_asset_type = ai_result.get('asset_type', '').lower()
+                            if ai_asset_type in ['stock', 'mutual_fund', 'bond', 'pms', 'aif']:
+                                results[key] = ai_asset_type
+                                print(f"[ASSET_TYPE] ✅ {sec.get('ticker', 'N/A')}: AI determined → {ai_asset_type} (confidence: {ai_result.get('confidence', 'unknown')})")
+                            else:
+                                results[key] = 'stock'  # Default
+                        else:
+                            results[key] = 'stock'  # Default
+                except Exception as e:
+                    # AI failed, use defaults
+                    for sec in remaining:
+                        key = (sec.get('ticker', ''), sec.get('stock_name', ''))
+                        results[key] = 'stock'
+        except Exception:
+            # AI not available, use defaults
+            for sec in remaining:
+                key = (sec.get('ticker', ''), sec.get('stock_name', ''))
+                results[key] = 'stock'
+    
+    return results
+
+
+def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '', cache: Dict[tuple, str] = None) -> str:
     """
     Infer asset type from ticker/name/hint.
     CRITICAL: Uses actual data sources in priority order:
@@ -1177,7 +1367,19 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
     2. Try yfinance - if returns data, it's a stock
     3. Try mftool/AMFI - if returns data, it's a mutual fund
     4. Use AI as last resort
+    
+    Args:
+        ticker: Ticker symbol
+        stock_name: Stock/fund name
+        asset_hint: Optional hint from file
+        cache: Optional cache dict from bulk detection
     """
+    # Check cache first (from bulk detection)
+    if cache:
+        key = (ticker, stock_name)
+        if key in cache:
+            return cache[key]
+    
     hint = asset_hint.lower()
     name = (stock_name or '').lower()
     ticker_upper = ticker.upper()
@@ -1280,20 +1482,21 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '') -> 
         except Exception:
             pass  # mftool not available or failed
     
-    # STEP 5: Use AI as last resort to determine asset type
-    try:
-        client = st.session_state.get('openai_client')
-        if not client:
-            try:
-                from openai import OpenAI
-                if "api_keys" in st.secrets and "open_ai" in st.secrets.get("api_keys", {}):
-                    client = OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
-                    st.session_state['openai_client'] = client
-            except Exception:
-                pass
-        
-        if client:
-            prompt = f"""You are a financial data expert. Determine the asset type for this Indian security:
+    # STEP 5: Use AI as last resort to determine asset type (only if not using bulk cache)
+    if not cache:
+        try:
+            client = st.session_state.get('openai_client')
+            if not client:
+                try:
+                    from openai import OpenAI
+                    if "api_keys" in st.secrets and "open_ai" in st.secrets.get("api_keys", {}):
+                        client = OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
+                        st.session_state['openai_client'] = client
+                except Exception:
+                    pass
+            
+            if client:
+                prompt = f"""You are a financial data expert. Determine the asset type for this Indian security:
 
 Ticker: {ticker}
 Name: {stock_name or 'Not provided'}
@@ -1310,29 +1513,29 @@ Return ONLY a JSON object:
 
 If uncertain, return asset_type based on ticker pattern and name."""
 
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": "You are a financial data expert. Return only valid JSON."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.3,
-                    max_tokens=100
-                )
-                
-                import json
-                result = json.loads(response.choices[0].message.content)
-                ai_asset_type = result.get('asset_type', '').lower()
-                
-                if ai_asset_type in ['stock', 'mutual_fund', 'bond', 'pms', 'aif']:
-                    print(f"[ASSET_TYPE] ✅ {ticker}: AI determined → {ai_asset_type} (confidence: {result.get('confidence', 'unknown')})")
-                    return ai_asset_type
-            except Exception as e:
-                pass  # AI failed, fall back to heuristics
-    except Exception:
-        pass  # AI not available, fall back to heuristics
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-5",  # GPT-5 for better accuracy and faster processing
+                        messages=[
+                            {"role": "system", "content": "You are a financial data expert. Return only valid JSON."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.3,
+                        max_tokens=100
+                    )
+                    
+                    import json
+                    result = json.loads(response.choices[0].message.content)
+                    ai_asset_type = result.get('asset_type', '').lower()
+                    
+                    if ai_asset_type in ['stock', 'mutual_fund', 'bond', 'pms', 'aif']:
+                        print(f"[ASSET_TYPE] ✅ {ticker}: AI determined → {ai_asset_type} (confidence: {result.get('confidence', 'unknown')})")
+                        return ai_asset_type
+                except Exception as e:
+                    pass  # AI failed, fall back to heuristics
+        except Exception:
+            pass  # AI not available, fall back to heuristics
     
     # STEP 6: Fallback to heuristics if all data sources fail
     mf_keywords = ['fund', 'scheme', 'growth', 'nav', 'mutual', 'mf', 'plan', 'allocation', 'hybrid', 'equity', 'debt']
@@ -1869,54 +2072,31 @@ def _extract_pdf_with_vision_api(uploaded_file, filename: str = "uploaded_file.p
         print(f"[PDF_VISION] Converted {len(images)} PDF pages to images")
         diagnostic_info.append(f"🖼️ Converted {len(images)} pages to images")
         
-        # Process images with GPT-4 Vision (process first 10 pages to avoid token limits)
-        max_pages = min(10, len(images))
+        # Process images with GPT-5 Vision in BULK batches (multiple pages per API call)
+        MAX_PAGES_PER_BATCH = 10  # Process 10 pages per API call for efficiency
         all_text = []
         failed_vision_pages = []
+        total_pages = len(images)
         
-        print(f"[PDF_VISION] Processing {max_pages} pages with GPT-4 Vision API...")
-        if show_ui_errors and len(images) > max_pages:
+        print(f"[PDF_VISION] Processing {total_pages} pages with GPT-5 Vision API in batches of {MAX_PAGES_PER_BATCH}...")
+        if show_ui_errors:
             try:
-                st.info(f"ℹ️ Processing first {max_pages} of {len(images)} pages (to manage API costs)")
+                st.info(f"ℹ️ Processing {total_pages} pages in bulk batches (faster, more efficient)")
             except:
                 pass
         
-        for page_num, image in enumerate(images[:max_pages], 1):
-            try:
-                # Convert PIL Image to base64 with compression
-                buffered = io.BytesIO()
-                # Use optimize=True and compress_level for smaller file size
-                image.save(buffered, format="PNG", optimize=True, compress_level=6)
-                img_size_bytes = len(buffered.getvalue())
-                img_size_mb = img_size_bytes / (1024 * 1024)
-                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                base64_size_kb = len(img_base64) / 1024
-                
-                # Check image size (Vision API has limits)
-                if img_size_mb > 20:
-                    error_msg = f"Page {page_num}: Image too large ({img_size_mb:.2f} MB, max ~20 MB)"
-                    print(f"[PDF_VISION] ⚠️ {error_msg}")
-                    error_messages.append(error_msg)
-                    failed_vision_pages.append(page_num)
-                    continue
-                
-                print(f"[PDF_VISION] Processing page {page_num}/{max_pages} with GPT-4 Vision (image: {image.width}x{image.height}, {img_size_mb:.2f} MB, base64: {base64_size_kb:.1f} KB)...")
-                
-                # Call GPT-4 Vision API
-                try:
-                    response = openai_client.chat.completions.create(
-                        model="gpt-4o",  # GPT-4 Vision model
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
-                            },
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": f"""Extract all financial transactions from this PDF page (Page {page_num} of {len(images)} from file: {filename}).
+        # Process in batches
+        for batch_start in range(0, total_pages, MAX_PAGES_PER_BATCH):
+            batch_end = min(batch_start + MAX_PAGES_PER_BATCH, total_pages)
+            batch_images = images[batch_start:batch_end]
+            batch_pages = list(range(batch_start + 1, batch_end + 1))
+            
+            print(f"[PDF_VISION] 📦 Processing batch: pages {batch_start + 1}-{batch_end} of {total_pages}...")
+            
+            # Build content array with all images in this batch
+            batch_content = [{
+                "type": "text",
+                "text": f"""Extract all financial transactions from these PDF pages (Pages {batch_start + 1}-{batch_end} of {total_pages} from file: {filename}).
 
 Look for transaction data including:
 - Transaction dates (in any format - will be normalized)
@@ -1928,81 +2108,121 @@ Look for transaction data including:
 - Asset types (stocks, mutual funds, PMS, AIF, bonds)
 - Channels/brokers/platforms
 
-Format the output as plain text with one transaction per line, like:
+For each page, format the output as:
+--- Page X ---
 Date: YYYY-MM-DD | Ticker: SYMBOL | Name: Stock Name | Quantity: 100 | Price: 50.00 | Amount: 5000 | Type: buy | Asset: stock | Channel: Broker Name
+[More transactions...]
 
 Or if it's a table, extract all rows with transaction data.
 
-If this page doesn't contain any transaction data, return exactly: "No transactions on this page"
+If a page doesn't contain any transaction data, return exactly: "--- Page X ---\nNo transactions on this page"
 
-Return ALL transactions found on this page, even if the format is slightly different."""
-                                    },
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/png;base64,{img_base64}"
-                                        }
-                                    }
-                                ]
-                            }
-                        ],
-                        max_tokens=4000,
-                    )
+Return ALL transactions found on ALL pages in this batch, clearly separated by page number."""
+            }]
+            
+            # Add all images in batch
+            batch_failed = []
+            for page_idx, image in enumerate(batch_images):
+                page_num = batch_start + page_idx + 1
+                try:
+                    # Convert PIL Image to base64 with compression
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG", optimize=True, compress_level=6)
+                    img_size_bytes = len(buffered.getvalue())
+                    img_size_mb = img_size_bytes / (1024 * 1024)
+                    img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
                     
-                    if not response or not response.choices:
-                        error_msg = f"Page {page_num}: Empty response from Vision API"
+                    # Check image size (Vision API has limits)
+                    if img_size_mb > 20:
+                        error_msg = f"Page {page_num}: Image too large ({img_size_mb:.2f} MB, max ~20 MB)"
                         print(f"[PDF_VISION] ⚠️ {error_msg}")
                         error_messages.append(error_msg)
-                        failed_vision_pages.append(page_num)
+                        batch_failed.append(page_num)
                         continue
                     
-                    page_text = response.choices[0].message.content
-                    if page_text and page_text.strip():
-                        if "No transactions" not in page_text and "no transaction" not in page_text.lower():
-                            all_text.append(f"--- Page {page_num} ---\n{page_text}\n")
-                            print(f"[PDF_VISION] ✅ Page {page_num}: Extracted {len(page_text)} characters of transaction data")
-                        else:
-                            print(f"[PDF_VISION] ℹ️ Page {page_num}: Vision API found no transactions on this page")
-                    else:
-                        print(f"[PDF_VISION] ⚠️ Page {page_num}: Vision API returned empty response")
-                        failed_vision_pages.append(page_num)
-                        
-                except openai.RateLimitError as rate_error:
-                    error_msg = f"Page {page_num}: Rate limit exceeded - {str(rate_error)}"
-                    print(f"[PDF_VISION] ❌ {error_msg}")
-                    error_messages.append(error_msg)
-                    failed_vision_pages.append(page_num)
-                    if show_ui_errors:
-                        try:
-                            st.warning(f"⚠️ **API Rate Limit**: {error_msg}\n\nPlease wait a moment and try again.")
-                        except:
-                            pass
+                    batch_content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{img_base64}"
+                        }
+                    })
+                except Exception as e:
+                    print(f"[PDF_VISION] ⚠️ Failed to process page {page_num} image: {e}")
+                    batch_failed.append(page_num)
                     continue
-                except openai.APIError as api_error:
-                    error_msg = f"Page {page_num}: OpenAI API error - {str(api_error)}"
-                    print(f"[PDF_VISION] ❌ {error_msg}")
-                    import traceback
-                    print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
+            
+            if not batch_content or len(batch_content) == 1:  # Only text, no images
+                failed_vision_pages.extend(batch_failed)
+                continue
+            
+            # Call GPT-5 Vision API for entire batch
+            try:
+                response = openai_client.chat.completions.create(
+                    model="gpt-5",  # GPT-5 with vision support for better PDF image processing
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
+                        },
+                        {
+                            "role": "user",
+                            "content": batch_content
+                        }
+                    ],
+                    max_tokens=16000,  # Higher limit for batch processing
+                )
+                
+                # Process batch response
+                if not response or not response.choices:
+                    error_msg = f"Batch {batch_start + 1}-{batch_end}: Empty response from Vision API"
+                    print(f"[PDF_VISION] ⚠️ {error_msg}")
                     error_messages.append(error_msg)
-                    failed_vision_pages.append(page_num)
+                    failed_vision_pages.extend(batch_pages)
                     continue
-                except Exception as api_error:
-                    error_msg = f"Page {page_num}: Vision API call failed - {str(api_error)}"
-                    print(f"[PDF_VISION] ❌ {error_msg}")
-                    import traceback
-                    print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
-                    error_messages.append(error_msg)
-                    failed_vision_pages.append(page_num)
-                    continue
-                    
-            except Exception as page_error:
-                error_msg = f"Page {page_num}: Error processing image - {str(page_error)}"
+                
+                batch_text = response.choices[0].message.content
+                if batch_text and batch_text.strip():
+                    all_text.append(batch_text)
+                    pages_in_batch = len([p for p in batch_pages if p not in batch_failed])
+                    print(f"[PDF_VISION] ✅ Batch {batch_start + 1}-{batch_end}: Extracted {len(batch_text)} characters from {pages_in_batch} pages")
+                else:
+                    print(f"[PDF_VISION] ⚠️ Batch {batch_start + 1}-{batch_end}: Vision API returned empty response")
+                    failed_vision_pages.extend([p for p in batch_pages if p not in batch_failed])
+                
+            except openai.RateLimitError as rate_error:
+                error_msg = f"Batch {batch_start + 1}-{batch_end}: Rate limit exceeded - {str(rate_error)}"
+                print(f"[PDF_VISION] ❌ {error_msg}")
+                error_messages.append(error_msg)
+                failed_vision_pages.extend(batch_pages)
+                if show_ui_errors:
+                    try:
+                        st.warning(f"⚠️ **API Rate Limit**: {error_msg}\n\nPlease wait a moment and try again.")
+                    except:
+                        pass
+                continue
+            except openai.APIError as api_error:
+                error_msg = f"Batch {batch_start + 1}-{batch_end}: OpenAI API error - {str(api_error)}"
                 print(f"[PDF_VISION] ❌ {error_msg}")
                 import traceback
-                print(f"[PDF_VISION] Page processing error traceback: {traceback.format_exc()}")
+                print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
                 error_messages.append(error_msg)
-                failed_vision_pages.append(page_num)
+                failed_vision_pages.extend(batch_pages)
                 continue
+            except Exception as batch_error:
+                error_msg = f"Batch {batch_start + 1}-{batch_end}: Vision API call failed - {str(batch_error)}"
+                print(f"[PDF_VISION] ❌ {error_msg}")
+                import traceback
+                print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
+                error_messages.append(error_msg)
+                failed_vision_pages.extend(batch_pages)
+                continue
+                    
+        except Exception as batch_error:
+            error_msg = f"Batch processing error: {str(batch_error)}"
+            print(f"[PDF_VISION] ❌ {error_msg}")
+            import traceback
+            print(f"[PDF_VISION] Batch processing error traceback: {traceback.format_exc()}")
+            error_messages.append(error_msg)
         
         if failed_vision_pages:
             warning_msg = f"⚠️ Failed to process {len(failed_vision_pages)} pages with Vision API: {failed_vision_pages}"
@@ -2937,7 +3157,7 @@ IMPORTANT:
     
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # Use cheaper model for column mapping
+            model="gpt-5-mini",  # GPT-5-mini for faster, cost-effective column mapping
             messages=[
                 {
                     "role": "system",
@@ -3168,6 +3388,35 @@ def _tx_dataframe_to_transactions(
         print(f"[FILE_PARSE] DataFrame shape: {prepared_df.shape}")
         if not prepared_df.empty:
             print(f"[FILE_PARSE] First row sample: {prepared_df.iloc[0].to_dict()}")
+
+    # OPTIMIZATION: Bulk asset type detection - collect all unique securities first
+    print(f"[ASSET_TYPE] 🔍 Collecting unique securities for bulk detection...")
+    unique_securities = {}
+    asset_hints_map = {}
+    for idx, row in prepared_df.iterrows():
+        raw_stock_name = _tx_safe_str(row.get('stock_name') or row.get('name'))
+        raw_scheme_name = _tx_safe_str(row.get('scheme_name'))
+        ticker = _tx_normalize_ticker(row.get('ticker') or row.get('symbol'))
+        asset_hint = _tx_safe_str(row.get('asset_type'))
+        
+        # Use scheme_name or stock_name
+        name = raw_scheme_name or raw_stock_name
+        if not name:
+            continue
+        
+        key = (ticker, name)
+        if key not in unique_securities:
+            unique_securities[key] = {'ticker': ticker, 'stock_name': name}
+            if asset_hint:
+                asset_hints_map[key] = asset_hint
+    
+    # Perform bulk asset type detection
+    asset_type_cache = {}
+    if unique_securities:
+        securities_list = list(unique_securities.values())
+        print(f"[ASSET_TYPE] 📊 Bulk detecting asset types for {len(securities_list)} unique securities...")
+        asset_type_cache = _tx_infer_asset_type_bulk(securities_list, asset_hints_map)
+        print(f"[ASSET_TYPE] ✅ Bulk detection complete: {len(asset_type_cache)} asset types determined")
 
     for idx, row in prepared_df.iterrows():
         rows_processed += 1
@@ -3421,7 +3670,8 @@ def _tx_dataframe_to_transactions(
             continue
 
         asset_hint = _tx_safe_str(row.get('asset_type'))
-        asset_type = _tx_infer_asset_type(ticker, stock_name or scheme_name, asset_hint)
+        # Use bulk detection cache for faster processing
+        asset_type = _tx_infer_asset_type(ticker, stock_name or scheme_name, asset_hint, cache=asset_type_cache)
         
         # For mutual funds, properly set scheme_name and stock_name
         # Use what's in the file - don't replace with AMFI names

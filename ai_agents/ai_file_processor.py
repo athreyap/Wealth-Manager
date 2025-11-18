@@ -380,53 +380,27 @@ class AIFileProcessor(BaseAgent):
             
             self.logger.info(f"[VISION_API] ✅ Ready to process {len(images)} PDF pages with GPT-4 Vision")
             
-            # Process images with GPT-4 Vision
-            # Process all pages, but in batches to avoid overwhelming the API
-            # If file is very large (>50 pages), process in batches of 20 pages
-            MAX_PAGES_PER_BATCH = 20  # Process 20 pages at a time for very large PDFs
+            # Process images with GPT-5 Vision in BULK batches (multiple pages per API call)
+            MAX_PAGES_PER_BATCH = 10  # Process 10 pages per API call for efficiency
             total_pages = len(images)
             
-            if total_pages > MAX_PAGES_PER_BATCH:
-                print(f"[VISION_API] 📄 Large PDF detected ({total_pages} pages) - processing in batches of {MAX_PAGES_PER_BATCH}...")
+            self.logger.info(f"[VISION_API] 📄 Processing {total_pages} pages in bulk batches of {MAX_PAGES_PER_BATCH}...")
             
             all_text = []
             pages_processed = 0
             
-            # Process in batches if needed
+            # Process in batches
             for batch_start in range(0, total_pages, MAX_PAGES_PER_BATCH):
                 batch_end = min(batch_start + MAX_PAGES_PER_BATCH, total_pages)
                 batch_images = images[batch_start:batch_end]
+                batch_pages = list(range(batch_start + 1, batch_end + 1))
                 
-                if total_pages > MAX_PAGES_PER_BATCH:
-                    print(f"[VISION_API] 📦 Processing pages {batch_start + 1}-{batch_end} of {total_pages}...")
+                self.logger.info(f"[VISION_API] 📦 Processing batch: pages {batch_start + 1}-{batch_end} of {total_pages}...")
                 
-                for page_num, image in enumerate(batch_images, batch_start + 1):
-                    try:
-                        # Convert PIL Image to base64 with compression
-                        buffered = io.BytesIO()
-                        # Use optimize=True and compress_level for smaller file size
-                        image.save(buffered, format="PNG", optimize=True, compress_level=6)
-                        img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                        
-                        # Call GPT-4 Vision API
-                        self.logger.info(f"[VISION_API] Processing page {page_num}/{total_pages} with GPT-4 Vision API...")
-                        openai_client = self._get_openai_client()
-                        if not openai_client:
-                            raise Exception("OpenAI client not available")
-                        # No timeout - client initialized with timeout=None to process files completely
-                        response = openai_client.chat.completions.create(
-                            model="gpt-4o",  # GPT-4 Vision model
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
-                                },
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {
-                                            "type": "text",
-                                            "text": f"""Extract all financial transactions from this PDF page (Page {page_num} of {len(images)} from file: {filename}).
+                # Build content array with all images in this batch
+                batch_content = [{
+                    "type": "text",
+                    "text": f"""Extract all financial transactions from these PDF pages (Pages {batch_start + 1}-{batch_end} of {total_pages} from file: {filename}).
 
 CRITICAL: Do NOT use filename "{filename}" or channel/broker name as stock_name. Extract the actual fund/security name from the document. If stock_name is missing or looks like a channel name, set it to null.
 
@@ -440,43 +414,80 @@ Look for transaction data including:
 - Asset types (stocks, mutual funds, PMS, AIF, bonds)
 - Channels/brokers/platforms
 
-Format the output as plain text with one transaction per line, like:
+For each page, format the output as:
+--- Page X ---
 Date: YYYY-MM-DD | Ticker: SYMBOL | Name: Stock Name | Quantity: 100 | Price: 50.00 | Amount: 5000 | Type: buy | Asset: stock | Channel: [Extract from "channel"/"Channel"/"Broker"/"Platform" column if present, otherwise use filename]
+[More transactions...]
 
 Or if it's a table, extract all rows with transaction data.
 
-If this page doesn't contain any transaction data, return exactly: "No transactions on this page"
+If a page doesn't contain any transaction data, return exactly: "--- Page X ---\nNo transactions on this page"
 
-Return ALL transactions found on this page, even if the format is slightly different."""
-                                    },
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/png;base64,{img_base64}"
-                                        }
-                                    }
-                                ]
+Return ALL transactions found on ALL pages in this batch, clearly separated by page number."""
+                }]
+                
+                # Add all images in batch
+                batch_failed = []
+                for page_idx, image in enumerate(batch_images):
+                    page_num = batch_start + page_idx + 1
+                    try:
+                        # Convert PIL Image to base64 with compression
+                        buffered = io.BytesIO()
+                        image.save(buffered, format="PNG", optimize=True, compress_level=6)
+                        img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                        batch_content.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img_base64}"
+                            }
+                        })
+                    except Exception as e:
+                        self.logger.error(f"[VISION_API] ⚠️ Failed to process page {page_num} image: {e}")
+                        batch_failed.append(page_num)
+                        continue
+                
+                if not batch_content or len(batch_content) == 1:  # Only text, no images
+                    continue
+                
+                # Call GPT-5 Vision API for entire batch
+                try:
+                    openai_client = self._get_openai_client()
+                    if not openai_client:
+                        raise Exception("OpenAI client not available")
+                    # No timeout - client initialized with timeout=None to process files completely
+                    response = openai_client.chat.completions.create(
+                        model="gpt-5",  # GPT-5 with vision support for better PDF image processing
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
+                            },
+                            {
+                                "role": "user",
+                                "content": batch_content
                             }
                         ],
-                        max_tokens=4000,
+                        max_tokens=16000,  # Higher limit for batch processing
                     )
                     
-                        page_text = response.choices[0].message.content
-                        if page_text and page_text.strip() and "No transactions" not in page_text:
-                            all_text.append(f"--- Page {page_num} ---\n{page_text}\n")
-                            pages_processed += 1
-                            if total_pages <= MAX_PAGES_PER_BATCH:
-                                self.logger.info(f"[VISION_API] ✅ Page {page_num}: Extracted transaction data ({len(page_text)} chars)")
-                            else:
-                                self.logger.info(f"[VISION_API] ✅ Page {page_num}/{total_pages}: Extracted transaction data ({len(page_text)} chars)")
+                    # Process batch response
+                    if response and response.choices:
+                        batch_text = response.choices[0].message.content
+                        if batch_text and batch_text.strip():
+                            all_text.append(batch_text)
+                            pages_in_batch = len([p for p in batch_pages if p not in batch_failed])
+                            pages_processed += pages_in_batch
+                            self.logger.info(f"[VISION_API] ✅ Batch {batch_start + 1}-{batch_end}: Extracted {len(batch_text)} characters from {pages_in_batch} pages")
                         else:
-                            self.logger.info(f"[VISION_API] Page {page_num}: No transaction data found")
-                            
-                    except Exception as page_error:
-                        self.logger.error(f"[VISION_API] ❌ GPT-4 Vision failed for page {page_num}: {str(page_error)}")
-                        import traceback
-                        self.logger.error(f"[VISION_API] Page error traceback: {traceback.format_exc()}")
-                        continue
+                            self.logger.info(f"[VISION_API] ⚠️ Batch {batch_start + 1}-{batch_end}: No transaction data found")
+                    else:
+                        self.logger.error(f"[VISION_API] ❌ Batch {batch_start + 1}-{batch_end}: Empty response from Vision API")
+                        
+                except Exception as batch_error:
+                    self.logger.error(f"[VISION_API] ❌ GPT-5 Vision failed for batch {batch_start + 1}-{batch_end}: {str(batch_error)}")
+                    import traceback
+                    self.logger.error(f"[VISION_API] Batch error traceback: {traceback.format_exc()}")
+                    continue
             
             if all_text:
                 combined_text = "\n".join(all_text)
@@ -951,7 +962,7 @@ Output ONLY the JSON array—no commentary or explanation. The JSON array must c
             
             # No timeout - client initialized with timeout=None to process files completely
             response = openai_client.chat.completions.create(
-                model="gpt-4o",  # GPT-4o for better file processing
+                model="gpt-5",  # GPT-5 for better file processing and faster responses
                 messages=[
                     {
                         "role": "system",
@@ -1283,7 +1294,7 @@ Output ONLY the JSON array—no commentary or explanation. The JSON array must c
             
             # No timeout - client initialized with timeout=None to process files completely
             response = openai_client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5",  # GPT-5 for better accuracy and faster processing
                 messages=[
                     {
                         "role": "system",
