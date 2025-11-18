@@ -4660,48 +4660,89 @@ def login_page():
                         portfolio_id = portfolio_result['portfolio']['id']
                         
                         # Process uploaded files (as per your image)
+                        file_processing_complete = False
                         if uploaded_files:
-                            st.info("📁 Processing uploaded files...")
-                            imported_count = process_uploaded_files(uploaded_files, user['id'], portfolio_id)
-                            
-                            if imported_count > 0:
-                                # Auto-fetch comprehensive data (info + prices + weekly) in bulk
-                                st.info("🔍 Auto-fetching comprehensive data (info + prices + historical)...")
+                            try:
+                                st.info("📁 Processing uploaded files...")
+                                print(f"[REGISTRATION] Starting file processing for {len(uploaded_files)} file(s)...")
+                                import sys
+                                sys.stdout.flush()
                                 
-                                try:
-                                    holdings = db.get_user_holdings(user['id'])
-                                    if holdings:
-                                        # Get unique tickers and asset types
-                                        unique_tickers = list(set([h['ticker'] for h in holdings if h.get('ticker')]))
-                                        asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings if h.get('ticker')}
+                                imported_count = process_uploaded_files(uploaded_files, user['id'], portfolio_id)
+                                print(f"[REGISTRATION] File processing complete: {imported_count} transactions imported")
+                                sys.stdout.flush()
+                                
+                                if imported_count > 0:
+                                    # Auto-fetch comprehensive data (info + prices + weekly) in bulk
+                                    st.info("🔍 Auto-fetching comprehensive data (info + prices + historical)...")
+                                    print(f"[REGISTRATION] Starting comprehensive data fetch...")
+                                    sys.stdout.flush()
+                                    
+                                    try:
+                                        holdings = db.get_user_holdings(user['id'])
+                                        if holdings:
+                                            # Get unique tickers and asset types
+                                            unique_tickers = list(set([h['ticker'] for h in holdings if h.get('ticker')]))
+                                            asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings if h.get('ticker')}
+                                            
+                                            if unique_tickers and st.session_state.bulk_ai_fetcher.available:
+                                                st.caption("📊 Bulk fetching all data in one AI call...")
+                                                print(f"[REGISTRATION] Bulk fetching data for {len(unique_tickers)} tickers...")
+                                                sys.stdout.flush()
+                                                # Fetch everything (stock info + current price + 52-week data) in ONE AI call
+                                                stock_ids = db.bulk_process_new_stocks_with_comprehensive_data(
+                                                    tickers=unique_tickers,
+                                                    asset_types=asset_types
+                                                )
+                                                st.caption(f"✅ Fetched comprehensive data for {len(stock_ids)} tickers")
+                                                print(f"[REGISTRATION] ✅ Bulk fetch complete: {len(stock_ids)} tickers")
+                                                sys.stdout.flush()
+                                            else:
+                                                # Fallback to individual updates
+                                                st.caption("📊 Fetching prices individually...")
+                                                print(f"[REGISTRATION] Fetching prices individually for {len(holdings)} holdings...")
+                                                sys.stdout.flush()
+                                                st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
+                                                st.caption(f"✅ Updated {len(holdings)} holdings")
+                                                print(f"[REGISTRATION] ✅ Individual price fetch complete")
+                                                sys.stdout.flush()
                                         
-                                        if unique_tickers and st.session_state.bulk_ai_fetcher.available:
-                                            st.caption("📊 Bulk fetching all data in one AI call...")
-                                            # Fetch everything (stock info + current price + 52-week data) in ONE AI call
-                                            stock_ids = db.bulk_process_new_stocks_with_comprehensive_data(
-                                                tickers=unique_tickers,
-                                                asset_types=asset_types
-                                            )
-                                            st.caption(f"✅ Fetched comprehensive data for {len(stock_ids)} tickers")
-                                        else:
-                                            # Fallback to individual updates
-                                            st.caption("📊 Fetching prices individually...")
-                                            st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
-                                            st.caption(f"✅ Updated {len(holdings)} holdings")
-                                    
-                                    st.success("✅ Registration, file processing, and comprehensive data fetching complete!")
-                                    
-                                except Exception as e:
-                                    st.warning(f"⚠️ Registration successful, but data fetching had issues: {str(e)[:100]}")
+                                        st.success("✅ Registration, file processing, and comprehensive data fetching complete!")
+                                        file_processing_complete = True
+                                        
+                                    except Exception as e:
+                                        print(f"[REGISTRATION] ⚠️ Data fetching error: {str(e)}")
+                                        import traceback
+                                        traceback.print_exc()
+                                        sys.stdout.flush()
+                                        st.warning(f"⚠️ Registration successful, but data fetching had issues: {str(e)[:100]}")
+                                        st.success("✅ Registration and file processing complete!")
+                                        file_processing_complete = True
+                                else:
                                     st.success("✅ Registration and file processing complete!")
-                            else:
-                                st.success("✅ Registration and file processing complete!")
+                                    file_processing_complete = True
+                            except Exception as e:
+                                print(f"[REGISTRATION] ❌ File processing error: {str(e)}")
+                                import traceback
+                                traceback.print_exc()
+                                sys.stdout.flush()
+                                st.error(f"❌ Registration successful, but file processing failed: {str(e)[:150]}")
+                                st.info("⚠️ You can upload files later from the dashboard.")
+                                file_processing_complete = True  # Still allow redirect even if processing failed
                         else:
                             st.success("✅ Registration successful!")
+                            file_processing_complete = True
                         
-                        st.info("🔄 Redirecting to dashboard...")
-                        time.sleep(2)  # Brief pause to show success message
-                        st.rerun()
+                        # Only redirect after processing is confirmed complete
+                        if file_processing_complete:
+                            print(f"[REGISTRATION] ✅ All processing complete, redirecting to dashboard...")
+                            import sys
+                            sys.stdout.flush()
+                            st.info("🔄 Redirecting to dashboard...")
+                            time.sleep(2)  # Brief pause to show success message
+                            st.rerun()
+                        else:
+                            st.warning("⚠️ File processing is still in progress. Please wait...")
                 else:
                     st.error(f"Registration failed: {result['error']}")
 
