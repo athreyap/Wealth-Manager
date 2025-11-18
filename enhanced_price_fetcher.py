@@ -1356,8 +1356,7 @@ class EnhancedPriceFetcher:
         try:
             response = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                max_completion_tokens=150,
+                messages=[{"role": "user", "content": prompt}]
             )
             ai_text = response.choices[0].message.content.strip()
             suggestions: List[str] = []
@@ -2288,8 +2287,7 @@ If you cannot find the ticker, return exactly: NOT_FOUND"""
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt}
-                        ],
-                        max_completion_tokens=20,
+                        ]
                     )
                     
                     if response and response.choices:
@@ -2605,10 +2603,8 @@ If you cannot find the ticker, return exactly: NOT_FOUND"""
             Current NAV: """
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",  # GPT-5-mini for faster, cost-effective gold price fetching
-                messages=[{"role": "user", "content": prompt}],
-                max_completion_tokens=50,
-                # Note: GPT-5-mini only supports default temperature (1)
+                model="gpt-4o-mini",  # gpt-4o-mini for faster, cost-effective gold price fetching
+                messages=[{"role": "user", "content": prompt}]
             )
             
             ai_response = response.choices[0].message.content.strip()
@@ -2766,9 +2762,7 @@ The current 24k gold price per gram in India is:"""
             
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o",  # gpt-4o for better accuracy and SGB price fetching
-                messages=[{"role": "user", "content": prompt}],
-                max_completion_tokens=50,
-                # Note: GPT-5 only supports default temperature (1)
+                messages=[{"role": "user", "content": prompt}]
             )
             
             ai_response = response.choices[0].message.content.strip()
@@ -2889,9 +2883,7 @@ Current Market Trading Price:"""
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
-                    ],
-                    max_completion_tokens=100,
-                    # Note: GPT-5 only supports default temperature (1)
+                    ]
                 )
                 
                 ai_response = response.choices[0].message.content.strip()
@@ -2967,9 +2959,7 @@ Current Price:"""
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
-                    ],
-                    max_completion_tokens=100,
-                    # Note: GPT-5 only supports default temperature (1)
+                    ]
                 )
                 
                 ai_response = response.choices[0].message.content.strip()
@@ -3101,9 +3091,7 @@ If not found, return: NOT_FOUND"""
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
-                ],
-                max_completion_tokens=20,  # We only need a number
-                # Note: GPT-5-mini only supports default temperature (1)
+                ]
             )
             
             if response and response.choices:
@@ -3736,9 +3724,7 @@ If you cannot estimate, return: NOT_FOUND"""
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
-                ],
-                max_completion_tokens=50,
-                # Note: GPT-5 only supports default temperature (1)
+                ]
             )
             
             if response and response.choices:

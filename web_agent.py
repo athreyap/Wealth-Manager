@@ -810,8 +810,7 @@ def _run_document_analysis(
 
             response = openai.chat.completions.create(
                 model="gpt-4o",
-                messages=[{"role": "user", "content": analysis_prompt}],
-                max_completion_tokens=1000,
+                messages=[{"role": "user", "content": analysis_prompt}]
             )
 
             ai_analysis = response.choices[0].message.content
@@ -1325,8 +1324,7 @@ Number each security from 1 to {len(remaining)}. If uncertain, return asset_type
                             {"role": "user", "content": prompt}
                         ],
                         response_format={"type": "json_object"},
-                        temperature=0.3,
-                        max_tokens=min(4000, len(remaining) * 50)  # ~50 tokens per security
+                        temperature=0.3
                     )
                     
                     import json
@@ -1521,8 +1519,7 @@ If uncertain, return asset_type based on ticker pattern and name."""
                             {"role": "user", "content": prompt}
                         ],
                         response_format={"type": "json_object"},
-                        temperature=0.3,
-                        max_tokens=100
+                        temperature=0.3
                     )
                     
                     import json
@@ -2168,8 +2165,7 @@ Return ALL transactions found on ALL pages in this batch, clearly separated by p
                             "role": "user",
                             "content": batch_content
                         }
-                    ],
-                    max_tokens=16000,  # Higher limit for batch processing
+                    ]
                 )
                 
                 # Process batch response
@@ -3160,8 +3156,7 @@ IMPORTANT:
                     "role": "user",
                     "content": prompt
                 }
-            ],
-            max_completion_tokens=500
+            ]
         )
         
         ai_response = response.choices[0].message.content.strip()
@@ -5232,8 +5227,7 @@ def ai_select_amfi_code(
                 },
                 {"role": "user", "content": user_content},
             ],
-            temperature=0,
-            max_tokens=200,
+            temperature=0
         )
     except Exception as exc:  # pragma: no cover - network dependent
         st.caption(f"   ⚠️ AI AMFI suggestion failed: {str(exc)[:80]}")
@@ -5287,8 +5281,7 @@ def ai_suggest_market_identifiers(
     try:
         response = run_gpt5_completion(
             messages=[system_message, user_message],
-            temperature=0,
-            max_tokens=400,
+            temperature=0
         )
     except Exception as exc:  # pragma: no cover - network dependent
         st.caption(f"   ⚠️ AI identifier suggestion failed: {str(exc)[:80]}")
@@ -5685,9 +5678,7 @@ Return ONLY the JSON object, nothing else."""
                     messages=[
                         {"role": "system", "content": "You are a financial ticker verification expert with access to real-time data. For each ticker, search online databases and verify it works with yfinance or mftool APIs. Return ONLY valid JSON with unique tickers for each holding."},
                         {"role": "user", "content": prompt}
-                    ],
-                    max_completion_tokens=2000
-                    # Note: GPT-5 only supports default temperature (1)
+                    ]
                 )
                 ai_response = response.choices[0].message.content
                 st.caption(f"   ✅ OpenAI response received")
@@ -9712,9 +9703,7 @@ def charts_page():
                         messages=[
                             {"role": "system", "content": "You are a professional risk analyst. Analyze the portfolio risk metrics and provide actionable risk management recommendations. Focus on diversification, position sizing, and risk mitigation strategies. Use emojis and be practical."},
                             {"role": "user", "content": risk_summary_text}
-                        ],
-                        max_completion_tokens=400,
-                        # Note: GPT-5-mini only supports default temperature (1)
+                        ]
                     )
                     
                     ai_risk_analysis = response.choices[0].message.content
@@ -11010,8 +10999,7 @@ def ai_assistant_page():
                                     messages=[{
                                         "role": "user",
                                         "content": f"Provide the latest financial news and market updates {news_query}. Include recent developments, market trends, and any significant events. Format as a list of news items with titles and brief summaries."
-                                    }],
-                                    max_completion_tokens=1000
+                                    }]
                                 )
                                 
                                 if ai_news_response.choices:
@@ -11400,9 +11388,7 @@ Always:
                             
                             response = openai.chat.completions.create(
                                 model="gpt-4o",  # Upgraded to GPT-5 for better results
-                                messages=[{"role": "user", "content": analysis_prompt}],
-                                max_completion_tokens=800,
-                                # Note: GPT-5 only supports default temperature (1)
+                                messages=[{"role": "user", "content": analysis_prompt}]
                             )
                             
                             fresh_analysis = response.choices[0].message.content

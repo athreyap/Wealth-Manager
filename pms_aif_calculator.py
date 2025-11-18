@@ -267,8 +267,7 @@ CRITICAL: Always provide a CAGR value (between 0.08 and 0.25 for typical Indian 
                             {"role": "user", "content": prompt}
                         ],
                         response_format={"type": "json_object"},
-                        temperature=0.3,
-                        max_tokens=200
+                        temperature=0.3
                     )
                     model_to_use = model
                     print(f"[PMS_AIF_AI] ✅ {model} succeeded for {ticker}")

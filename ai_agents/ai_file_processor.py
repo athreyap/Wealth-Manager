@@ -466,8 +466,7 @@ Return ALL transactions found on ALL pages in this batch, clearly separated by p
                                 "role": "user",
                                 "content": batch_content
                             }
-                        ],
-                        max_tokens=16000,  # Higher limit for batch processing
+                        ]
                     )
                     
                     # Process batch response
@@ -996,9 +995,6 @@ CRITICAL RULES:
                         "content": prompt
                     }
                 ],
-                # No token limit - use maximum allowed by model (GPT-4o supports up to 16,384 tokens)
-                # Setting to None or very high value to allow full responses
-                max_completion_tokens=16384  # Maximum for GPT-4o
                 # Note: No timeout - let the API take as long as needed
             )
             
@@ -1304,8 +1300,7 @@ Output ONLY the JSON array—no commentary or explanation. The JSON array must c
                         "role": "user",
                         "content": prompt
                     }
-                ],
-                max_completion_tokens=16384
+                ]
             )
             
             ai_response = response.choices[0].message.content.strip()

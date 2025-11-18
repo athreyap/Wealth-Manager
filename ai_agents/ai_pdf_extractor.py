@@ -123,9 +123,7 @@ Be conservative - only extract data you're confident about."""
                         "role": "user",
                         "content": prompt
                     }
-                ],
-                max_completion_tokens=4000,
-                # Note: GPT-5 only supports default temperature (1)
+                ]
             )
             
             # Parse AI response

@@ -99,9 +99,7 @@ Rules:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                response_format={"type": "json_object"},  # Force JSON
-                max_completion_tokens=200,
-                # Note: GPT-5 only supports default temperature (1)
+                response_format={"type": "json_object"}  # Force JSON
             )
             
             content = response.choices[0].message.content
@@ -198,9 +196,7 @@ Rules:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                response_format={"type": "json_object"},
-                max_completion_tokens=300,
-                # Note: GPT-5 only supports default temperature (1)
+                response_format={"type": "json_object"}
             )
             
             content = response.choices[0].message.content
