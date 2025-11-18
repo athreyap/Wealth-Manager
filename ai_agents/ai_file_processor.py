@@ -921,17 +921,9 @@ Output ONLY the JSON array—no commentary or explanation.
             import sys
             sys.stdout.flush()
             
-            # Determine if we need batch processing
-            # Estimate: ~200 chars per transaction, so 12,000 chars ≈ 60 transactions
-            # If content is larger, process in batches
-            MAX_CONTENT_PER_BATCH = 12000  # Characters per batch
-            needs_batching = content_length > MAX_CONTENT_PER_BATCH
-            
-            if needs_batching:
-                print(f"[AI_EXTRACT] 📦 Large file detected ({content_length} chars) - processing in batches...")
-                return self._process_large_file_in_batches(file_content, filename, file_type, is_vision_api_text, prompt_template=prompt)
-            
-            # For smaller files, process normally
+            # Process all files in one go - no batching
+            # GPT-4o can handle large inputs (128k tokens) and outputs (16,384 tokens)
+            # Process entire file in single API call for consistency and speed
             # Call OpenAI without timeout - let it take as long as needed
             openai_client = self._get_openai_client()
             if not openai_client:
