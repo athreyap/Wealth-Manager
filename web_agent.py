@@ -6311,9 +6311,13 @@ def extract_transactions_for_csv(uploaded_file, file_name: str, user_id: Optiona
             uploaded_file.seek(0)
         except Exception:
             pass
+        print(f"[FILE_PARSE] 🔄 Starting AI extraction for {file_name}...")
+        import sys
+        sys.stdout.flush()
         transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
         if transactions:
             print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions from Excel file")
+            sys.stdout.flush()
         else:
             print(f"[FILE_PARSE] ⚠️ AI extraction found no transactions, trying Python extraction as fallback...")
             # Fallback to Python if AI fails
@@ -11934,8 +11938,15 @@ def process_file_with_ai(uploaded_file, filename, user_id):
         status_placeholder = st.empty()
         status_placeholder.info(f"🤖 AI is analyzing {filename} and extracting transactions...")
         
+        # Log to terminal/console for Streamlit Cloud visibility
+        print(f"[PROCESS_FILE_WITH_AI] 🔄 Starting AI processing for {filename}")
+        import sys
+        sys.stdout.flush()
+        
         try:
             transactions = file_processor.process_file(uploaded_file, filename)
+            print(f"[PROCESS_FILE_WITH_AI] ✅ AI processing completed: {len(transactions) if transactions else 0} transactions extracted")
+            sys.stdout.flush()
             
             if transactions:
                 status_placeholder.success(f"✅ Successfully extracted {len(transactions)} transactions from {filename}")

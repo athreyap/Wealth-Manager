@@ -152,6 +152,8 @@ class AIFileProcessor(BaseAgent):
             content_preview = file_content[:200] if len(file_content) > 200 else file_content
             print(f"[AI_FILE_PROCESSOR] ✅ Extracted {len(file_content)} characters from {filename}")
             print(f"[AI_FILE_PROCESSOR]   Content preview: {content_preview}...")
+            import sys
+            sys.stdout.flush()
             
             # Use AI to extract transactions
             transactions = self._ai_extract_transactions(file_content, filename, file_type)
@@ -546,10 +548,18 @@ Return ALL transactions found on this page, even if the format is slightly diffe
                             continue
                         
                         # Log column names for debugging
-                        print(f"[AI_FILE_PROCESSOR] Sheet '{sheet_name}' columns: {list(df.columns)}")
-                        print(f"[AI_FILE_PROCESSOR] Sheet '{sheet_name}' shape: {df.shape}")
+                        log_cols = f"[AI_FILE_PROCESSOR] 📋 Sheet '{sheet_name}' columns: {list(df.columns)}"
+                        log_shape = f"[AI_FILE_PROCESSOR] 📊 Sheet '{sheet_name}' shape: {df.shape}"
+                        print(log_cols)
+                        print(log_shape)
+                        self.logger.info(log_cols)
+                        self.logger.info(log_shape)
                         if not df.empty:
-                            print(f"[AI_FILE_PROCESSOR] Sheet '{sheet_name}' first row sample: {df.iloc[0].to_dict()}")
+                            log_sample = f"[AI_FILE_PROCESSOR] 📝 Sheet '{sheet_name}' first row sample: {df.iloc[0].to_dict()}"
+                            print(log_sample)
+                            self.logger.info(log_sample)
+                        import sys
+                        sys.stdout.flush()
                         
                         # Add sheet name as header comment
                         sheet_contents.append(f"=== Sheet: {sheet_name} ===")
@@ -564,8 +574,14 @@ Return ALL transactions found on this page, even if the format is slightly diffe
                     
                     content = "\n".join(sheet_contents)
                     self.logger.info(f"Excel file {filename}: Extracted {len(all_sheets)} sheet(s), {len(content)} characters")
-                    print(f"[AI_FILE_PROCESSOR] ✅ Excel file {filename}: Extracted {len(all_sheets)} sheet(s), {len(content)} characters")
-                    print(f"[AI_FILE_PROCESSOR] CSV content preview (first 500 chars): {content[:500]}")
+                    log_msg1 = f"[AI_FILE_PROCESSOR] ✅ Excel file {filename}: Extracted {len(all_sheets)} sheet(s), {len(content)} characters"
+                    log_msg2 = f"[AI_FILE_PROCESSOR] CSV content preview (first 500 chars): {content[:500]}"
+                    print(log_msg1)
+                    print(log_msg2)
+                    self.logger.info(log_msg1)
+                    self.logger.info(log_msg2)
+                    import sys
+                    sys.stdout.flush()
                     return content, 'excel'
                 except ImportError as e:
                     error_msg = f"Missing Excel dependency. For .xlsx files, install: pip install openpyxl. For .xls files, install: pip install xlrd"
@@ -899,7 +915,11 @@ Output ONLY the JSON array—no commentary or explanation.
 """
 
             content_length = len(file_content)
-            print(f"[AI_EXTRACT] Content length: {content_length} chars, processing with AI...")
+            log_msg = f"[AI_EXTRACT] 📊 Content length: {content_length} chars, processing with AI..."
+            print(log_msg)
+            self.logger.info(log_msg)
+            import sys
+            sys.stdout.flush()
             
             # Determine if we need batch processing
             # Estimate: ~200 chars per transaction, so 12,000 chars ≈ 60 transactions
@@ -916,6 +936,9 @@ Output ONLY the JSON array—no commentary or explanation.
             openai_client = self._get_openai_client()
             if not openai_client:
                 self.logger.error("OpenAI client not available")
+                print(f"[AI_EXTRACT] ❌ OpenAI client not available")
+                import sys
+                sys.stdout.flush()
                 return []
             
             # Update prompt to use full content (not truncated)
@@ -925,6 +948,13 @@ Output ONLY the JSON array—no commentary or explanation.
                     f"{file_content[:12000] if len(file_content) <= 12000 else file_content[:10000] + '\n... (truncated) ...'}",
                     file_content
                 )
+            
+            # Log before API call - use both print and logger for Streamlit Cloud visibility
+            log_msg = f"[AI_EXTRACT] 🔄 Calling OpenAI API (model: gpt-4o, content: {len(file_content)} chars)..."
+            print(log_msg)
+            self.logger.info(log_msg)
+            import sys
+            sys.stdout.flush()
             
             # No timeout - client initialized with timeout=None to process files completely
             response = openai_client.chat.completions.create(
@@ -968,9 +998,20 @@ CRITICAL RULES:
             )
             
             # Extract JSON from response
+            log_msg = f"[AI_EXTRACT] ✅ OpenAI API call completed successfully"
+            print(log_msg)
+            self.logger.info(log_msg)
+            import sys
+            sys.stdout.flush()
+            
             ai_response = response.choices[0].message.content.strip()
-            print(f"[AI_EXTRACT] AI response length: {len(ai_response)} chars")
-            print(f"[AI_EXTRACT] AI response preview: {ai_response[:500]}...")
+            log_msg1 = f"[AI_EXTRACT] 📥 AI response received: {len(ai_response)} chars"
+            log_msg2 = f"[AI_EXTRACT] 📄 AI response preview: {ai_response[:500]}..."
+            print(log_msg1)
+            print(log_msg2)
+            self.logger.info(log_msg1)
+            self.logger.info(log_msg2)
+            sys.stdout.flush()
             
             # Check if response is empty or just whitespace
             if not ai_response or len(ai_response.strip()) == 0:
