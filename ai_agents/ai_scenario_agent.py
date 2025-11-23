@@ -108,7 +108,7 @@ class AIScenarioAnalysisAgent(BaseAgent):
             current_year = datetime.now().year
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",  # gpt-4o for better scenario analysis
+                model="gpt-5",  # gpt-5 for better scenario analysis
                 messages=[
                     {
                         "role": "system",

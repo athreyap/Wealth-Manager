@@ -15,8 +15,8 @@ except ImportError as exc:  # pragma: no cover - environment specific
 
 
 DEFAULT_ASSISTANT_KEY = "wealth_master_gpt5"
-DEFAULT_ASSISTANT_MODEL_PRIMARY = "gpt-4o"
-DEFAULT_ASSISTANT_MODEL_FALLBACK = "gpt-4o-mini"  # gpt-4o-mini as fallback
+DEFAULT_ASSISTANT_MODEL_PRIMARY = "gpt-5"
+DEFAULT_ASSISTANT_MODEL_FALLBACK = "gpt-4o"  # gpt-4o as fallback
 DEFAULT_ASSISTANT_INSTRUCTIONS = (
     "You are the Wealth Manager AI core assistant."
     " Use Moneycontrol, NSE/BSE knowledge, AMFI data, and all provided context"

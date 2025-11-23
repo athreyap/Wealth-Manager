@@ -91,7 +91,7 @@ class AIInvestmentStrategyAgent(BaseAgent):
             current_year = datetime.now().year
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",  # gpt-4o for better strategy recommendations
+                model="gpt-5",  # gpt-5 for better strategy recommendations
                 messages=[
                     {
                         "role": "system",

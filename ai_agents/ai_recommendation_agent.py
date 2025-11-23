@@ -138,7 +138,7 @@ class AIInvestmentRecommendationAgent(BaseAgent):
             current_year = datetime.now().year
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",  # gpt-4o for better investment recommendations
+                model="gpt-5",  # gpt-5 for better investment recommendations
                 messages=[
                     {
                         "role": "system",

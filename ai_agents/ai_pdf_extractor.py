@@ -88,7 +88,7 @@ class AIPDFTransactionExtractor(BaseAgent):
         
         try:
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",  # gpt-4o for better PDF extraction
+                model="gpt-5",  # gpt-5 for better PDF extraction
                 messages=[
                     {
                         "role": "system",
@@ -134,7 +134,7 @@ Be conservative - only extract data you're confident about."""
             
             # Store metadata
             self.extraction_metadata = {
-                "ai_model": "gpt-4o",
+                "ai_model": "gpt-5",
                 "tokens_used": response.usage.total_tokens if response.usage else 0,
                 "extraction_timestamp": datetime.now().isoformat(),
                 "filename": filename

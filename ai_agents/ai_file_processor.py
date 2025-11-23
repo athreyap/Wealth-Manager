@@ -456,7 +456,7 @@ Return ALL transactions found on ALL pages in this batch, clearly separated by p
                         raise Exception("OpenAI client not available")
                     # No timeout - client initialized with timeout=None to process files completely
                     response = openai_client.chat.completions.create(
-                        model="gpt-4o",  # gpt-4o with vision support for better PDF image processing
+                        model="gpt-5",  # gpt-5 with vision support for better PDF image processing
                         messages=[
                             {
                                 "role": "system",
@@ -961,7 +961,7 @@ Output ONLY the JSON array—no commentary or explanation. The JSON array must c
             
             # No timeout - client initialized with timeout=None to process files completely
             response = openai_client.chat.completions.create(
-                model="gpt-4o",  # gpt-4o for better file processing and faster responses
+                model="gpt-5",  # gpt-5 for better file processing and faster responses
                 messages=[
                     {
                         "role": "system",
@@ -1290,7 +1290,7 @@ Output ONLY the JSON array—no commentary or explanation. The JSON array must c
             
             # No timeout - client initialized with timeout=None to process files completely
             response = openai_client.chat.completions.create(
-                model="gpt-4o",  # gpt-4o for better accuracy and faster processing
+                model="gpt-5",  # gpt-5 for better accuracy and faster processing
                 messages=[
                     {
                         "role": "system",

@@ -1397,7 +1397,7 @@ class EnhancedPriceFetcher:
 
         try:
             response = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-5-mini",
                 messages=[{"role": "user", "content": prompt}]
             )
             ai_text = response.choices[0].message.content.strip()
@@ -2325,7 +2325,7 @@ Examples:
 If you cannot find the ticker, return exactly: NOT_FOUND"""
                     
                     response = self.openai_client.chat.completions.create(
-                        model="gpt-4o-mini",  # GPT-5-mini for faster, cost-effective stock ticker resolution
+                        model="gpt-5-mini",  # GPT-5-mini for faster, cost-effective stock ticker resolution
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt}
@@ -2645,7 +2645,7 @@ If you cannot find the ticker, return exactly: NOT_FOUND"""
             Current NAV: """
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",  # gpt-4o-mini for faster, cost-effective gold price fetching
+                model="gpt-5-mini",  # gpt-4o-mini for faster, cost-effective gold price fetching
                 messages=[{"role": "user", "content": prompt}]
             )
             
@@ -2803,7 +2803,7 @@ IMPORTANT INSTRUCTIONS:
 The current 24k gold price per gram in India is:"""
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",  # gpt-4o for better accuracy and SGB price fetching
+                model="gpt-5",  # gpt-5 for better accuracy and SGB price fetching
                 messages=[{"role": "user", "content": prompt}]
             )
             
@@ -2921,7 +2921,7 @@ Example: 14786.49
 Current Market Trading Price:"""
                 
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-4o",  # gpt-4o for better bond price fetching
+                    model="gpt-5",  # gpt-5 for better bond price fetching
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -2997,7 +2997,7 @@ Current Price:"""
                 
                 # Use GPT-5-mini for non-SGB bonds (faster and cost-effective)
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model="gpt-5-mini",
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -3129,7 +3129,7 @@ If not found, return: NOT_FOUND"""
             
             # Call OpenAI with optimized parameters
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",  # GPT-5-mini: Fast and cost-effective for PMS/AIF prices
+                model="gpt-5-mini",  # GPT-5-mini: Fast and cost-effective for PMS/AIF prices
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -3762,7 +3762,7 @@ If you cannot estimate, return: NOT_FOUND"""
                 return None
             
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",  # gpt-4o for better historical data accuracy
+                model="gpt-5",  # gpt-5 for better historical data accuracy
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}

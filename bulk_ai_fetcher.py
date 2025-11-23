@@ -18,7 +18,7 @@ class BulkAIFetcher:
     
     def __init__(self):
         try:
-            self.client = OpenAI(api_key=st.secrets["api_keys"]["openai"])
+            self.client = OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
             self.available = True
         except Exception as e:
             self.available = False
@@ -94,7 +94,7 @@ Rules:
         
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4o",  # gpt-4o for better accuracy and structured JSON
+                model="gpt-5",  # gpt-5 for better accuracy and structured JSON
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -191,7 +191,7 @@ Rules:
         
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4o",  # gpt-4o
+                model="gpt-5",  # gpt-5
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}

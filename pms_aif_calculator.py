@@ -33,7 +33,7 @@ class PMS_AIF_Calculator:
         pms_aif_name: str = None
     ) -> Dict[str, Any]:
         """
-        Calculate current value and generate 52-week history for PMS/AIF using AI
+        Calculate current value and generate 52-week history for PMS/AIF using AI to fetch actual NAVs
         
         Args:
             ticker: PMS/AIF registration code (e.g., INP000005000)
@@ -52,8 +52,64 @@ class PMS_AIF_Calculator:
             years_elapsed = (current_dt - invest_dt).days / 365.25
             months_elapsed = years_elapsed * 12
             
-            # CRITICAL: Use AI to get CAGR - no random/conservative values
-            print(f"[PMS_AIF] 🔍 Fetching CAGR for {ticker} ({'AIF' if is_aif else 'PMS'}) - Investment: ₹{investment_amount:,.2f} on {investment_date}")
+            # CRITICAL: Use AI to fetch actual NAVs instead of calculating from CAGR
+            print(f"[PMS_AIF] Fetching actual NAVs for {ticker} ({'AIF' if is_aif else 'PMS'}) - Investment: Rs. {investment_amount:,.2f} on {investment_date}")
+            nav_data = self._get_navs_from_ai(ticker, is_aif, pms_aif_name, investment_date)
+            
+            if nav_data and nav_data.get('navs') and len(nav_data.get('navs', [])) > 0:
+                # Use AI-provided NAVs
+                navs = nav_data['navs']
+                current_nav = nav_data.get('current_nav', navs[-1].get('nav', 0) if navs else 0)
+                source = nav_data.get('source', 'AI')
+                print(f"[PMS_AIF] Got {len(navs)} NAV values from AI for {ticker}, current NAV: Rs. {current_nav:,.2f}")
+                
+                # Calculate current value based on NAV
+                initial_nav = navs[0].get('nav', 0) if navs else investment_amount
+                if initial_nav > 0:
+                    units = investment_amount / initial_nav
+                    current_value = units * current_nav
+                else:
+                    current_value = investment_amount
+                
+                # Calculate CAGR from NAVs if we have enough data
+                cagr_used = 0
+                if len(navs) >= 2:
+                    first_nav = navs[0].get('nav', 0)
+                    last_nav = navs[-1].get('nav', 0)
+                    if first_nav > 0 and last_nav > 0:
+                        # Calculate CAGR from first to last NAV
+                        weeks_elapsed = len(navs) - 1
+                        years_elapsed_nav = weeks_elapsed / 52.0
+                        if years_elapsed_nav > 0:
+                            cagr_used = ((last_nav / first_nav) ** (1 / years_elapsed_nav)) - 1
+                
+                # Format weekly_values to match expected structure (price_date, price, asset_symbol, asset_type)
+                formatted_weekly_values = []
+                for nav_entry in navs:
+                    formatted_weekly_values.append({
+                        'price_date': nav_entry.get('date'),
+                        'price': nav_entry.get('nav'),
+                        'asset_symbol': ticker,
+                        'asset_type': 'aif' if is_aif else 'pms'
+                    })
+                
+                return {
+                    'ticker': ticker,
+                    'initial_investment': investment_amount,
+                    'current_value': current_value,
+                    'absolute_gain': current_value - investment_amount,
+                    'percentage_gain': ((current_value - investment_amount) / investment_amount * 100) if investment_amount > 0 else 0,
+                    'years_elapsed': years_elapsed,
+                    'cagr_used': cagr_used,
+                    'cagr_period': f"{len(navs)} weeks",
+                    'source': source,
+                    'weekly_values': formatted_weekly_values,
+                    'current_nav': current_nav,
+                    'initial_nav': initial_nav
+                }
+            
+            # Fallback: Try CAGR-based calculation if NAV fetch fails
+            print(f"[PMS_AIF] WARNING: AI NAV fetch failed for {ticker}, falling back to CAGR calculation...")
             cagr_data = self._get_cagr_from_ai(ticker, is_aif, pms_aif_name, investment_date)
             
             if cagr_data and cagr_data.get('cagr') is not None and cagr_data.get('cagr') > 0:
@@ -61,10 +117,10 @@ class PMS_AIF_Calculator:
                 cagr = cagr_data['cagr']
                 cagr_period = cagr_data.get('period', 'AI Estimated')
                 source = f"AI ({cagr_period})"
-                print(f"[PMS_AIF] ✅ Got CAGR {cagr:.2%} ({cagr_period}) for {ticker}")
+                print(f"[PMS_AIF] Got CAGR {cagr:.2%} ({cagr_period}) for {ticker}")
             else:
                 # If AI fails, try SEBI data as fallback
-                print(f"[PMS_AIF] ⚠️ AI CAGR failed for {ticker}, trying SEBI data...")
+                print(f"[PMS_AIF] WARNING: AI CAGR failed for {ticker}, trying SEBI data...")
                 sebi_data = None
                 if not is_aif:
                     # Try SEBI PMS data
@@ -79,9 +135,9 @@ class PMS_AIF_Calculator:
                         cagr = best_cagr['cagr']
                         cagr_period = best_cagr.get('period', 'SEBI')
                         source = f"SEBI ({cagr_period})"
-                        print(f"[PMS_AIF] ✅ Got CAGR {cagr:.2%} from SEBI ({cagr_period}) for {ticker}")
+                        print(f"[PMS_AIF] Got CAGR {cagr:.2%} from SEBI ({cagr_period}) for {ticker}")
                     else:
-                        print(f"[PMS_AIF] ❌ SEBI data available but no valid CAGR found for {ticker}")
+                        print(f"[PMS_AIF] ERROR: SEBI data available but no valid CAGR found for {ticker}")
                         return {
                             'ticker': ticker,
                             'initial_investment': investment_amount,
@@ -96,7 +152,7 @@ class PMS_AIF_Calculator:
                             'error': f'AI and SEBI CAGR calculation failed. AI result: {cagr_data}, SEBI result: {best_cagr}'
                         }
                 else:
-                    print(f"[PMS_AIF] ❌ No SEBI data available for {ticker}")
+                    print(f"[PMS_AIF] ERROR: No SEBI data available for {ticker}")
                     return {
                         'ticker': ticker,
                         'initial_investment': investment_amount,
@@ -181,6 +237,199 @@ class PMS_AIF_Calculator:
             self._openai_client = None
             return None
     
+    def _get_navs_from_ai(
+        self,
+        ticker: str,
+        is_aif: bool,
+        pms_aif_name: str = None,
+        investment_date: str = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get actual NAVs (Net Asset Values) for PMS/AIF using AI - fetches 52 weeks of NAV data
+        
+        Args:
+            ticker: Registration code (e.g., INP000005000)
+            is_aif: True for AIF, False for PMS
+            pms_aif_name: Optional name for better context
+            investment_date: Investment date for context
+        
+        Returns:
+            Dict with navs (list of {date, nav}), current_nav, source or None
+        """
+        client = self._get_openai_client()
+        if not client:
+            return None
+        
+        try:
+            asset_type = "AIF" if is_aif else "PMS"
+            name_context = f" named '{pms_aif_name}'" if pms_aif_name else ""
+            date_context = f" invested on {investment_date}" if investment_date else ""
+            
+            # Generate list of dates for last 52 weeks (Mondays)
+            from datetime import timedelta
+            nav_dates = []
+            current_date = datetime.now()
+            for i in range(52):
+                week_date = current_date - timedelta(weeks=i)
+                # Get Monday of that week
+                monday = week_date - timedelta(days=week_date.weekday())
+                nav_dates.append(monday.strftime('%Y-%m-%d'))
+            nav_dates.reverse()  # Oldest first
+            
+            prompt = f"""You are a financial data expert. I need the actual NAV (Net Asset Value) data for a {asset_type} (Portfolio Management Service/Alternative Investment Fund) with registration code {ticker}{name_context}{date_context}.
+
+IMPORTANT INSTRUCTIONS:
+1. Search for the specific {asset_type} product with registration code {ticker}
+2. Fetch ACTUAL NAV values from SEBI, fund house website, or financial databases
+3. Provide NAV values for the last 52 weeks (one per week, typically Monday dates)
+4. If exact NAVs are not available, provide the closest available NAV data
+5. If only current NAV is available, use that and estimate historical NAVs based on typical performance patterns
+
+For Indian PMS/AIF products, NAVs are typically published:
+- Weekly or monthly on fund house websites
+- On SEBI website for registered products
+- On financial data platforms like Moneycontrol, Value Research, etc.
+
+Please provide:
+1. Current NAV (most recent available)
+2. Historical NAVs for the last 52 weeks (one per week)
+3. The source of this data (e.g., "SEBI", "Fund House Website", "Financial Database", "Estimated")
+4. Whether this is exact data or estimated
+
+Return ONLY a JSON object with this exact format:
+{{
+    "current_nav": 150.50,
+    "source": "SEBI/Fund House Website",
+    "data_type": "exact",
+    "navs": [
+        {{"date": "2024-01-01", "nav": 100.00}},
+        {{"date": "2024-01-08", "nav": 101.50}},
+        {{"date": "2024-01-15", "nav": 102.25}},
+        ...
+        {{"date": "{nav_dates[-1]}", "nav": 150.50}}
+    ]
+}}
+
+OR if using estimated/closest available:
+{{
+    "current_nav": 150.50,
+    "source": "Estimated from similar products",
+    "data_type": "estimated",
+    "navs": [
+        {{"date": "2024-01-01", "nav": 100.00}},
+        ...
+    ]
+}}
+
+CRITICAL: 
+- Provide at least 12 weeks of NAV data (preferably 52 weeks)
+- Ensure NAVs are in chronological order (oldest first)
+- Use actual dates from the list: {', '.join(nav_dates[:5])} ... {', '.join(nav_dates[-3:])}
+- NAV values should be positive numbers
+- If you cannot find exact NAVs, estimate based on typical {asset_type} performance patterns"""
+
+            # Use gpt-5 as primary, with gpt-4o as fallback
+            models_to_try = ["gpt-5", "gpt-4o"]
+            model_to_use = None
+            response = None
+            last_error = None
+            
+            for model in models_to_try:
+                try:
+                    print(f"[PMS_AIF_AI] Fetching NAVs using {model} for {ticker}...")
+                    # gpt-5 only supports default temperature (1), other models can use lower temperature
+                    request_params = {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": "You are a financial data expert. Provide accurate NAV data for Indian PMS/AIF products. Return only valid JSON with actual NAV values."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "response_format": {"type": "json_object"}
+                    }
+                    # Only add temperature for non-gpt-5 models
+                    if model != "gpt-5":
+                        request_params["temperature"] = 0.2  # Lower temperature for more accurate data
+                    response = client.chat.completions.create(**request_params)
+                    model_to_use = model
+                    print(f"[PMS_AIF_AI] [OK] {model} succeeded for {ticker}")
+                    break
+                except Exception as model_error:
+                    error_str = str(model_error).lower()
+                    last_error = model_error
+                    print(f"[PMS_AIF_AI] [WARNING] {model} failed for {ticker}: {str(model_error)[:150]}")
+                    continue
+            
+            if not response:
+                print(f"[PMS_AIF_AI] [ERROR] All models failed for {ticker}. Last error: {str(last_error)[:200]}")
+                return None
+            
+            content = response.choices[0].message.content
+            print(f"[PMS_AIF_AI] Got NAV response from {model_to_use} for {ticker}: {content[:300]}")
+            
+            # Try to parse JSON
+            try:
+                result = json.loads(content)
+                print(f"[PMS_AIF_AI] Parsed JSON result: {len(result.get('navs', []))} NAVs found")
+            except json.JSONDecodeError as e:
+                print(f"[PMS_AIF_AI] [ERROR] JSON parse error for {ticker}: {str(e)}")
+                print(f"[PMS_AIF_AI]   Raw content: {content[:500]}")
+                # Try to extract JSON from markdown code blocks
+                import re
+                json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
+                if json_match:
+                    try:
+                        result = json.loads(json_match.group(1))
+                        print(f"[PMS_AIF_AI] Extracted JSON from markdown: {len(result.get('navs', []))} NAVs")
+                    except:
+                        print(f"[PMS_AIF_AI] [ERROR] Failed to parse extracted JSON")
+                        return None
+                else:
+                    print(f"[PMS_AIF_AI] [ERROR] No JSON found in response")
+                    return None
+            
+            navs = result.get('navs', [])
+            if navs and len(navs) > 0:
+                # Validate NAVs
+                valid_navs = []
+                for nav_entry in navs:
+                    if isinstance(nav_entry, dict) and 'nav' in nav_entry and 'date' in nav_entry:
+                        nav_value = nav_entry.get('nav')
+                        try:
+                            nav_float = float(nav_value)
+                            if nav_float > 0:
+                                valid_navs.append({
+                                    'date': nav_entry.get('date'),
+                                    'nav': nav_float
+                                })
+                        except (ValueError, TypeError):
+                            continue
+                
+                if valid_navs:
+                    current_nav = result.get('current_nav', valid_navs[-1].get('nav', 0))
+                    source = result.get('source', 'AI')
+                    data_type = result.get('data_type', 'estimated')
+                    
+                    print(f"[PMS_AIF_AI] Validated {len(valid_navs)} NAVs for {ticker}, current NAV: Rs. {current_nav:,.2f}")
+                    
+                    return {
+                        'navs': valid_navs,
+                        'current_nav': float(current_nav) if current_nav else valid_navs[-1].get('nav', 0),
+                        'source': f"{source} ({data_type})",
+                        'data_type': data_type
+                    }
+                else:
+                    print(f"[PMS_AIF_AI] ERROR: No valid NAVs found in response")
+                    return None
+            else:
+                print(f"[PMS_AIF_AI] ERROR: No NAVs in response")
+                return None
+                
+        except Exception as e:
+            print(f"[PMS_AIF_AI] ERROR: Error fetching NAVs: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
     def _get_cagr_from_ai(
         self,
         ticker: str,
@@ -251,47 +500,51 @@ OR if using closest available/estimated:
 
 CRITICAL: Always provide a CAGR value (between 0.08 and 0.25 for typical Indian PMS/AIF). Only return null if you cannot provide any reasonable estimate."""
 
-            # Use gpt-4o as primary, with gpt-4o-mini as fallback
-            models_to_try = ["gpt-4o", "gpt-4o-mini"]
+            # Use gpt-5 as primary, with gpt-4o as fallback
+            models_to_try = ["gpt-5", "gpt-4o"]
             model_to_use = None
             response = None
             last_error = None
             
             for model in models_to_try:
                 try:
-                    print(f"[PMS_AIF_AI] 🔄 Trying model: {model} for {ticker}...")
-                    response = client.chat.completions.create(
-                        model=model,
-                        messages=[
+                    print(f"[PMS_AIF_AI] Trying model: {model} for {ticker}...")
+                    # gpt-5 only supports default temperature (1), other models can use lower temperature
+                    request_params = {
+                        "model": model,
+                        "messages": [
                             {"role": "system", "content": "You are a financial data expert. Provide accurate CAGR data for Indian PMS/AIF products. Return only valid JSON."},
                             {"role": "user", "content": prompt}
                         ],
-                        response_format={"type": "json_object"},
-                        temperature=0.3
-                    )
+                        "response_format": {"type": "json_object"}
+                    }
+                    # Only add temperature for non-gpt-5 models
+                    if model != "gpt-5":
+                        request_params["temperature"] = 0.3
+                    response = client.chat.completions.create(**request_params)
                     model_to_use = model
-                    print(f"[PMS_AIF_AI] ✅ {model} succeeded for {ticker}")
+                    print(f"[PMS_AIF_AI] [OK] {model} succeeded for {ticker}")
                     break
                 except Exception as model_error:
                     error_str = str(model_error).lower()
                     last_error = model_error
-                    print(f"[PMS_AIF_AI] ⚠️ {model} failed for {ticker}: {str(model_error)[:150]}")
+                    print(f"[PMS_AIF_AI] [WARNING] {model} failed for {ticker}: {str(model_error)[:150]}")
                     # Continue to next model
                     continue
             
             if not response:
-                print(f"[PMS_AIF_AI] ❌ All models failed for {ticker}. Last error: {str(last_error)[:200]}")
+                print(f"[PMS_AIF_AI] [ERROR] All models failed for {ticker}. Last error: {str(last_error)[:200]}")
                 return None
             
             content = response.choices[0].message.content
-            print(f"[PMS_AIF_AI] ✅ Got response from {model_to_use} for {ticker}: {content[:200]}")
+            print(f"[PMS_AIF_AI] Got response from {model_to_use} for {ticker}: {content[:200]}")
             
             # Try to parse JSON
             try:
                 result = json.loads(content)
-                print(f"[PMS_AIF_AI] ✅ Parsed JSON result: {result}")
+                print(f"[PMS_AIF_AI] Parsed JSON result: {result}")
             except json.JSONDecodeError as e:
-                print(f"[PMS_AIF_AI] ❌ JSON parse error for {ticker}: {str(e)}")
+                print(f"[PMS_AIF_AI] [ERROR] JSON parse error for {ticker}: {str(e)}")
                 print(f"[PMS_AIF_AI]   Raw content: {content}")
                 # Try to extract JSON from markdown code blocks
                 import re
@@ -299,9 +552,9 @@ CRITICAL: Always provide a CAGR value (between 0.08 and 0.25 for typical Indian 
                 if json_match:
                     try:
                         result = json.loads(json_match.group(1))
-                        print(f"[PMS_AIF_AI] ✅ Extracted JSON from markdown: {result}")
+                        print(f"[PMS_AIF_AI] Extracted JSON from markdown: {result}")
                     except:
-                        print(f"[PMS_AIF_AI] ❌ Failed to parse extracted JSON")
+                        print(f"[PMS_AIF_AI] [ERROR] Failed to parse extracted JSON")
                         return None
                 else:
                     # Try to find JSON object in content
@@ -309,12 +562,12 @@ CRITICAL: Always provide a CAGR value (between 0.08 and 0.25 for typical Indian 
                     if json_match:
                         try:
                             result = json.loads(json_match.group(0))
-                            print(f"[PMS_AIF_AI] ✅ Extracted JSON object: {result}")
+                            print(f"[PMS_AIF_AI] Extracted JSON object: {result}")
                         except:
-                            print(f"[PMS_AIF_AI] ❌ Failed to parse extracted JSON object")
+                            print(f"[PMS_AIF_AI] ERROR: Failed to parse extracted JSON object")
                             return None
                     else:
-                        print(f"[PMS_AIF_AI] ❌ No JSON found in response")
+                        print(f"[PMS_AIF_AI] ERROR: No JSON found in response")
                         return None
             
             cagr_value = result.get('cagr')
@@ -349,7 +602,7 @@ CRITICAL: Always provide a CAGR value (between 0.08 and 0.25 for typical Indian 
             return None
             
         except Exception as e:
-            print(f"[PMS_AIF_AI] ⚠️ AI CAGR fetch failed for {ticker}: {str(e)}")
+            print(f"[PMS_AIF_AI] WARNING: AI CAGR fetch failed for {ticker}: {str(e)}")
             return None
     
     def _get_sebi_cagr(self, ticker: str, is_aif: bool) -> Optional[Dict[str, Any]]:
