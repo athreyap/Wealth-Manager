@@ -4228,7 +4228,23 @@ def detect_corporate_actions(user_id, db, holdings=None):
                 if split_series is not None and not split_series.empty:
                     # Get all splits from last 2 years, not just the last one
                     two_years_ago = datetime.now() - timedelta(days=730)
-                    recent_splits = split_series[split_series.index >= two_years_ago] if hasattr(split_series.index, '__ge__') else split_series
+                    # Ensure timezone-naive for comparison
+                    if two_years_ago.tzinfo is not None:
+                        two_years_ago = two_years_ago.replace(tzinfo=None)
+                    
+                    # Normalize pandas Timestamp index to timezone-naive for comparison
+                    try:
+                        # Convert index to timezone-naive if it's timezone-aware
+                        if split_series.index.tz is not None:
+                            split_index_naive = split_series.index.tz_localize(None)
+                        else:
+                            split_index_naive = split_series.index
+                        
+                        # Filter splits from last 2 years
+                        recent_splits = split_series[split_index_naive >= two_years_ago]
+                    except Exception:
+                        # If filtering fails, use all splits
+                        recent_splits = split_series
                     
                     if not recent_splits.empty:
                         # Use the most recent split
@@ -4239,6 +4255,17 @@ def detect_corporate_actions(user_id, db, holdings=None):
                         last_ratio = float(split_series.iloc[-1])
                         last_date = split_series.index[-1]
                     
+                    # Normalize last_date to timezone-naive if needed
+                    if hasattr(last_date, 'tz_localize'):
+                        if last_date.tz is not None:
+                            last_date = last_date.tz_localize(None)
+                    elif hasattr(last_date, 'to_pydatetime'):
+                        last_date_dt = last_date.to_pydatetime()
+                        if last_date_dt.tzinfo is not None:
+                            last_date = last_date_dt.replace(tzinfo=None)
+                        else:
+                            last_date = last_date_dt
+                    
                     if last_ratio > 0:
                         # yfinance reports 0.25 for 4:1 split etc.
                         if last_ratio < 1.0:
@@ -4246,11 +4273,21 @@ def detect_corporate_actions(user_id, db, holdings=None):
                         else:
                             resolved_ratio = round(last_ratio)
                         
-                        print(f"[CORPORATE_ACTIONS] ✅ {symbol}: Found split on {last_date} with ratio {last_ratio:.4f} -> {resolved_ratio}:1")
+                        # Convert last_date to string for return
+                        if hasattr(last_date, 'date'):
+                            last_date_str = str(last_date.date())
+                        elif hasattr(last_date, 'strftime'):
+                            last_date_str = last_date.strftime('%Y-%m-%d')
+                        else:
+                            last_date_str = str(last_date)
                         
-                        return last_date, resolved_ratio
+                        print(f"[CORPORATE_ACTIONS] ✅ {symbol}: Found split on {last_date_str} with ratio {last_ratio:.4f} -> {resolved_ratio}:1")
+                        
+                        return last_date_str, resolved_ratio
             except Exception as e:
                 print(f"[CORPORATE_ACTIONS] ⚠️ {symbol}: Error fetching split info: {str(e)[:150]}")
+                import traceback
+                print(f"[CORPORATE_ACTIONS] 🔍 {symbol}: Full error: {traceback.format_exc()[:300]}")
             return None
 
         def _find_split_confirmation(ticker_code: str) -> Optional[Tuple[str, float]]:
@@ -10782,6 +10819,10 @@ def ai_assistant_page():
     except Exception:
         st.session_state.chat_threads = []
     
+    # Get portfolio context (needed for sidebar)
+    holdings = get_cached_holdings(user['id'])
+    user_pdfs = db.get_user_pdfs(user['id'])
+    
     # Sidebar for chat threads (like ChatGPT)
     with st.sidebar:
         st.header("💬 Chat History")
@@ -10814,14 +10855,70 @@ def ai_assistant_page():
         
         st.markdown("---")
         
-        # PDF context status
-        pdf_count = len(db.get_user_pdfs(user['id']))
+        # Model status - GPT-5 is PRIMARY
+        st.caption("🤖 **AI Model:** GPT-5 (Primary)")
+        st.caption("   Fallback: gpt-4o")
+        
+        st.markdown("---")
+        
+        # PDF Library Section
+        st.markdown("### 📚 PDF Library")
+        st.caption("💡 PDFs uploaded by any user are visible to everyone")
+        
+        # Use already fetched PDFs
+        pdf_count = len(user_pdfs)
+        
         if pdf_count > 0:
             st.caption(f"📚 {pdf_count} PDFs loaded")
-            if st.button("🔄 Refresh PDFs", use_container_width=True):
-                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                st.success("Refreshed!")
-                st.rerun()
+            # Show PDFs in expandable sections
+            for pdf in user_pdfs[:10]:  # Show first 10 in sidebar
+                with st.expander(f"📄 {pdf['filename'][:30]}..." if len(pdf['filename']) > 30 else f"📄 {pdf['filename']}"):
+                    st.caption(f"📅 {pdf['uploaded_at'][:10]}")
+                    if pdf.get('ai_summary'):
+                        st.caption("**Summary:**")
+                        st.info(pdf['ai_summary'][:200] + "..." if len(pdf.get('ai_summary', '')) > 200 else pdf.get('ai_summary', ''))
+                    if st.button(f"🔍 Analyze", key=f"sidebar_analyze_{pdf['id']}", use_container_width=True):
+                        # Trigger analysis - will be handled in main area
+                        st.session_state[f"analyze_pdf_{pdf['id']}"] = True
+                        st.rerun()
+                    if st.button("🗑️ Delete", key=f"sidebar_del_{pdf['id']}", use_container_width=True):
+                        if db.delete_pdf(pdf['id']):
+                            st.success("Deleted!")
+                            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+                            st.rerun()
+            if pdf_count > 10:
+                st.caption(f"... and {pdf_count - 10} more PDFs")
+        else:
+            st.caption("No PDFs uploaded yet")
+        
+        if st.button("🔄 Refresh PDFs", use_container_width=True):
+            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+            st.success("Refreshed!")
+            st.rerun()
+        
+        st.markdown("---")
+        
+        # Upload Documents Section
+        st.markdown("### 📤 Upload Documents")
+        _render_document_upload_section(
+            section_key="document_ai_sidebar",
+            user=user,
+            holdings=holdings,
+            db=db,
+            header_text="**📤 Upload for AI Analysis**"
+        )
+        
+        st.markdown("---")
+        
+        # Quick Tips Section
+        st.markdown("### 💡 Quick Tips")
+        st.caption("Try asking me:")
+        st.caption("• 'How is my portfolio performing overall?'")
+        st.caption("• 'Which sectors are my best performers?'")
+        st.caption("• 'How can I reduce portfolio risk?'")
+        st.caption("• 'Which channels are giving me the best returns?'")
+        st.caption("• 'Should I rebalance my portfolio?'")
+        st.caption("• 'Upload a research report for analysis'")
     
     # Main chat area
     st.title("🤖 AI Assistant")
@@ -10831,10 +10928,8 @@ def ai_assistant_page():
     # Always load PDF context
     st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
     
-    # Get portfolio context
-    holdings = get_cached_holdings(user['id'])
+    # Get portfolio summary (holdings and user_pdfs already fetched for sidebar)
     portfolio_summary = get_cached_portfolio_summary(holdings)
-    user_pdfs = db.get_user_pdfs(user['id'])
     
     # Scrollable chat container at the top
     st.markdown("### 💬 Chat")
@@ -11437,27 +11532,37 @@ Always:
                 max_iterations = 3  # Reduced from 5 to 3 for faster responses
                 model_used = None
                 
-                # Determine which model to use (try once, not on every iteration)
+                # Determine which model to use - GPT-5 is PRIMARY, gpt-4o is fallback only
                 if model_used is None:
-                    models_to_try = ["gpt-5", "gpt-4o"]
-                    for model in models_to_try:
+                    # PRIMARY: GPT-5 (best performance, latest model)
+                    primary_model = "gpt-5"
+                    fallback_model = "gpt-4o"
+                    
+                    print(f"[AI_ASSISTANT] 🔄 Attempting PRIMARY model: {primary_model}")
+                    try:
+                        # Quick test call to see if GPT-5 is available
+                        test_response = openai.chat.completions.create(
+                            model=primary_model,
+                            messages=[{"role": "user", "content": "test"}]
+                        )
+                        model_used = primary_model
+                        print(f"[AI_ASSISTANT] ✅ PRIMARY model {primary_model} selected and working")
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        print(f"[AI_ASSISTANT] ⚠️ PRIMARY model {primary_model} not available: {str(e)[:100]}")
+                        print(f"[AI_ASSISTANT] 🔄 Falling back to: {fallback_model}")
+                        
+                        # Fallback to gpt-4o only if GPT-5 fails
                         try:
-                            # Quick test call to see if model is available
                             test_response = openai.chat.completions.create(
-                                model=model,
+                                model=fallback_model,
                                 messages=[{"role": "user", "content": "test"}]
                             )
-                            model_used = model
-                            print(f"[AI_ASSISTANT] ✅ Model selected: {model}")
-                            break
-                        except Exception as e:
-                            error_str = str(e).lower()
-                            if "model" in error_str or "not found" in error_str or "invalid" in error_str:
-                                print(f"[AI_ASSISTANT] ⚠️ {model} not available, trying next...")
-                                continue
-                            else:
-                                # For other errors, still try next model
-                                continue
+                            model_used = fallback_model
+                            print(f"[AI_ASSISTANT] ✅ FALLBACK model {fallback_model} selected")
+                        except Exception as e2:
+                            print(f"[AI_ASSISTANT] ❌ FALLBACK model {fallback_model} also failed: {str(e2)[:100]}")
+                            model_used = None
                 
                 if not model_used:
                     st.error("❌ Could not connect to AI service. Please try again.")
@@ -11561,7 +11666,10 @@ Always:
                 with st.chat_message("assistant"):
                     # Show which model was used
                     if model_used:
-                        st.caption(f"🤖 Model: **{model_used}**")
+                        if model_used == "gpt-5":
+                            st.caption(f"🤖 **GPT-5** (Primary Model)")
+                        else:
+                            st.caption(f"🤖 **{model_used}** (Fallback)")
                     st.markdown(ai_response)
                 
                 # Store in chat history (session state) - backward compatibility
@@ -11614,109 +11722,82 @@ Always:
                 with st.chat_message("assistant"):
                     st.error(f"❌ Error: {str(e)[:200]}")
     
-    # All sections below chat
-    st.markdown("---")
-    st.markdown("### 📚 PDF Library")
-    st.caption("💡 PDFs uploaded by any user are visible to everyone")
-    
+    # Handle PDF analysis from sidebar
     if user_pdfs and len(user_pdfs) > 0:
         for pdf in user_pdfs:
-            with st.expander(f"📄 {pdf['filename']}"):
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    st.caption(f"📅 Uploaded: {pdf['uploaded_at'][:10]}")
+            if st.session_state.get(f"analyze_pdf_{pdf['id']}", False):
+                try:
+                    import openai
+                    openai.api_key = st.secrets["api_keys"]["open_ai"]
                     
-                    if pdf.get('ai_summary'):
-                        st.markdown("**🤖 AI Summary:**")
-                        st.info(pdf['ai_summary'])
+                    # Get portfolio context
+                    portfolio_summary = get_cached_portfolio_summary(holdings)
                     
-                    # Add button to use this PDF for analysis
-                    if st.button(f"🔍 Analyze {pdf['filename'][:20]}...", key=f"analyze_{pdf['id']}", help="Use this PDF for AI analysis"):
-                        try:
-                            import openai
-                            openai.api_key = st.secrets["api_keys"]["open_ai"]
-                            
-                            # Get portfolio context
-                            portfolio_summary = get_cached_portfolio_summary(holdings)
-                            
-                            # Analyze the stored PDF
-                            analysis_prompt = f"""
-                            Analyze this stored PDF document for portfolio management insights.
-                            
-                            📄 DOCUMENT INFO:
-                            - Filename: {pdf['filename']}
-                            - Uploaded: {pdf['uploaded_at'][:10]}
-                            
-                            💼 USER'S PORTFOLIO:
-                            {portfolio_summary}
-                            
-                            📝 PDF CONTENT:
-                            {pdf.get('pdf_text', '')[:5000]}...
-                            
-                            🤖 PREVIOUS AI SUMMARY:
-                            {pdf.get('ai_summary', 'No previous summary')}
-                            
-                            Please provide a fresh analysis focusing on:
-                            1. Key insights from the document
-                            2. How it relates to the user's current portfolio
-                            3. Actionable recommendations
-                            
-                            Be specific and actionable. Use emojis and clear formatting.
-                            """
-                            
-                            response = openai.chat.completions.create(
-                                    model="gpt-4o",  # Upgraded to GPT-5 for better results
-                                    messages=[{"role": "user", "content": analysis_prompt}]
-                            )
-                            
-                            fresh_analysis = response.choices[0].message.content
-                            
-                            # Display the fresh analysis
-                            st.markdown("### 🔍 Fresh Analysis")
+                    # Analyze the stored PDF
+                    analysis_prompt = f"""
+                    Analyze this stored PDF document for portfolio management insights.
+                    
+                    📄 DOCUMENT INFO:
+                    - Filename: {pdf['filename']}
+                    - Uploaded: {pdf['uploaded_at'][:10]}
+                    
+                    💼 USER'S PORTFOLIO:
+                    {portfolio_summary}
+                    
+                    📝 PDF CONTENT:
+                    {pdf.get('pdf_text', '')[:5000]}...
+                    
+                    🤖 PREVIOUS AI SUMMARY:
+                    {pdf.get('ai_summary', 'No previous summary')}
+                    
+                    Please provide a fresh analysis focusing on:
+                    1. Key insights from the document
+                    2. How it relates to the user's current portfolio
+                    3. Actionable recommendations
+                    
+                    Be specific and actionable. Use emojis and clear formatting.
+                    """
+                    
+                    with st.spinner("🤖 Analyzing PDF..."):
+                        response = openai.chat.completions.create(
+                                model="gpt-5",  # Using GPT-5 as primary
+                                messages=[{"role": "user", "content": analysis_prompt}]
+                        )
+                        
+                        fresh_analysis = response.choices[0].message.content
+                        
+                        # Display in chat
+                        with st.chat_message("assistant"):
+                            st.markdown(f"### 🔍 Analysis of: {pdf['filename']}")
                             st.markdown(fresh_analysis)
-                            
-                            # Store in chat history (session state)
-                            st.session_state.chat_history.append({
-                                "q": f"Analyze PDF: {pdf['filename']}", 
-                                "a": fresh_analysis
-                            })
-                            # Save to database (user-specific, persistent)
-                            if hasattr(db, 'save_chat_history'):
-                                try:
-                                    db.save_chat_history(user['id'], f"Analyze PDF: {pdf['filename']}", fresh_analysis)
-                                except Exception:
-                                    pass
-                            
-                        except Exception as e:
-                            st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
-                
-                with col2:
-                    if st.button("🗑️", key=f"del_{pdf['id']}", help="Delete this PDF"):
-                        if db.delete_pdf(pdf['id']):
-                            st.success("Deleted!")
-                            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                            st.rerun()
-    else:
-        st.caption("No PDFs uploaded yet")
-    
-    st.markdown("---")
-    st.markdown("### 📤 Upload Documents")
-    _render_document_upload_section(
-        section_key="document_ai_primary",
-        user=user,
-        holdings=holdings,
-        db=db,
-    )
-    
-    st.markdown("---")
-    st.markdown("### 💡 Quick Tips")
-    st.caption("Try asking me:")
-    st.caption("• 'How is my portfolio performing overall?'")
-    st.caption("• 'Which sectors are my best performers?'")
-    st.caption("• 'How can I reduce portfolio risk?'")
-    st.caption("• 'Which channels are giving me the best returns?'")
-    st.caption("• 'Should I rebalance my portfolio?'")
-    st.caption("• 'Upload a research report for analysis'")
+                        
+                        # Store in chat history
+                        st.session_state.chat_history.append({
+                            "q": f"Analyze PDF: {pdf['filename']}", 
+                            "a": fresh_analysis
+                        })
+                        st.session_state.current_thread_messages.append({
+                            'role': 'user',
+                            'content': f"Analyze PDF: {pdf['filename']}"
+                        })
+                        st.session_state.current_thread_messages.append({
+                            'role': 'assistant',
+                            'content': fresh_analysis
+                        })
+                        
+                        # Save to database
+                        if hasattr(db, 'save_chat_history'):
+                            try:
+                                db.save_chat_history(user['id'], f"Analyze PDF: {pdf['filename']}", fresh_analysis)
+                            except Exception:
+                                pass
+                    
+                    # Clear the flag
+                    st.session_state[f"analyze_pdf_{pdf['id']}"] = False
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
+                    st.session_state[f"analyze_pdf_{pdf['id']}"] = False
 
 def ai_insights_page():
     """AI Insights page with agent analysis and recommendations"""
