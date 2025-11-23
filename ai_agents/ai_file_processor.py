@@ -477,7 +477,7 @@ Return ALL transactions found on ALL pages in this batch, clearly separated by p
                             pages_in_batch = len([p for p in batch_pages if p not in batch_failed])
                             pages_processed += pages_in_batch
                             self.logger.info(f"[VISION_API] ✅ Batch {batch_start + 1}-{batch_end}: Extracted {len(batch_text)} characters from {pages_in_batch} pages")
-                    else:
+                        else:
                             self.logger.info(f"[VISION_API] ⚠️ Batch {batch_start + 1}-{batch_end}: No transaction data found")
                     else:
                         self.logger.error(f"[VISION_API] ❌ Batch {batch_start + 1}-{batch_end}: Empty response from Vision API")
@@ -1447,9 +1447,9 @@ Output ONLY the JSON array—no commentary or explanation. The JSON array must c
                 # Remove any incomplete trailing objects
                 # Find last complete object by counting braces
                 try:
-                transactions = json.loads(json_str)
-                if isinstance(transactions, list):
-                    return transactions
+                    transactions = json.loads(json_str)
+                    if isinstance(transactions, list):
+                        return transactions
                 except json.JSONDecodeError:
                     # Try to fix incomplete JSON by removing last incomplete object
                     # Find the last complete object
@@ -1669,9 +1669,9 @@ Output ONLY the JSON array—no commentary or explanation. The JSON array must c
                     if fetched_price and fetched_price > 0:
                         # Only update price if it wasn't already calculated (preserve calculated price)
                         if not price_was_calculated:
-                        validated_trans['price'] = round(float(fetched_price), 4)
+                            validated_trans['price'] = round(float(fetched_price), 4)
                             print(f"[VALIDATE] ✅ Fetched historical price: ₹{validated_trans['price']} for {ticker_display} on {transaction_date} (from file)")
-                    else:
+                        else:
                             print(f"[VALIDATE] ✅ Price already calculated (₹{validated_trans['price']}), but fetched to resolve ticker for {ticker_display}")
                         
                         # Check if ticker was resolved via name-based resolution
@@ -1794,11 +1794,11 @@ Output ONLY the JSON array—no commentary or explanation. The JSON array must c
                 elif ticker.endswith('.BO'):
                     nse_ticker = ticker.replace('.BO', '.NS')
                 else:
-                nse_ticker = f"{ticker}.NS"
-                stock = yf.Ticker(nse_ticker)
-                hist = stock.history(period='1d')
-                if not hist.empty:
-                    return 'stock'  # Found in yfinance NSE = stock
+                    nse_ticker = f"{ticker}.NS"
+                    stock = yf.Ticker(nse_ticker)
+                    hist = stock.history(period='1d')
+                    if not hist.empty:
+                        return 'stock'  # Found in yfinance NSE = stock
                 
                 # Try BSE - only add .BO if ticker doesn't already have .NS or .BO
                 if ticker.endswith('.BO'):
@@ -1806,11 +1806,11 @@ Output ONLY the JSON array—no commentary or explanation. The JSON array must c
                 elif ticker.endswith('.NS'):
                     bse_ticker = ticker.replace('.NS', '.BO')
                 else:
-                bse_ticker = f"{ticker}.BO"
-                stock = yf.Ticker(bse_ticker)
-                hist = stock.history(period='1d')
-                if not hist.empty:
-                    return 'stock'  # Found in yfinance BSE = stock
+                    bse_ticker = f"{ticker}.BO"
+                    stock = yf.Ticker(bse_ticker)
+                    hist = stock.history(period='1d')
+                    if not hist.empty:
+                        return 'stock'  # Found in yfinance BSE = stock
             except Exception:
                 pass  # yfinance check failed, fall back to heuristics
             
@@ -1950,8 +1950,8 @@ Output ONLY the JSON array—no commentary or explanation. The JSON array must c
         
         # If no channel column exists in file, use filename
         if not has_channel_column:
-        if not filename:
-            return "Direct"
+            if not filename:
+                return "Direct"
             stem = Path(filename).stem
             clean = re.sub(r'[_\-\s]+', ' ', stem).strip()
             return clean.title() if clean else "Direct"

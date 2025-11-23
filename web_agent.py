@@ -4342,9 +4342,41 @@ def detect_corporate_actions(user_id, db, holdings=None):
             avg_price = float(holding.get('average_price') or 0)
             current_price = holding.get('current_price')
             quantity = holding.get('total_quantity', 0)
+            stock_id = holding.get('stock_id')
 
             if avg_price == 0:
                 continue
+
+            # Get earliest purchase date for this stock to ensure we only detect corporate actions AFTER purchase
+            earliest_purchase_date = None
+            try:
+                purchase_txns = db.supabase.table('user_transactions').select('transaction_date').eq(
+                    'user_id', user_id
+                ).eq('stock_id', stock_id).eq('transaction_type', 'buy').order('transaction_date', desc=False).limit(1).execute()
+                
+                if purchase_txns.data and len(purchase_txns.data) > 0:
+                    earliest_purchase_date = purchase_txns.data[0].get('transaction_date')
+                    if earliest_purchase_date:
+                        # Convert to datetime if it's a string
+                        if isinstance(earliest_purchase_date, str):
+                            try:
+                                earliest_purchase_date = datetime.strptime(earliest_purchase_date, '%Y-%m-%d')
+                            except:
+                                try:
+                                    earliest_purchase_date = datetime.strptime(earliest_purchase_date, '%Y-%m-%d %H:%M:%S')
+                                except:
+                                    earliest_purchase_date = None
+                        elif hasattr(earliest_purchase_date, 'date'):
+                            earliest_purchase_date = earliest_purchase_date.date()
+                            earliest_purchase_date = datetime.combine(earliest_purchase_date, datetime.min.time())
+                        
+                        if earliest_purchase_date and earliest_purchase_date.tzinfo is not None:
+                            earliest_purchase_date = earliest_purchase_date.replace(tzinfo=None)
+                        
+                        print(f"[CORPORATE_ACTIONS] 📅 {ticker}: Earliest purchase date: {earliest_purchase_date.date() if hasattr(earliest_purchase_date, 'date') else earliest_purchase_date}")
+            except Exception as e:
+                print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: Could not fetch purchase date: {str(e)[:100]}")
+                earliest_purchase_date = None
 
             # Check if ticker still exists (might be merged/delisted)
             ticker_exists = _check_ticker_exists(ticker)
@@ -4396,31 +4428,128 @@ def detect_corporate_actions(user_id, db, holdings=None):
             current_price = float(current_price)
             price_ratio = avg_price / current_price if current_price else 0
 
-            # Always check for splits - don't filter by price ratio as it can miss valid splits
-            # Price ratio check was too restrictive and could miss legitimate splits
-            print(f"[CORPORATE_ACTIONS] 🔍 {ticker}: Checking for splits (price_ratio: {price_ratio:.2f}, avg_price: {avg_price:.2f}, current_price: {current_price:.2f})")
+            # Check for ACTUAL corporate actions from yfinance (not just price differences)
+            # Only detect splits that happened AFTER the purchase date
+            print(f"[CORPORATE_ACTIONS] 🔍 {ticker}: Checking for actual corporate actions from yfinance (purchase date: {earliest_purchase_date.date() if earliest_purchase_date and hasattr(earliest_purchase_date, 'date') else 'unknown'})")
 
-            confirmation = _find_split_confirmation(ticker)
-            if not confirmation:
-                print(f"[CORPORATE_ACTIONS] ℹ️ {ticker}: No split confirmation found from yfinance")
-                continue
-
-            split_date, confirmed_ratio = confirmation
-            if confirmed_ratio <= 1:
-                continue
-
-            corporate_actions.append({
-                'ticker': ticker,
-                'stock_name': holding.get('stock_name'),
-                'stock_id': holding.get('stock_id'),
-                'avg_price': avg_price,
-                'current_price': current_price,
-                'quantity': quantity,
-                'ratio': price_ratio,
-                'split_ratio': confirmed_ratio,
-                'split_date': str(split_date),
-                'action_type': 'split',
-            })
+            # Get actual corporate actions from yfinance (enhanced_price_fetcher has this function)
+            try:
+                from enhanced_price_fetcher import EnhancedPriceFetcher
+                price_fetcher = EnhancedPriceFetcher()
+                
+                # Use purchase date as from_date, or 2 years ago if no purchase date
+                from_date = earliest_purchase_date if earliest_purchase_date else (datetime.now() - timedelta(days=730))
+                to_date = datetime.now()
+                
+                # Fetch actual corporate actions from yfinance
+                actual_actions = price_fetcher._fetch_corporate_actions_from_yfinance(ticker, from_date, to_date)
+                
+                # Filter to only splits that happened AFTER purchase
+                relevant_splits = []
+                for action in actual_actions:
+                    if action.get('type') == 'split':
+                        action_date = action.get('date')
+                        if isinstance(action_date, str):
+                            try:
+                                action_date = datetime.strptime(action_date, '%Y-%m-%d')
+                            except:
+                                try:
+                                    action_date = datetime.strptime(action_date, '%Y-%m-%d %H:%M:%S')
+                                except:
+                                    continue
+                        elif hasattr(action_date, 'date'):
+                            action_date = datetime.combine(action_date.date(), datetime.min.time())
+                        
+                        if action_date.tzinfo is not None:
+                            action_date = action_date.replace(tzinfo=None)
+                        
+                        # Only include if split happened AFTER purchase (or if no purchase date, include all)
+                        if earliest_purchase_date is None or action_date >= earliest_purchase_date:
+                            relevant_splits.append(action)
+                            print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Found split on {action_date.date()} (ratio: {action.get('split_ratio')}) - AFTER purchase date")
+                        else:
+                            print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: Split on {action_date.date()} ignored (happened BEFORE purchase on {earliest_purchase_date.date()})")
+                
+                # Use the most recent relevant split
+                if relevant_splits:
+                    # Sort by date (most recent first)
+                    # Convert dates to comparable format for sorting
+                    def get_sortable_date(action):
+                        action_date = action.get('date')
+                        if isinstance(action_date, str):
+                            try:
+                                return datetime.strptime(action_date, '%Y-%m-%d')
+                            except:
+                                try:
+                                    return datetime.strptime(action_date, '%Y-%m-%d %H:%M:%S')
+                                except:
+                                    return datetime.min
+                        elif hasattr(action_date, 'date'):
+                            if hasattr(action_date, 'to_pydatetime'):
+                                return action_date.to_pydatetime()
+                            return datetime.combine(action_date.date(), datetime.min.time())
+                        return action_date if isinstance(action_date, datetime) else datetime.min
+                    
+                    relevant_splits.sort(key=get_sortable_date, reverse=True)
+                    latest_split = relevant_splits[0]
+                    
+                    split_date = latest_split.get('date')
+                    confirmed_ratio = latest_split.get('split_ratio', 1)
+                    
+                    if confirmed_ratio > 1:
+                        corporate_actions.append({
+                            'ticker': ticker,
+                            'stock_name': holding.get('stock_name'),
+                            'stock_id': holding.get('stock_id'),
+                            'avg_price': avg_price,
+                            'current_price': current_price,
+                            'quantity': quantity,
+                            'ratio': price_ratio,
+                            'split_ratio': confirmed_ratio,
+                            'split_date': str(split_date.date() if hasattr(split_date, 'date') else split_date),
+                            'action_type': 'split',
+                        })
+                        print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Added corporate action - {confirmed_ratio}:1 split on {split_date.date() if hasattr(split_date, 'date') else split_date}")
+                    else:
+                        print(f"[CORPORATE_ACTIONS] ℹ️ {ticker}: Split ratio <= 1, skipping")
+                else:
+                    print(f"[CORPORATE_ACTIONS] ℹ️ {ticker}: No corporate actions found AFTER purchase date")
+                    
+            except Exception as e:
+                print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: Error fetching corporate actions: {str(e)[:150]}")
+                import traceback
+                traceback.print_exc()
+                # Fallback to old method if enhanced fetcher fails
+                confirmation = _find_split_confirmation(ticker)
+                if confirmation:
+                    split_date, confirmed_ratio = confirmation
+                    if confirmed_ratio > 1:
+                        # Check if split date is after purchase date
+                        if earliest_purchase_date:
+                            try:
+                                if isinstance(split_date, str):
+                                    split_date_dt = datetime.strptime(split_date, '%Y-%m-%d')
+                                else:
+                                    split_date_dt = split_date
+                                
+                                if split_date_dt < earliest_purchase_date:
+                                    print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: Split on {split_date} happened BEFORE purchase, ignoring")
+                                    continue
+                            except:
+                                pass
+                        
+                        corporate_actions.append({
+                            'ticker': ticker,
+                            'stock_name': holding.get('stock_name'),
+                            'stock_id': holding.get('stock_id'),
+                            'avg_price': avg_price,
+                            'current_price': current_price,
+                            'quantity': quantity,
+                            'ratio': price_ratio,
+                            'split_ratio': confirmed_ratio,
+                            'split_date': str(split_date),
+                            'action_type': 'split',
+                        })
         
         if corporate_actions:
             print(f"[CORPORATE_ACTIONS] Detected {len(corporate_actions)} stocks with corporate actions")
