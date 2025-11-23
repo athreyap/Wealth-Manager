@@ -53,7 +53,7 @@ class PMS_AIF_Calculator:
             months_elapsed = years_elapsed * 12
             
             # CRITICAL: Use AI to fetch actual NAVs instead of calculating from CAGR
-            print(f"[PMS_AIF] Fetching actual NAVs for {ticker} ({'AIF' if is_aif else 'PMS'}) - Investment: Rs. {investment_amount:,.2f} on {investment_date}")
+            print(f"[PMS_AIF] 🔍 Fetching actual NAVs for {ticker} ({'AIF' if is_aif else 'PMS'}) - Investment: Rs. {investment_amount:,.2f} on {investment_date}")
             nav_data = self._get_navs_from_ai(ticker, is_aif, pms_aif_name, investment_date)
             
             if nav_data and nav_data.get('navs') and len(nav_data.get('navs', [])) > 0:
@@ -109,7 +109,11 @@ class PMS_AIF_Calculator:
                 }
             
             # Fallback: Try CAGR-based calculation if NAV fetch fails
-            print(f"[PMS_AIF] WARNING: AI NAV fetch failed for {ticker}, falling back to CAGR calculation...")
+            if nav_data is None:
+                print(f"[PMS_AIF] ⚠️ WARNING: NAV fetch returned None for {ticker} (OpenAI client may not be available), falling back to CAGR calculation...")
+            else:
+                print(f"[PMS_AIF] ⚠️ WARNING: AI NAV fetch failed for {ticker} (no NAVs returned), falling back to CAGR calculation...")
+            print(f"[PMS_AIF] 🔍 Fetching CAGR for {ticker} ({'AIF' if is_aif else 'PMS'}) - Investment: Rs. {investment_amount:,.2f} on {investment_date}")
             cagr_data = self._get_cagr_from_ai(ticker, is_aif, pms_aif_name, investment_date)
             
             if cagr_data and cagr_data.get('cagr') is not None and cagr_data.get('cagr') > 0:
@@ -258,6 +262,7 @@ class PMS_AIF_Calculator:
         """
         client = self._get_openai_client()
         if not client:
+            print(f"[PMS_AIF_AI] [ERROR] OpenAI client not available - cannot fetch NAVs for {ticker}. Check API key in secrets.toml")
             return None
         
         try:
@@ -418,14 +423,14 @@ CRITICAL:
                         'data_type': data_type
                     }
                 else:
-                    print(f"[PMS_AIF_AI] ERROR: No valid NAVs found in response")
+                    print(f"[PMS_AIF_AI] [ERROR] No valid NAVs found in response for {ticker}")
                     return None
             else:
-                print(f"[PMS_AIF_AI] ERROR: No NAVs in response")
+                print(f"[PMS_AIF_AI] [ERROR] No NAVs in response for {ticker}")
                 return None
                 
         except Exception as e:
-            print(f"[PMS_AIF_AI] ERROR: Error fetching NAVs: {str(e)}")
+            print(f"[PMS_AIF_AI] [ERROR] Error fetching NAVs for {ticker}: {str(e)}")
             import traceback
             traceback.print_exc()
             return None
@@ -451,6 +456,7 @@ CRITICAL:
         """
         client = self._get_openai_client()
         if not client:
+            print(f"[PMS_AIF_AI] [ERROR] OpenAI client not available - cannot fetch CAGR for {ticker}. Check API key in secrets.toml")
             return None
         
         try:

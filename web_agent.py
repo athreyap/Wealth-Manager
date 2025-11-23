@@ -11071,7 +11071,7 @@ def ai_assistant_page():
         # Use already fetched PDFs
         pdf_count = len(user_pdfs)
         
-    if pdf_count > 0:
+        if pdf_count > 0:
             st.caption(f"📚 {pdf_count} PDFs loaded")
             # Show PDFs in expandable sections
             for pdf in user_pdfs[:10]:  # Show first 10 in sidebar
@@ -11087,23 +11087,23 @@ def ai_assistant_page():
                     if st.button("🗑️ Delete", key=f"sidebar_del_{pdf['id']}", use_container_width=True):
                         if db.delete_pdf(pdf['id']):
                             st.success("Deleted!")
-                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                st.rerun()
+                            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+                            st.rerun()
             if pdf_count > 10:
                 st.caption(f"... and {pdf_count - 10} more PDFs")
-            else:
-                st.caption("No PDFs uploaded yet")
+        else:
+            st.caption("No PDFs uploaded yet")
         
-    if st.button("🔄 Refresh PDFs", use_container_width=True):
-        st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-        st.success("Refreshed!")
-        st.rerun()
+        if st.button("🔄 Refresh PDFs", use_container_width=True):
+            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+            st.success("Refreshed!")
+            st.rerun()
         
-    st.markdown("---")
+        st.markdown("---")
         
         # Upload Documents Section
-    st.markdown("### 📤 Upload Documents")
-    _render_document_upload_section(
+        st.markdown("### 📤 Upload Documents")
+        _render_document_upload_section(
             section_key="document_ai_sidebar",
             user=user,
             holdings=holdings,
@@ -11111,17 +11111,17 @@ def ai_assistant_page():
             header_text="**📤 Upload for AI Analysis**"
         )
         
-    st.markdown("---")
+        st.markdown("---")
         
         # Quick Tips Section
-    st.markdown("### 💡 Quick Tips")
-    st.caption("Try asking me:")
-    st.caption("• 'How is my portfolio performing overall?'")
-    st.caption("• 'Which sectors are my best performers?'")
-    st.caption("• 'How can I reduce portfolio risk?'")
-    st.caption("• 'Which channels are giving me the best returns?'")
-    st.caption("• 'Should I rebalance my portfolio?'")
-    st.caption("• 'Upload a research report for analysis'")
+        st.markdown("### 💡 Quick Tips")
+        st.caption("Try asking me:")
+        st.caption("• 'How is my portfolio performing overall?'")
+        st.caption("• 'Which sectors are my best performers?'")
+        st.caption("• 'How can I reduce portfolio risk?'")
+        st.caption("• 'Which channels are giving me the best returns?'")
+        st.caption("• 'Should I rebalance my portfolio?'")
+        st.caption("• 'Upload a research report for analysis'")
     
     # Main chat area
     st.title("🤖 AI Assistant")
