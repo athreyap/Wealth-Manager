@@ -576,6 +576,11 @@ class EnhancedPriceFetcher:
                     # Expand date range: check splits from 2 years before purchase to today
                     # This ensures we catch splits that happened before purchase but affect current holdings
                     expanded_from_date = from_date - timedelta(days=730) if from_date else datetime.now() - timedelta(days=730)
+                    # Ensure timezone-naive for comparison
+                    if expanded_from_date.tzinfo is not None:
+                        expanded_from_date = expanded_from_date.replace(tzinfo=None)
+                    if to_date.tzinfo is not None:
+                        to_date = to_date.replace(tzinfo=None) if to_date else datetime.now().replace(tzinfo=None)
                     
                     for split_date, split_ratio in splits.items():
                         # yfinance reports split ratio as fraction (e.g., 0.5 for 2:1 split, 2.0 for 1:2 split)
@@ -592,6 +597,10 @@ class EnhancedPriceFetcher:
                         split_date_dt = split_date.to_pydatetime() if hasattr(split_date, 'to_pydatetime') else split_date
                         if isinstance(split_date_dt, pd.Timestamp):
                             split_date_dt = split_date_dt.to_pydatetime()
+                        
+                        # Normalize to timezone-naive for comparison
+                        if split_date_dt.tzinfo is not None:
+                            split_date_dt = split_date_dt.replace(tzinfo=None)
                         
                         # Check if split is in expanded date range
                         if expanded_from_date <= split_date_dt <= to_date:
@@ -622,12 +631,20 @@ class EnhancedPriceFetcher:
             try:
                 dividends = ticker_obj.dividends
                 if dividends is not None and not dividends.empty:
+                    # Ensure from_date and to_date are timezone-naive
+                    from_date_naive = from_date.replace(tzinfo=None) if from_date and from_date.tzinfo else from_date
+                    to_date_naive = to_date.replace(tzinfo=None) if to_date and to_date.tzinfo else to_date
+                    
                     for div_date, div_amount in dividends.items():
                         div_date_dt = div_date.to_pydatetime() if hasattr(div_date, 'to_pydatetime') else div_date
                         if isinstance(div_date_dt, pd.Timestamp):
                             div_date_dt = div_date_dt.to_pydatetime()
                         
-                        if from_date <= div_date_dt <= to_date:
+                        # Normalize to timezone-naive for comparison
+                        if div_date_dt.tzinfo is not None:
+                            div_date_dt = div_date_dt.replace(tzinfo=None)
+                        
+                        if from_date_naive <= div_date_dt <= to_date_naive:
                             # Store dividend info for reference (not auto-adjusted)
                             corporate_actions.append({
                                 'type': 'dividend',

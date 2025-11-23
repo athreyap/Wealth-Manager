@@ -10836,8 +10836,9 @@ def ai_assistant_page():
     portfolio_summary = get_cached_portfolio_summary(holdings)
     user_pdfs = db.get_user_pdfs(user['id'])
     
-    # Display current thread messages
-    chat_container = st.container()
+    # Scrollable chat container at the top
+    st.markdown("### 💬 Chat")
+    chat_container = st.container(height=500)  # Fixed height with scroll
     with chat_container:
         if st.session_state.current_thread_messages:
             for msg in st.session_state.current_thread_messages:
@@ -10862,7 +10863,7 @@ def ai_assistant_page():
                 Ask me anything about your portfolio!
                 """)
     
-    # Chat input at the bottom (like ChatGPT)
+    # Chat input below chat container
     user_question = st.chat_input(
         "Ask me anything about your portfolio...",
         key="ai_chat_input"
@@ -10982,6 +10983,8 @@ def ai_assistant_page():
                             query = query.eq('ticker', ticker)
                         if limit:
                             query = query.limit(limit)
+                        else:
+                            query = query.limit(20)  # Default limit to avoid slow processing
                         response = query.execute()
                         
                         if not response.data:
@@ -10990,7 +10993,10 @@ def ai_assistant_page():
                         nav_data = []
                         price_fetcher = EnhancedPriceFetcher()
                         
-                        for holding in response.data:
+                        # Process only first 10 holdings to avoid delays
+                        holdings_to_process = response.data[:10]
+                        
+                        for holding in holdings_to_process:
                             ticker_val = holding.get('ticker')
                             asset_type = holding.get('asset_type')
                             current_price = holding.get('current_price')
@@ -11034,9 +11040,9 @@ def ai_assistant_page():
                                             nav_info['initial_investment'] = result.get('initial_investment', investment_amount)
                                             nav_info['current_value'] = result.get('current_value', current_price * quantity if current_price and quantity else 0)
                                             
-                                            # Include weekly NAVs if available
+                                            # Include weekly NAVs if available (limited for speed)
                                             if result.get('weekly_values'):
-                                                nav_info['weekly_navs'] = result['weekly_values'][:52]  # Last 52 weeks
+                                                nav_info['weekly_navs'] = result['weekly_values'][:12]  # Last 12 weeks only (reduced from 52)
                                     except Exception as e:
                                         nav_info['error'] = str(e)[:200]
                             
@@ -11055,6 +11061,9 @@ def ai_assistant_page():
                         import requests
                         from bs4 import BeautifulSoup
                         from datetime import datetime, timedelta
+                        
+                        # Limit web scraping to avoid delays - only try 1 URL max
+                        max_urls_to_try = 1
                         
                         news_articles = []
                         headers = {
@@ -11084,8 +11093,8 @@ def ai_assistant_page():
                                 sector_lower = sector.lower().replace(' ', '-')
                                 moneycontrol_urls.append(f"https://www.moneycontrol.com/news/tags/{sector_lower}.html")
                             
-                            # Try each URL until we get results
-                            for url in moneycontrol_urls[:3]:  # Limit to 3 URLs to avoid too many requests
+                            # Try each URL until we get results (limited for speed)
+                            for url in moneycontrol_urls[:max_urls_to_try]:  # Limit to 1 URL for faster response
                                 try:
                                     response = requests.get(url, headers=headers)
                                     if response.status_code == 200:
@@ -11425,48 +11434,51 @@ Always:
                 messages.append({"role": "user", "content": user_question})
                 
                 # Function calling loop - allow AI to query database multiple times
-                max_iterations = 5
+                max_iterations = 3  # Reduced from 5 to 3 for faster responses
                 model_used = None
                 
-                for iteration in range(max_iterations):
-                    # Try GPT-5 first, fallback to gpt-4o
+                # Determine which model to use (try once, not on every iteration)
+                if model_used is None:
                     models_to_try = ["gpt-5", "gpt-4o"]
-                    response = None
-                    
                     for model in models_to_try:
                         try:
-                            if iteration == 0 and model_used is None:
-                                # Log which model is being tried
-                                print(f"[AI_ASSISTANT] 🔄 Initializing model: {model}")
-                            
-                            response = openai.chat.completions.create(
+                            # Quick test call to see if model is available
+                            test_response = openai.chat.completions.create(
                                 model=model,
-                                messages=messages,
-                                tools=functions,
-                                tool_choice="auto"  # Let AI decide when to use functions
+                                messages=[{"role": "user", "content": "test"}]
                             )
                             model_used = model
-                            
-                            if iteration == 0:
-                                # Log which model succeeded
-                                print(f"[AI_ASSISTANT] ✅ Model initialized: {model}")
+                            print(f"[AI_ASSISTANT] ✅ Model selected: {model}")
                             break
                         except Exception as e:
                             error_str = str(e).lower()
                             if "model" in error_str or "not found" in error_str or "invalid" in error_str:
-                                # Model not available, try next
-                                if iteration == 0:
-                                    print(f"[AI_ASSISTANT] ⚠️ {model} not available: {str(e)[:100]}")
+                                print(f"[AI_ASSISTANT] ⚠️ {model} not available, trying next...")
                                 continue
                             else:
-                                # Other error, try next model
-                                if iteration == 0:
-                                    print(f"[AI_ASSISTANT] ⚠️ {model} error: {str(e)[:100]}")
+                                # For other errors, still try next model
                                 continue
-                    
-                    if not response:
-                        st.error("❌ Could not connect to AI service. Please try again.")
+                
+                if not model_used:
+                    st.error("❌ Could not connect to AI service. Please try again.")
+                    st.stop()
+                
+                for iteration in range(max_iterations):
+                    try:
+                        # Show progress for function calls
+                        if iteration > 0:
+                            st.info(f"🔄 AI is analyzing data (iteration {iteration + 1}/{max_iterations})...")
+                        
+                        response = openai.chat.completions.create(
+                            model=model_used,
+                            messages=messages,
+                            tools=functions,
+                            tool_choice="auto"  # Let AI decide when to use functions
+                        )
+                    except Exception as e:
+                        st.error(f"❌ AI service error: {str(e)[:200]}")
                         st.stop()
+                        return
                     
                     choice = response.choices[0]
                     # Convert message object to dict format for consistency
@@ -11602,9 +11614,10 @@ Always:
                 with st.chat_message("assistant"):
                     st.error(f"❌ Error: {str(e)[:200]}")
     
-    # Collapsible sections below chat
-    with st.expander("📚 PDF Library", expanded=False):
-        st.caption("💡 PDFs uploaded by any user are visible to everyone")
+    # All sections below chat
+    st.markdown("---")
+    st.markdown("### 📚 PDF Library")
+    st.caption("💡 PDFs uploaded by any user are visible to everyone")
     
     if user_pdfs and len(user_pdfs) > 0:
         for pdf in user_pdfs:
@@ -11686,6 +11699,8 @@ Always:
     else:
         st.caption("No PDFs uploaded yet")
     
+    st.markdown("---")
+    st.markdown("### 📤 Upload Documents")
     _render_document_upload_section(
         section_key="document_ai_primary",
         user=user,
@@ -11693,14 +11708,15 @@ Always:
         db=db,
     )
     
-    with st.expander("💡 Quick Tips", expanded=False):
-        st.caption("Try asking me:")
-        st.caption("• 'How is my portfolio performing overall?'")
-        st.caption("• 'Which sectors are my best performers?'")
-        st.caption("• 'How can I reduce portfolio risk?'")
-        st.caption("• 'Which channels are giving me the best returns?'")
-        st.caption("• 'Should I rebalance my portfolio?'")
-        st.caption("• 'Upload a research report for analysis'")
+    st.markdown("---")
+    st.markdown("### 💡 Quick Tips")
+    st.caption("Try asking me:")
+    st.caption("• 'How is my portfolio performing overall?'")
+    st.caption("• 'Which sectors are my best performers?'")
+    st.caption("• 'How can I reduce portfolio risk?'")
+    st.caption("• 'Which channels are giving me the best returns?'")
+    st.caption("• 'Should I rebalance my portfolio?'")
+    st.caption("• 'Upload a research report for analysis'")
 
 def ai_insights_page():
     """AI Insights page with agent analysis and recommendations"""
