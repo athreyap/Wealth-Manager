@@ -1482,19 +1482,19 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '', cac
     
     # STEP 5: Use AI as last resort to determine asset type (only if not using bulk cache)
     if not cache:
-        try:
-            client = st.session_state.get('openai_client')
-            if not client:
-                try:
-                    from openai import OpenAI
-                    if "api_keys" in st.secrets and "open_ai" in st.secrets.get("api_keys", {}):
-                        client = OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
-                        st.session_state['openai_client'] = client
-                except Exception:
-                    pass
-            
-            if client:
-                prompt = f"""You are a financial data expert. Determine the asset type for this Indian security:
+    try:
+        client = st.session_state.get('openai_client')
+        if not client:
+            try:
+                from openai import OpenAI
+                if "api_keys" in st.secrets and "open_ai" in st.secrets.get("api_keys", {}):
+                    client = OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
+                    st.session_state['openai_client'] = client
+            except Exception:
+                pass
+        
+        if client:
+            prompt = f"""You are a financial data expert. Determine the asset type for this Indian security:
 
 Ticker: {ticker}
 Name: {stock_name or 'Not provided'}
@@ -1511,28 +1511,28 @@ Return ONLY a JSON object:
 
 If uncertain, return asset_type based on ticker pattern and name."""
 
-                try:
-                    response = client.chat.completions.create(
+            try:
+                response = client.chat.completions.create(
                         model="gpt-4o",  # GPT-5 for better accuracy and faster processing
-                        messages=[
-                            {"role": "system", "content": "You are a financial data expert. Return only valid JSON."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": "You are a financial data expert. Return only valid JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
                         temperature=0.3
-                    )
-                    
-                    import json
-                    result = json.loads(response.choices[0].message.content)
-                    ai_asset_type = result.get('asset_type', '').lower()
-                    
-                    if ai_asset_type in ['stock', 'mutual_fund', 'bond', 'pms', 'aif']:
-                        print(f"[ASSET_TYPE] ✅ {ticker}: AI determined → {ai_asset_type} (confidence: {result.get('confidence', 'unknown')})")
-                        return ai_asset_type
-                except Exception as e:
-                    pass  # AI failed, fall back to heuristics
-        except Exception:
-            pass  # AI not available, fall back to heuristics
+                )
+                
+                import json
+                result = json.loads(response.choices[0].message.content)
+                ai_asset_type = result.get('asset_type', '').lower()
+                
+                if ai_asset_type in ['stock', 'mutual_fund', 'bond', 'pms', 'aif']:
+                    print(f"[ASSET_TYPE] ✅ {ticker}: AI determined → {ai_asset_type} (confidence: {result.get('confidence', 'unknown')})")
+                    return ai_asset_type
+            except Exception as e:
+                pass  # AI failed, fall back to heuristics
+    except Exception:
+        pass  # AI not available, fall back to heuristics
     
     # STEP 6: Fallback to heuristics if all data sources fail
     mf_keywords = ['fund', 'scheme', 'growth', 'nav', 'mutual', 'mf', 'plan', 'allocation', 'hybrid', 'equity', 'debt']
@@ -2121,22 +2121,22 @@ Return ALL transactions found on ALL pages in this batch, clearly separated by p
             batch_failed = []
             for page_idx, image in enumerate(batch_images):
                 page_num = batch_start + page_idx + 1
-                try:
-                    # Convert PIL Image to base64 with compression
-                    buffered = io.BytesIO()
-                    image.save(buffered, format="PNG", optimize=True, compress_level=6)
-                    img_size_bytes = len(buffered.getvalue())
-                    img_size_mb = img_size_bytes / (1024 * 1024)
-                    img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                    
-                    # Check image size (Vision API has limits)
-                    if img_size_mb > 20:
-                        error_msg = f"Page {page_num}: Image too large ({img_size_mb:.2f} MB, max ~20 MB)"
-                        print(f"[PDF_VISION] ⚠️ {error_msg}")
-                        error_messages.append(error_msg)
+            try:
+                # Convert PIL Image to base64 with compression
+                buffered = io.BytesIO()
+                image.save(buffered, format="PNG", optimize=True, compress_level=6)
+                img_size_bytes = len(buffered.getvalue())
+                img_size_mb = img_size_bytes / (1024 * 1024)
+                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                
+                # Check image size (Vision API has limits)
+                if img_size_mb > 20:
+                    error_msg = f"Page {page_num}: Image too large ({img_size_mb:.2f} MB, max ~20 MB)"
+                    print(f"[PDF_VISION] ⚠️ {error_msg}")
+                    error_messages.append(error_msg)
                         batch_failed.append(page_num)
-                        continue
-                    
+                    continue
+                
                     batch_content.append({
                         "type": "image_url",
                         "image_url": {
@@ -2153,63 +2153,63 @@ Return ALL transactions found on ALL pages in this batch, clearly separated by p
                 continue
             
             # Call GPT-5 Vision API for entire batch
-            try:
-                response = openai_client.chat.completions.create(
+                try:
+                    response = openai_client.chat.completions.create(
                     model="gpt-4o",  # GPT-5 with vision support for better PDF image processing
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
-                        },
-                        {
-                            "role": "user",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
+                            },
+                            {
+                                "role": "user",
                             "content": batch_content
                         }
                     ]
                 )
                 
                 # Process batch response
-                if not response or not response.choices:
+                    if not response or not response.choices:
                     error_msg = f"Batch {batch_start + 1}-{batch_end}: Empty response from Vision API"
-                    print(f"[PDF_VISION] ⚠️ {error_msg}")
-                    error_messages.append(error_msg)
+                        print(f"[PDF_VISION] ⚠️ {error_msg}")
+                        error_messages.append(error_msg)
                     failed_vision_pages.extend(batch_pages)
-                    continue
-                
+                        continue
+                    
                 batch_text = response.choices[0].message.content
                 if batch_text and batch_text.strip():
                     all_text.append(batch_text)
                     pages_in_batch = len([p for p in batch_pages if p not in batch_failed])
                     print(f"[PDF_VISION] ✅ Batch {batch_start + 1}-{batch_end}: Extracted {len(batch_text)} characters from {pages_in_batch} pages")
-                else:
+                        else:
                     print(f"[PDF_VISION] ⚠️ Batch {batch_start + 1}-{batch_end}: Vision API returned empty response")
                     failed_vision_pages.extend([p for p in batch_pages if p not in batch_failed])
-                
-            except openai.RateLimitError as rate_error:
+                        
+                except openai.RateLimitError as rate_error:
                 error_msg = f"Batch {batch_start + 1}-{batch_end}: Rate limit exceeded - {str(rate_error)}"
-                print(f"[PDF_VISION] ❌ {error_msg}")
-                error_messages.append(error_msg)
+                    print(f"[PDF_VISION] ❌ {error_msg}")
+                    error_messages.append(error_msg)
                 failed_vision_pages.extend(batch_pages)
-                if show_ui_errors:
-                    try:
-                        st.warning(f"⚠️ **API Rate Limit**: {error_msg}\n\nPlease wait a moment and try again.")
-                    except:
-                        pass
-                continue
-            except openai.APIError as api_error:
+                    if show_ui_errors:
+                        try:
+                            st.warning(f"⚠️ **API Rate Limit**: {error_msg}\n\nPlease wait a moment and try again.")
+                        except:
+                            pass
+                    continue
+                except openai.APIError as api_error:
                 error_msg = f"Batch {batch_start + 1}-{batch_end}: OpenAI API error - {str(api_error)}"
-                print(f"[PDF_VISION] ❌ {error_msg}")
-                import traceback
-                print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
-                error_messages.append(error_msg)
+                    print(f"[PDF_VISION] ❌ {error_msg}")
+                    import traceback
+                    print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
+                    error_messages.append(error_msg)
                 failed_vision_pages.extend(batch_pages)
-                continue
+                    continue
             except Exception as batch_error:
                 error_msg = f"Batch {batch_start + 1}-{batch_end}: Vision API call failed - {str(batch_error)}"
-                print(f"[PDF_VISION] ❌ {error_msg}")
-                import traceback
-                print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
-                error_messages.append(error_msg)
+                    print(f"[PDF_VISION] ❌ {error_msg}")
+                    import traceback
+                    print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
+                    error_messages.append(error_msg)
                 failed_vision_pages.extend(batch_pages)
                 continue
         
@@ -3076,8 +3076,8 @@ def _tx_auto_map_missing_columns_relaxed(df: pd.DataFrame, missing_targets: List
             df.attrs.setdefault('__tx_column_mapping', [])
             df.attrs['__tx_column_mapping'].extend(mapping_entries)
             print(f"[COLUMN_MAP] Relaxed heuristic mappings:")
-            for entry in mapping_entries:
-                print(f"[COLUMN_MAP]   '{entry['source']}' → '{entry['target']}' (score: {entry.get('score', 'N/A')})")
+        for entry in mapping_entries:
+            print(f"[COLUMN_MAP]   '{entry['source']}' → '{entry['target']}' (score: {entry.get('score', 'N/A')})")
     
     return df
 
@@ -3777,7 +3777,7 @@ def _tx_dataframe_to_transactions(
             if is_invalid:
                 print(f"[TX_DF] ⚠️ Ignoring invalid stock_name '{final_stock_name}' (looks like channel/filename)")
                 final_stock_name = None
-        
+
         transaction = {
             'date': raw_date,
             'transaction_type': transaction_type,
@@ -3954,8 +3954,8 @@ def _tx_build_db_transaction(
         return None
     if re.fullmatch(r'\d+(\.\d+)?', ticker):
         if stock_name:
-            fallback_ticker = _tx_fallback_ticker_from_name(stock_name)
-            ticker = fallback_ticker or ticker
+        fallback_ticker = _tx_fallback_ticker_from_name(stock_name)
+        ticker = fallback_ticker or ticker
     # Don't set stock_name = ticker if it's None - let database fetch it
 
     # Check if values are actually present (not just zero)
@@ -4236,13 +4236,13 @@ def detect_corporate_actions(user_id, db, holdings=None):
                         last_date = recent_splits.index[-1]
                     else:
                         # Fall back to most recent split even if older than 2 years
-                        last_ratio = float(split_series.iloc[-1])
+                    last_ratio = float(split_series.iloc[-1])
                         last_date = split_series.index[-1]
                     
                     if last_ratio > 0:
                         # yfinance reports 0.25 for 4:1 split etc.
                         if last_ratio < 1.0:
-                            resolved_ratio = round(1.0 / last_ratio)
+                        resolved_ratio = round(1.0 / last_ratio)
                         else:
                             resolved_ratio = round(last_ratio)
                         
@@ -4446,8 +4446,8 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
             
             if action_type == 'split':
                 # Stock split: quantity increases, price decreases
-                new_quantity = old_quantity * split_ratio
-                new_price = old_price / split_ratio
+            new_quantity = old_quantity * split_ratio
+            new_price = old_price / split_ratio
                 notes = f"Auto-adjusted for 1:{split_ratio} stock split"
                 
             elif action_type == 'bonus':
@@ -4903,63 +4903,63 @@ def login_page():
                         file_processing_complete = False
                         if uploaded_files:
                             try:
-                                st.info("📁 Processing uploaded files...")
+                            st.info("📁 Processing uploaded files...")
                                 print(f"[REGISTRATION] Starting file processing for {len(uploaded_files)} file(s)...")
                                 import sys
                                 sys.stdout.flush()
                                 
-                                imported_count = process_uploaded_files(uploaded_files, user['id'], portfolio_id)
+                            imported_count = process_uploaded_files(uploaded_files, user['id'], portfolio_id)
                                 print(f"[REGISTRATION] File processing complete: {imported_count} transactions imported")
                                 sys.stdout.flush()
-                                
-                                if imported_count > 0:
-                                    # Auto-fetch comprehensive data (info + prices + weekly) in bulk
-                                    st.info("🔍 Auto-fetching comprehensive data (info + prices + historical)...")
+                            
+                            if imported_count > 0:
+                                # Auto-fetch comprehensive data (info + prices + weekly) in bulk
+                                st.info("🔍 Auto-fetching comprehensive data (info + prices + historical)...")
                                     print(f"[REGISTRATION] Starting comprehensive data fetch...")
                                     sys.stdout.flush()
-                                    
-                                    try:
-                                        holdings = db.get_user_holdings(user['id'])
-                                        if holdings:
-                                            # Get unique tickers and asset types
-                                            unique_tickers = list(set([h['ticker'] for h in holdings if h.get('ticker')]))
-                                            asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings if h.get('ticker')}
-                                            
-                                            if unique_tickers and st.session_state.bulk_ai_fetcher.available:
-                                                st.caption("📊 Bulk fetching all data in one AI call...")
+                                
+                                try:
+                                    holdings = db.get_user_holdings(user['id'])
+                                    if holdings:
+                                        # Get unique tickers and asset types
+                                        unique_tickers = list(set([h['ticker'] for h in holdings if h.get('ticker')]))
+                                        asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings if h.get('ticker')}
+                                        
+                                        if unique_tickers and st.session_state.bulk_ai_fetcher.available:
+                                            st.caption("📊 Bulk fetching all data in one AI call...")
                                                 print(f"[REGISTRATION] Bulk fetching data for {len(unique_tickers)} tickers...")
                                                 sys.stdout.flush()
-                                                # Fetch everything (stock info + current price + 52-week data) in ONE AI call
-                                                stock_ids = db.bulk_process_new_stocks_with_comprehensive_data(
-                                                    tickers=unique_tickers,
-                                                    asset_types=asset_types
-                                                )
-                                                st.caption(f"✅ Fetched comprehensive data for {len(stock_ids)} tickers")
+                                            # Fetch everything (stock info + current price + 52-week data) in ONE AI call
+                                            stock_ids = db.bulk_process_new_stocks_with_comprehensive_data(
+                                                tickers=unique_tickers,
+                                                asset_types=asset_types
+                                            )
+                                            st.caption(f"✅ Fetched comprehensive data for {len(stock_ids)} tickers")
                                                 print(f"[REGISTRATION] ✅ Bulk fetch complete: {len(stock_ids)} tickers")
                                                 sys.stdout.flush()
-                                            else:
-                                                # Fallback to individual updates
-                                                st.caption("📊 Fetching prices individually...")
+                                        else:
+                                            # Fallback to individual updates
+                                            st.caption("📊 Fetching prices individually...")
                                                 print(f"[REGISTRATION] Fetching prices individually for {len(holdings)} holdings...")
                                                 sys.stdout.flush()
-                                                st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
-                                                st.caption(f"✅ Updated {len(holdings)} holdings")
+                                            st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
+                                            st.caption(f"✅ Updated {len(holdings)} holdings")
                                                 print(f"[REGISTRATION] ✅ Individual price fetch complete")
                                                 sys.stdout.flush()
-                                        
-                                        st.success("✅ Registration, file processing, and comprehensive data fetching complete!")
+                                    
+                                    st.success("✅ Registration, file processing, and comprehensive data fetching complete!")
                                         file_processing_complete = True
-                                        
-                                    except Exception as e:
+                                    
+                                except Exception as e:
                                         print(f"[REGISTRATION] ⚠️ Data fetching error: {str(e)}")
                                         import traceback
                                         traceback.print_exc()
                                         sys.stdout.flush()
-                                        st.warning(f"⚠️ Registration successful, but data fetching had issues: {str(e)[:100]}")
-                                        st.success("✅ Registration and file processing complete!")
-                                        file_processing_complete = True
-                                else:
+                                    st.warning(f"⚠️ Registration successful, but data fetching had issues: {str(e)[:100]}")
                                     st.success("✅ Registration and file processing complete!")
+                                        file_processing_complete = True
+                            else:
+                                st.success("✅ Registration and file processing complete!")
                                     file_processing_complete = True
                             except Exception as e:
                                 print(f"[REGISTRATION] ❌ File processing error: {str(e)}")
@@ -4978,9 +4978,9 @@ def login_page():
                             print(f"[REGISTRATION] ✅ All processing complete, redirecting to dashboard...")
                             import sys
                             sys.stdout.flush()
-                            st.info("🔄 Redirecting to dashboard...")
-                            time.sleep(2)  # Brief pause to show success message
-                            st.rerun()
+                        st.info("🔄 Redirecting to dashboard...")
+                        time.sleep(2)  # Brief pause to show success message
+                        st.rerun()
                         else:
                             st.warning("⚠️ File processing is still in progress. Please wait...")
                 else:
@@ -6988,25 +6988,25 @@ def extract_transactions_for_csv(uploaded_file, file_name: str, user_id: Optiona
             print(f"[FILE_PARSE] ⚠️ Python extraction found no transactions, trying AI extraction as fallback...")
             # Fallback to AI only if Python fails
             if AI_AGENTS_AVAILABLE:
-                try:
-                    uploaded_file.seek(0)
-                except Exception:
-                    pass
+            try:
+                uploaded_file.seek(0)
+            except Exception:
+                pass
                 method_used = 'ai'
                 transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
                 if transactions:
                     print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions as fallback")
-    else:
+            else:
         # PDF or other formats: Try Python first, then AI (PDF uses Vision API to convert to images)
         method_used = 'python'
-        try:
-            uploaded_file.seek(0)
-        except Exception:
-            pass
-        extraction_result = extract_transactions_python(uploaded_file, file_name)
-        if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+    extraction_result = extract_transactions_python(uploaded_file, file_name)
+    if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
             transactions, _python_log = extraction_result
-        else:
+    else:
             transactions = extraction_result or []
 
     # Fall back to AI only when Python parser finds nothing
@@ -7252,7 +7252,7 @@ def process_uploaded_files(uploaded_files, user_id, portfolio_id):
 
             # Clear status placeholder and show final results
             status_placeholder.empty()
-            
+
             if imported > 0:
                 method_label = "Python" if method_used == 'python' else "AI"
                 st.success(f"   ✅ Imported {imported} transaction(s) from {file_name} ({method_label} method)")
@@ -7512,30 +7512,30 @@ def portfolio_overview_page():
                     if st.button(f"✅ Apply", key=f"fix_split_{idx}_{action['ticker']}"):
                         with st.spinner(f"Applying corporate action for {action['ticker']}..."):
                             try:
-                                adjusted = adjust_for_corporate_action(
-                                    user['id'], 
-                                    action['stock_id'], 
-                                    action['split_ratio'],
+                            adjusted = adjust_for_corporate_action(
+                                user['id'], 
+                                action['stock_id'], 
+                                action['split_ratio'],
                                     db,
                                     action_type=action.get('action_type', 'split')
-                                )
-                                
-                                if adjusted > 0:
+                            )
+                            
+                            if adjusted > 0:
                                     st.success(f"✅ Successfully applied corporate action for {action['ticker']}!")
                                     st.info(f"📊 Updated {adjusted} transaction(s) and recalculated holdings")
                                     
-                                    # Clear from session state
+                                # Clear from session state
                                     remaining_actions = [
-                                        a for a in corporate_actions if a['ticker'] != action['ticker']
-                                    ]
+                                    a for a in corporate_actions if a['ticker'] != action['ticker']
+                                ]
                                     if remaining_actions:
                                         st.session_state.corporate_actions_detected = remaining_actions
                                     else:
                                         st.session_state.corporate_actions_detected = None
                                     
                                     time.sleep(2)
-                                    st.rerun()
-                                else:
+                                st.rerun()
+                            else:
                                     st.error(f"❌ No transactions found to adjust for {action['ticker']}")
                             except Exception as e:
                                 st.error(f"❌ Error applying corporate action: {str(e)[:200]}")
@@ -7554,9 +7554,9 @@ def portfolio_overview_page():
                         
                         for action in corporate_actions:
                             try:
-                                adjusted = adjust_for_corporate_action(
-                                    user['id'],
-                                    action['stock_id'],
+                            adjusted = adjust_for_corporate_action(
+                                user['id'],
+                                action['stock_id'],
                                     action.get('split_ratio', 1.0),
                                     db,
                                     action_type=action.get('action_type', 'split'),
@@ -7565,7 +7565,7 @@ def portfolio_overview_page():
                                     cash_per_share=action.get('cash_per_share', 0.0)
                                 )
                                 if adjusted > 0:
-                                    total_adjusted += adjusted
+                            total_adjusted += adjusted
                                     successful += 1
                                 else:
                                     failed.append(action['ticker'])
@@ -10746,6 +10746,10 @@ def ai_assistant_page():
     if 'current_thread_messages' not in st.session_state:
         st.session_state.current_thread_messages = []
     
+    # Initialize chat_history for backward compatibility (used in some parts of code)
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+    
     # Load chat threads from database
     try:
         if hasattr(db, 'get_user_chat_history'):
@@ -10822,6 +10826,7 @@ def ai_assistant_page():
     # Main chat area
     st.title("🤖 AI Assistant")
     st.caption("Your intelligent portfolio advisor with access to all your data")
+    
     
     # Always load PDF context
     st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
@@ -10965,6 +10970,84 @@ def ai_assistant_page():
                         return json.dumps(pdfs, indent=2, default=str)
                     except Exception as e:
                         return json.dumps({"error": str(e)})
+                
+                def get_pms_aif_navs(user_id: str, ticker: str = None, limit: int = None) -> str:
+                    """Get PMS/AIF NAVs (Net Asset Values) for user holdings. Returns current NAV, CAGR used, and historical NAVs if available. Use this when user asks about PMS or AIF NAVs, current values, or performance."""
+                    try:
+                        from enhanced_price_fetcher import EnhancedPriceFetcher
+                        
+                        # Get holdings filtered by PMS/AIF
+                        query = db.supabase.table('user_holdings_detailed').select('*').eq('user_id', user_id).in_('asset_type', ['pms', 'aif'])
+                        if ticker:
+                            query = query.eq('ticker', ticker)
+                        if limit:
+                            query = query.limit(limit)
+                        response = query.execute()
+                        
+                        if not response.data:
+                            return json.dumps({"message": "No PMS/AIF holdings found", "holdings": []}, indent=2)
+                        
+                        nav_data = []
+                        price_fetcher = EnhancedPriceFetcher()
+                        
+                        for holding in response.data:
+                            ticker_val = holding.get('ticker')
+                            asset_type = holding.get('asset_type')
+                            current_price = holding.get('current_price')
+                            stock_name = holding.get('stock_name') or holding.get('scheme_name', '')
+                            quantity = holding.get('total_quantity', 0)
+                            
+                            # Get transaction data to calculate NAV
+                            transactions = db.supabase.table('user_transactions').select('*').eq('user_id', user_id).eq('ticker', ticker_val).eq('transaction_type', 'buy').order('transaction_date', desc=False).limit(1).execute()
+                            
+                            nav_info = {
+                                'ticker': ticker_val,
+                                'name': stock_name,
+                                'asset_type': asset_type,
+                                'current_nav': current_price,
+                                'quantity': quantity,
+                                'total_value': current_price * quantity if current_price and quantity else 0
+                            }
+                            
+                            # Try to get CAGR and historical NAVs if transaction data available
+                            if transactions.data:
+                                first_txn = transactions.data[0]
+                                investment_date = first_txn.get('transaction_date')
+                                investment_amount = float(first_txn.get('price', 0)) * float(first_txn.get('quantity', 0))
+                                
+                                if investment_date and investment_amount > 0:
+                                    try:
+                                        calculator = price_fetcher._get_pms_aif_calculator()
+                                        if calculator:
+                                            result = calculator.calculate_pms_aif_value(
+                                                ticker_val,
+                                                investment_date,
+                                                investment_amount,
+                                                is_aif=(asset_type == 'aif'),
+                                                pms_aif_name=stock_name
+                                            )
+                                            
+                                            nav_info['cagr_used'] = result.get('cagr_used', 0)
+                                            nav_info['cagr_period'] = result.get('cagr_period', 'N/A')
+                                            nav_info['source'] = result.get('source', 'N/A')
+                                            nav_info['years_elapsed'] = result.get('years_elapsed', 0)
+                                            nav_info['initial_investment'] = result.get('initial_investment', investment_amount)
+                                            nav_info['current_value'] = result.get('current_value', current_price * quantity if current_price and quantity else 0)
+                                            
+                                            # Include weekly NAVs if available
+                                            if result.get('weekly_values'):
+                                                nav_info['weekly_navs'] = result['weekly_values'][:52]  # Last 52 weeks
+                                    except Exception as e:
+                                        nav_info['error'] = str(e)[:200]
+                            
+                            nav_data.append(nav_info)
+                        
+                        return json.dumps({
+                            "holdings": nav_data,
+                            "count": len(nav_data)
+                        }, indent=2, default=str)
+                    except Exception as e:
+                        return json.dumps({"error": str(e)}, indent=2)
                 
                 def get_financial_news(ticker: str = None, company_name: str = None, sector: str = None, limit: int = 10) -> str:
                     """Get latest financial news from Moneycontrol, Economic Times, and other sources. Returns JSON string of news articles."""
@@ -11210,6 +11293,22 @@ def ai_assistant_page():
                     {
                         "type": "function",
                         "function": {
+                            "name": "get_pms_aif_navs",
+                            "description": "Get PMS (Portfolio Management Service) and AIF (Alternative Investment Fund) NAVs (Net Asset Values). Returns current NAV, CAGR used, historical NAVs, and performance metrics. Use this when user asks about PMS/AIF NAVs, current values, performance, or CAGR.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "user_id": {"type": "string", "description": "User ID (required)"},
+                                    "ticker": {"type": "string", "description": "Specific PMS/AIF ticker (e.g., 'INP000005000') - optional, if not provided returns all PMS/AIF holdings"},
+                                    "limit": {"type": "integer", "description": "Maximum number of holdings to return"}
+                                },
+                                "required": ["user_id"]
+                            }
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
                             "name": "get_financial_news",
                             "description": "Get latest financial news and market updates from Moneycontrol, Economic Times, and other sources. Use this to access real-time financial news, market trends, company updates, and sector news. Note: Currently uses web scraping and AI knowledge - for true real-time news, consider integrating NewsAPI or Alpha Vantage News API.",
                             "parameters": {
@@ -11239,13 +11338,16 @@ def ai_assistant_page():
 
 💡 INSTRUCTIONS:
 - For data-related questions, use the database query functions (get_holdings, get_transactions, etc.) to fetch the exact data you need
+- IMPORTANT: The database functions return COMPLETE, UNFILTERED data - they query the database directly, not cropped context
 - The session dataframes are already loaded, but you can query the database for more specific or filtered data
 - Always query the database when you need:
-  * Filtered transactions (by date, type, ticker)
-  * Historical prices for specific tickers
-  * Stock master metadata
-  * PDF documents matching search terms
+  * Filtered transactions (by date, type, ticker) - returns ALL matching records, not limited
+  * Historical prices for specific tickers - returns ALL available historical data
+  * Stock master metadata - returns ALL matching records
+  * PDF documents matching search terms - returns ALL matching PDFs
+  * PMS/AIF NAVs - returns complete NAV data with CAGR and historical values
 - Use the functions based on what the user is asking - don't query everything, only what's needed
+- The functions have NO data limits or cropping - they return complete database results
 """
                 
                 # Build system prompt with full database access instructions
@@ -11266,7 +11368,8 @@ You have DIRECT ACCESS to query the database using these functions:
 3. get_historical_prices(ticker, date_from, date_to, limit) - Query historical prices
 4. get_stock_master(ticker, asset_type, limit) - Query stock metadata
 5. get_pdfs(user_id, search_term, limit) - Query PDF documents
-6. get_financial_news(ticker, company_name, sector, limit) - Get latest financial news from Moneycontrol, Economic Times, and other sources
+6. get_pms_aif_navs(user_id, ticker, limit) - Get PMS/AIF NAVs (Net Asset Values) with CAGR, current NAV, and historical NAVs
+7. get_financial_news(ticker, company_name, sector, limit) - Get latest financial news from Moneycontrol, Economic Times, and other sources
 
 📰 FINANCIAL NEWS ACCESS:
 - Use get_financial_news() to fetch latest market news, company updates, and sector trends
@@ -11305,8 +11408,15 @@ Always:
                 # Start conversation with chat history (if available) and user question
                 messages = [{"role": "system", "content": system_prompt}]
                 
-                # Add chat history to context (last 10 conversations)
-                if st.session_state.chat_history:
+                # Add chat history to context from current thread or session state
+                # Use current thread messages if available, otherwise use chat_history
+                if st.session_state.current_thread_messages:
+                    # Add messages from current thread (excluding the last user question which we'll add separately)
+                    for msg in st.session_state.current_thread_messages[:-1]:  # Exclude last message if it's the current question
+                        if msg['role'] in ['user', 'assistant']:
+                            messages.append({"role": msg['role'], "content": msg['content']})
+                elif st.session_state.chat_history:
+                    # Fallback to old chat_history format
                     for chat in st.session_state.chat_history[-10:]:  # Last 10 conversations
                         messages.append({"role": "user", "content": chat.get("q", "")})
                         messages.append({"role": "assistant", "content": chat.get("a", "")})
@@ -11316,13 +11426,47 @@ Always:
                 
                 # Function calling loop - allow AI to query database multiple times
                 max_iterations = 5
+                model_used = None
+                
                 for iteration in range(max_iterations):
-                    response = openai.chat.completions.create(
-                        model="gpt-4o",
-                        messages=messages,
-                        tools=functions,
-                        tool_choice="auto"  # Let AI decide when to use functions
-                    )
+                    # Try GPT-5 first, fallback to gpt-4o
+                    models_to_try = ["gpt-5", "gpt-4o"]
+                    response = None
+                    
+                    for model in models_to_try:
+                        try:
+                            if iteration == 0 and model_used is None:
+                                # Log which model is being tried
+                                print(f"[AI_ASSISTANT] 🔄 Initializing model: {model}")
+                            
+                            response = openai.chat.completions.create(
+                                model=model,
+                                messages=messages,
+                                tools=functions,
+                                tool_choice="auto"  # Let AI decide when to use functions
+                            )
+                            model_used = model
+                            
+                            if iteration == 0:
+                                # Log which model succeeded
+                                print(f"[AI_ASSISTANT] ✅ Model initialized: {model}")
+                            break
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            if "model" in error_str or "not found" in error_str or "invalid" in error_str:
+                                # Model not available, try next
+                                if iteration == 0:
+                                    print(f"[AI_ASSISTANT] ⚠️ {model} not available: {str(e)[:100]}")
+                                continue
+                            else:
+                                # Other error, try next model
+                                if iteration == 0:
+                                    print(f"[AI_ASSISTANT] ⚠️ {model} error: {str(e)[:100]}")
+                                continue
+                    
+                    if not response:
+                        st.error("❌ Could not connect to AI service. Please try again.")
+                        st.stop()
                     
                     choice = response.choices[0]
                     # Convert message object to dict format for consistency
@@ -11365,6 +11509,11 @@ Always:
                                 function_result = get_stock_master(**function_args)
                             elif function_name == 'get_pdfs':
                                 function_result = get_pdfs(**function_args)
+                            elif function_name == 'get_pms_aif_navs':
+                                # Add user_id if not provided
+                                if 'user_id' not in function_args:
+                                    function_args['user_id'] = user['id']
+                                function_result = get_pms_aif_navs(**function_args)
                             elif function_name == 'get_financial_news':
                                 function_result = get_financial_news(**function_args)
                             else:
@@ -11393,16 +11542,50 @@ Always:
                     st.error("❌ Empty response from AI. Please try again.")
                     st.stop()
                 
-                # Display the response immediately
-                st.markdown("---")
-                st.markdown("### 💬 AI Response:")
-                st.success(ai_response)
+                # Display the response in chat format
+                with st.chat_message("user"):
+                    st.write(user_question)
                 
-                # Store in chat history (session state)
+                with st.chat_message("assistant"):
+                    # Show which model was used
+                    if model_used:
+                        st.caption(f"🤖 Model: **{model_used}**")
+                    st.markdown(ai_response)
+                
+                # Store in chat history (session state) - backward compatibility
                 st.session_state.chat_history.append({
                     "q": user_question,
                     "a": ai_response
                 })
+                
+                # Add to current thread messages
+                st.session_state.current_thread_messages.append({
+                    'role': 'user',
+                    'content': user_question
+                })
+                st.session_state.current_thread_messages.append({
+                    'role': 'assistant',
+                    'content': ai_response
+                })
+                
+                # Create or update thread
+                if st.session_state.current_thread_id is None:
+                    # Create new thread
+                    new_thread_id = f"thread_{datetime.now().timestamp()}"
+                    new_thread = {
+                        'id': new_thread_id,
+                        'title': user_question[:50] + ('...' if len(user_question) > 50 else ''),
+                        'created_at': datetime.now().isoformat(),
+                        'messages': st.session_state.current_thread_messages.copy()
+                    }
+                    st.session_state.chat_threads.append(new_thread)
+                    st.session_state.current_thread_id = new_thread_id
+                else:
+                    # Update existing thread
+                    for thread in st.session_state.chat_threads:
+                        if thread['id'] == st.session_state.current_thread_id:
+                            thread['messages'] = st.session_state.current_thread_messages.copy()
+                            break
                 
                 # Save to database (user-specific, persistent)
                 # Check if method exists before calling
@@ -11413,6 +11596,8 @@ Always:
                         # If table doesn't exist, just continue without saving
                         pass
                 
+                st.rerun()
+                
             except Exception as e:
                 with st.chat_message("assistant"):
                     st.error(f"❌ Error: {str(e)[:200]}")
@@ -11420,102 +11605,102 @@ Always:
     # Collapsible sections below chat
     with st.expander("📚 PDF Library", expanded=False):
         st.caption("💡 PDFs uploaded by any user are visible to everyone")
-        
-        if user_pdfs and len(user_pdfs) > 0:
-            for pdf in user_pdfs:
-                with st.expander(f"📄 {pdf['filename']}"):
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.caption(f"📅 Uploaded: {pdf['uploaded_at'][:10]}")
-                        
-                        if pdf.get('ai_summary'):
-                            st.markdown("**🤖 AI Summary:**")
-                            st.info(pdf['ai_summary'])
-                        
-                        # Add button to use this PDF for analysis
-                        if st.button(f"🔍 Analyze {pdf['filename'][:20]}...", key=f"analyze_{pdf['id']}", help="Use this PDF for AI analysis"):
-                            try:
-                                import openai
-                                openai.api_key = st.secrets["api_keys"]["open_ai"]
-                                
-                                # Get portfolio context
-                                portfolio_summary = get_cached_portfolio_summary(holdings)
-                                
-                                # Analyze the stored PDF
-                                analysis_prompt = f"""
-                                Analyze this stored PDF document for portfolio management insights.
-                                
-                                📄 DOCUMENT INFO:
-                                - Filename: {pdf['filename']}
-                                - Uploaded: {pdf['uploaded_at'][:10]}
-                                
-                                💼 USER'S PORTFOLIO:
-                                {portfolio_summary}
-                                
-                                📝 PDF CONTENT:
-                                {pdf.get('pdf_text', '')[:5000]}...
-                                
-                                🤖 PREVIOUS AI SUMMARY:
-                                {pdf.get('ai_summary', 'No previous summary')}
-                                
-                                Please provide a fresh analysis focusing on:
-                                1. Key insights from the document
-                                2. How it relates to the user's current portfolio
-                                3. Actionable recommendations
-                                
-                                Be specific and actionable. Use emojis and clear formatting.
-                                """
-                                
-                                response = openai.chat.completions.create(
+    
+    if user_pdfs and len(user_pdfs) > 0:
+        for pdf in user_pdfs:
+            with st.expander(f"📄 {pdf['filename']}"):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.caption(f"📅 Uploaded: {pdf['uploaded_at'][:10]}")
+                    
+                    if pdf.get('ai_summary'):
+                        st.markdown("**🤖 AI Summary:**")
+                        st.info(pdf['ai_summary'])
+                    
+                    # Add button to use this PDF for analysis
+                    if st.button(f"🔍 Analyze {pdf['filename'][:20]}...", key=f"analyze_{pdf['id']}", help="Use this PDF for AI analysis"):
+                        try:
+                            import openai
+                            openai.api_key = st.secrets["api_keys"]["open_ai"]
+                            
+                            # Get portfolio context
+                            portfolio_summary = get_cached_portfolio_summary(holdings)
+                            
+                            # Analyze the stored PDF
+                            analysis_prompt = f"""
+                            Analyze this stored PDF document for portfolio management insights.
+                            
+                            📄 DOCUMENT INFO:
+                            - Filename: {pdf['filename']}
+                            - Uploaded: {pdf['uploaded_at'][:10]}
+                            
+                            💼 USER'S PORTFOLIO:
+                            {portfolio_summary}
+                            
+                            📝 PDF CONTENT:
+                            {pdf.get('pdf_text', '')[:5000]}...
+                            
+                            🤖 PREVIOUS AI SUMMARY:
+                            {pdf.get('ai_summary', 'No previous summary')}
+                            
+                            Please provide a fresh analysis focusing on:
+                            1. Key insights from the document
+                            2. How it relates to the user's current portfolio
+                            3. Actionable recommendations
+                            
+                            Be specific and actionable. Use emojis and clear formatting.
+                            """
+                            
+                            response = openai.chat.completions.create(
                                     model="gpt-4o",  # Upgraded to GPT-5 for better results
                                     messages=[{"role": "user", "content": analysis_prompt}]
-                                )
-                                
-                                fresh_analysis = response.choices[0].message.content
-                                
-                                # Display the fresh analysis
-                                st.markdown("### 🔍 Fresh Analysis")
-                                st.markdown(fresh_analysis)
-                                
-                                # Store in chat history (session state)
-                                st.session_state.chat_history.append({
-                                    "q": f"Analyze PDF: {pdf['filename']}", 
-                                    "a": fresh_analysis
-                                })
-                                # Save to database (user-specific, persistent)
-                                if hasattr(db, 'save_chat_history'):
-                                    try:
-                                        db.save_chat_history(user['id'], f"Analyze PDF: {pdf['filename']}", fresh_analysis)
-                                    except Exception:
-                                        pass
-                                
-                            except Exception as e:
-                                st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
-                    
-                    with col2:
-                        if st.button("🗑️", key=f"del_{pdf['id']}", help="Delete this PDF"):
-                            if db.delete_pdf(pdf['id']):
-                                st.success("Deleted!")
-                                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                                st.rerun()
-        else:
-            st.caption("No PDFs uploaded yet")
-        
-        _render_document_upload_section(
-            section_key="document_ai_primary",
-            user=user,
-            holdings=holdings,
-            db=db,
-        )
+                            )
+                            
+                            fresh_analysis = response.choices[0].message.content
+                            
+                            # Display the fresh analysis
+                            st.markdown("### 🔍 Fresh Analysis")
+                            st.markdown(fresh_analysis)
+                            
+                            # Store in chat history (session state)
+                            st.session_state.chat_history.append({
+                                "q": f"Analyze PDF: {pdf['filename']}", 
+                                "a": fresh_analysis
+                            })
+                            # Save to database (user-specific, persistent)
+                            if hasattr(db, 'save_chat_history'):
+                                try:
+                                    db.save_chat_history(user['id'], f"Analyze PDF: {pdf['filename']}", fresh_analysis)
+                                except Exception:
+                                    pass
+                            
+                        except Exception as e:
+                            st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
+                
+                with col2:
+                    if st.button("🗑️", key=f"del_{pdf['id']}", help="Delete this PDF"):
+                        if db.delete_pdf(pdf['id']):
+                            st.success("Deleted!")
+                            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+                            st.rerun()
+    else:
+        st.caption("No PDFs uploaded yet")
+    
+    _render_document_upload_section(
+        section_key="document_ai_primary",
+        user=user,
+        holdings=holdings,
+        db=db,
+    )
     
     with st.expander("💡 Quick Tips", expanded=False):
-        st.caption("Try asking me:")
-        st.caption("• 'How is my portfolio performing overall?'")
-        st.caption("• 'Which sectors are my best performers?'")
-        st.caption("• 'How can I reduce portfolio risk?'")
-        st.caption("• 'Which channels are giving me the best returns?'")
-        st.caption("• 'Should I rebalance my portfolio?'")
-        st.caption("• 'Upload a research report for analysis'")
+    st.caption("Try asking me:")
+    st.caption("• 'How is my portfolio performing overall?'")
+    st.caption("• 'Which sectors are my best performers?'")
+    st.caption("• 'How can I reduce portfolio risk?'")
+    st.caption("• 'Which channels are giving me the best returns?'")
+    st.caption("• 'Should I rebalance my portfolio?'")
+    st.caption("• 'Upload a research report for analysis'")
 
 def ai_insights_page():
     """AI Insights page with agent analysis and recommendations"""
