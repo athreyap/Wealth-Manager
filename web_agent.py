@@ -1482,19 +1482,19 @@ def _tx_infer_asset_type(ticker: str, stock_name: str, asset_hint: str = '', cac
     
     # STEP 5: Use AI as last resort to determine asset type (only if not using bulk cache)
     if not cache:
-    try:
-        client = st.session_state.get('openai_client')
-        if not client:
-            try:
-                from openai import OpenAI
-                if "api_keys" in st.secrets and "open_ai" in st.secrets.get("api_keys", {}):
-                    client = OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
-                    st.session_state['openai_client'] = client
-            except Exception:
-                pass
-        
-        if client:
-            prompt = f"""You are a financial data expert. Determine the asset type for this Indian security:
+        try:
+            client = st.session_state.get('openai_client')
+            if not client:
+                try:
+                    from openai import OpenAI
+                    if "api_keys" in st.secrets and "open_ai" in st.secrets.get("api_keys", {}):
+                        client = OpenAI(api_key=st.secrets["api_keys"]["open_ai"])
+                        st.session_state['openai_client'] = client
+                except Exception:
+                    pass
+            
+            if client:
+                prompt = f"""You are a financial data expert. Determine the asset type for this Indian security:
 
 Ticker: {ticker}
 Name: {stock_name or 'Not provided'}
@@ -1531,23 +1531,23 @@ If uncertain, return asset_type based on ticker pattern and name."""
                     return ai_asset_type
             except Exception as e:
                 pass  # AI failed, fall back to heuristics
-    except Exception:
-        pass  # AI not available, fall back to heuristics
-    
-    # STEP 6: Fallback to heuristics if all data sources fail
-    mf_keywords = ['fund', 'scheme', 'growth', 'nav', 'mutual', 'mf', 'plan', 'allocation', 'hybrid', 'equity', 'debt']
-    has_mf_keyword = any(keyword in name for keyword in mf_keywords)
-    
-    if has_mf_keyword:
-        return 'mutual_fund'
-    
-    if 'debenture' in name and not has_mf_keyword:
-        return 'bond'
-    if 'bond' in name and not has_mf_keyword and not is_numeric:
-        return 'bond'
-    
-    # Default to stock for unknown types
-    return 'stock'
+        except Exception:
+            pass  # AI not available, fall back to heuristics
+        
+        # STEP 6: Fallback to heuristics if all data sources fail
+        mf_keywords = ['fund', 'scheme', 'growth', 'nav', 'mutual', 'mf', 'plan', 'allocation', 'hybrid', 'equity', 'debt']
+        has_mf_keyword = any(keyword in name for keyword in mf_keywords)
+        
+        if has_mf_keyword:
+            return 'mutual_fund'
+        
+        if 'debenture' in name and not has_mf_keyword:
+            return 'bond'
+        if 'bond' in name and not has_mf_keyword and not is_numeric:
+            return 'bond'
+        
+        # Default to stock for unknown types
+        return 'stock'
 
 
 def _extract_pdf_with_ocr(uploaded_file) -> str:
@@ -2121,22 +2121,22 @@ Return ALL transactions found on ALL pages in this batch, clearly separated by p
             batch_failed = []
             for page_idx, image in enumerate(batch_images):
                 page_num = batch_start + page_idx + 1
-            try:
-                # Convert PIL Image to base64 with compression
-                buffered = io.BytesIO()
-                image.save(buffered, format="PNG", optimize=True, compress_level=6)
-                img_size_bytes = len(buffered.getvalue())
-                img_size_mb = img_size_bytes / (1024 * 1024)
-                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                
-                # Check image size (Vision API has limits)
-                if img_size_mb > 20:
-                    error_msg = f"Page {page_num}: Image too large ({img_size_mb:.2f} MB, max ~20 MB)"
-                    print(f"[PDF_VISION] ⚠️ {error_msg}")
-                    error_messages.append(error_msg)
+                try:
+                    # Convert PIL Image to base64 with compression
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG", optimize=True, compress_level=6)
+                    img_size_bytes = len(buffered.getvalue())
+                    img_size_mb = img_size_bytes / (1024 * 1024)
+                    img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                    
+                    # Check image size (Vision API has limits)
+                    if img_size_mb > 20:
+                        error_msg = f"Page {page_num}: Image too large ({img_size_mb:.2f} MB, max ~20 MB)"
+                        print(f"[PDF_VISION] ⚠️ {error_msg}")
+                        error_messages.append(error_msg)
                         batch_failed.append(page_num)
-                    continue
-                
+                        continue
+                    
                     batch_content.append({
                         "type": "image_url",
                         "image_url": {
@@ -2153,63 +2153,63 @@ Return ALL transactions found on ALL pages in this batch, clearly separated by p
                 continue
             
             # Call GPT-5 Vision API for entire batch
-                try:
-                    response = openai_client.chat.completions.create(
+            try:
+                response = openai_client.chat.completions.create(
                     model="gpt-4o",  # GPT-5 with vision support for better PDF image processing
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
-                            },
-                            {
-                                "role": "user",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an expert at extracting financial transaction data from documents. Extract all transaction information including dates, tickers, quantities, prices, amounts, and transaction types. Return the data as structured text that can be parsed."
+                        },
+                        {
+                            "role": "user",
                             "content": batch_content
                         }
                     ]
                 )
                 
                 # Process batch response
-                    if not response or not response.choices:
+                if not response or not response.choices:
                     error_msg = f"Batch {batch_start + 1}-{batch_end}: Empty response from Vision API"
-                        print(f"[PDF_VISION] ⚠️ {error_msg}")
-                        error_messages.append(error_msg)
+                    print(f"[PDF_VISION] ⚠️ {error_msg}")
+                    error_messages.append(error_msg)
                     failed_vision_pages.extend(batch_pages)
-                        continue
+                    continue
                     
                 batch_text = response.choices[0].message.content
                 if batch_text and batch_text.strip():
                     all_text.append(batch_text)
                     pages_in_batch = len([p for p in batch_pages if p not in batch_failed])
                     print(f"[PDF_VISION] ✅ Batch {batch_start + 1}-{batch_end}: Extracted {len(batch_text)} characters from {pages_in_batch} pages")
-                        else:
+                else:
                     print(f"[PDF_VISION] ⚠️ Batch {batch_start + 1}-{batch_end}: Vision API returned empty response")
                     failed_vision_pages.extend([p for p in batch_pages if p not in batch_failed])
                         
-                except openai.RateLimitError as rate_error:
+            except openai.RateLimitError as rate_error:
                 error_msg = f"Batch {batch_start + 1}-{batch_end}: Rate limit exceeded - {str(rate_error)}"
-                    print(f"[PDF_VISION] ❌ {error_msg}")
-                    error_messages.append(error_msg)
+                print(f"[PDF_VISION] ❌ {error_msg}")
+                error_messages.append(error_msg)
                 failed_vision_pages.extend(batch_pages)
-                    if show_ui_errors:
-                        try:
-                            st.warning(f"⚠️ **API Rate Limit**: {error_msg}\n\nPlease wait a moment and try again.")
-                        except:
-                            pass
-                    continue
-                except openai.APIError as api_error:
+                if show_ui_errors:
+                    try:
+                        st.warning(f"⚠️ **API Rate Limit**: {error_msg}\n\nPlease wait a moment and try again.")
+                    except:
+                        pass
+                continue
+            except openai.APIError as api_error:
                 error_msg = f"Batch {batch_start + 1}-{batch_end}: OpenAI API error - {str(api_error)}"
-                    print(f"[PDF_VISION] ❌ {error_msg}")
-                    import traceback
-                    print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
-                    error_messages.append(error_msg)
+                print(f"[PDF_VISION] ❌ {error_msg}")
+                import traceback
+                print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
+                error_messages.append(error_msg)
                 failed_vision_pages.extend(batch_pages)
-                    continue
+                continue
             except Exception as batch_error:
                 error_msg = f"Batch {batch_start + 1}-{batch_end}: Vision API call failed - {str(batch_error)}"
-                    print(f"[PDF_VISION] ❌ {error_msg}")
-                    import traceback
-                    print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
-                    error_messages.append(error_msg)
+                print(f"[PDF_VISION] ❌ {error_msg}")
+                import traceback
+                print(f"[PDF_VISION] API error traceback: {traceback.format_exc()}")
+                error_messages.append(error_msg)
                 failed_vision_pages.extend(batch_pages)
                 continue
         
@@ -3954,8 +3954,8 @@ def _tx_build_db_transaction(
         return None
     if re.fullmatch(r'\d+(\.\d+)?', ticker):
         if stock_name:
-        fallback_ticker = _tx_fallback_ticker_from_name(stock_name)
-        ticker = fallback_ticker or ticker
+            fallback_ticker = _tx_fallback_ticker_from_name(stock_name)
+            ticker = fallback_ticker or ticker
     # Don't set stock_name = ticker if it's None - let database fetch it
 
     # Check if values are actually present (not just zero)
@@ -4236,13 +4236,13 @@ def detect_corporate_actions(user_id, db, holdings=None):
                         last_date = recent_splits.index[-1]
                     else:
                         # Fall back to most recent split even if older than 2 years
-                    last_ratio = float(split_series.iloc[-1])
+                        last_ratio = float(split_series.iloc[-1])
                         last_date = split_series.index[-1]
                     
                     if last_ratio > 0:
                         # yfinance reports 0.25 for 4:1 split etc.
                         if last_ratio < 1.0:
-                        resolved_ratio = round(1.0 / last_ratio)
+                            resolved_ratio = round(1.0 / last_ratio)
                         else:
                             resolved_ratio = round(last_ratio)
                         
@@ -4446,8 +4446,8 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
             
             if action_type == 'split':
                 # Stock split: quantity increases, price decreases
-            new_quantity = old_quantity * split_ratio
-            new_price = old_price / split_ratio
+                new_quantity = old_quantity * split_ratio
+                new_price = old_price / split_ratio
                 notes = f"Auto-adjusted for 1:{split_ratio} stock split"
                 
             elif action_type == 'bonus':
@@ -4903,63 +4903,63 @@ def login_page():
                         file_processing_complete = False
                         if uploaded_files:
                             try:
-                            st.info("📁 Processing uploaded files...")
+                                st.info("📁 Processing uploaded files...")
                                 print(f"[REGISTRATION] Starting file processing for {len(uploaded_files)} file(s)...")
                                 import sys
                                 sys.stdout.flush()
                                 
-                            imported_count = process_uploaded_files(uploaded_files, user['id'], portfolio_id)
+                                imported_count = process_uploaded_files(uploaded_files, user['id'], portfolio_id)
                                 print(f"[REGISTRATION] File processing complete: {imported_count} transactions imported")
                                 sys.stdout.flush()
                             
-                            if imported_count > 0:
-                                # Auto-fetch comprehensive data (info + prices + weekly) in bulk
-                                st.info("🔍 Auto-fetching comprehensive data (info + prices + historical)...")
+                                if imported_count > 0:
+                                    # Auto-fetch comprehensive data (info + prices + weekly) in bulk
+                                    st.info("🔍 Auto-fetching comprehensive data (info + prices + historical)...")
                                     print(f"[REGISTRATION] Starting comprehensive data fetch...")
                                     sys.stdout.flush()
-                                
-                                try:
-                                    holdings = db.get_user_holdings(user['id'])
-                                    if holdings:
-                                        # Get unique tickers and asset types
-                                        unique_tickers = list(set([h['ticker'] for h in holdings if h.get('ticker')]))
-                                        asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings if h.get('ticker')}
-                                        
-                                        if unique_tickers and st.session_state.bulk_ai_fetcher.available:
-                                            st.caption("📊 Bulk fetching all data in one AI call...")
+                                    
+                                    try:
+                                        holdings = db.get_user_holdings(user['id'])
+                                        if holdings:
+                                            # Get unique tickers and asset types
+                                            unique_tickers = list(set([h['ticker'] for h in holdings if h.get('ticker')]))
+                                            asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings if h.get('ticker')}
+                                            
+                                            if unique_tickers and st.session_state.bulk_ai_fetcher.available:
+                                                st.caption("📊 Bulk fetching all data in one AI call...")
                                                 print(f"[REGISTRATION] Bulk fetching data for {len(unique_tickers)} tickers...")
                                                 sys.stdout.flush()
-                                            # Fetch everything (stock info + current price + 52-week data) in ONE AI call
-                                            stock_ids = db.bulk_process_new_stocks_with_comprehensive_data(
-                                                tickers=unique_tickers,
-                                                asset_types=asset_types
-                                            )
-                                            st.caption(f"✅ Fetched comprehensive data for {len(stock_ids)} tickers")
+                                                # Fetch everything (stock info + current price + 52-week data) in ONE AI call
+                                                stock_ids = db.bulk_process_new_stocks_with_comprehensive_data(
+                                                    tickers=unique_tickers,
+                                                    asset_types=asset_types
+                                                )
+                                                st.caption(f"✅ Fetched comprehensive data for {len(stock_ids)} tickers")
                                                 print(f"[REGISTRATION] ✅ Bulk fetch complete: {len(stock_ids)} tickers")
                                                 sys.stdout.flush()
-                                        else:
-                                            # Fallback to individual updates
-                                            st.caption("📊 Fetching prices individually...")
+                                            else:
+                                                # Fallback to individual updates
+                                                st.caption("📊 Fetching prices individually...")
                                                 print(f"[REGISTRATION] Fetching prices individually for {len(holdings)} holdings...")
                                                 sys.stdout.flush()
-                                            st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
-                                            st.caption(f"✅ Updated {len(holdings)} holdings")
+                                                st.session_state.price_fetcher.update_live_prices_for_holdings(holdings, db)
+                                                st.caption(f"✅ Updated {len(holdings)} holdings")
                                                 print(f"[REGISTRATION] ✅ Individual price fetch complete")
                                                 sys.stdout.flush()
-                                    
-                                    st.success("✅ Registration, file processing, and comprehensive data fetching complete!")
+                                        
+                                        st.success("✅ Registration, file processing, and comprehensive data fetching complete!")
                                         file_processing_complete = True
                                     
-                                except Exception as e:
+                                    except Exception as e:
                                         print(f"[REGISTRATION] ⚠️ Data fetching error: {str(e)}")
                                         import traceback
                                         traceback.print_exc()
                                         sys.stdout.flush()
-                                    st.warning(f"⚠️ Registration successful, but data fetching had issues: {str(e)[:100]}")
-                                    st.success("✅ Registration and file processing complete!")
+                                        st.warning(f"⚠️ Registration successful, but data fetching had issues: {str(e)[:100]}")
+                                        st.success("✅ Registration and file processing complete!")
                                         file_processing_complete = True
-                            else:
-                                st.success("✅ Registration and file processing complete!")
+                                else:
+                                    st.success("✅ Registration and file processing complete!")
                                     file_processing_complete = True
                             except Exception as e:
                                 print(f"[REGISTRATION] ❌ File processing error: {str(e)}")
@@ -4978,9 +4978,9 @@ def login_page():
                             print(f"[REGISTRATION] ✅ All processing complete, redirecting to dashboard...")
                             import sys
                             sys.stdout.flush()
-                        st.info("🔄 Redirecting to dashboard...")
-                        time.sleep(2)  # Brief pause to show success message
-                        st.rerun()
+                            st.info("🔄 Redirecting to dashboard...")
+                            time.sleep(2)  # Brief pause to show success message
+                            st.rerun()
                         else:
                             st.warning("⚠️ File processing is still in progress. Please wait...")
                 else:
@@ -6988,65 +6988,65 @@ def extract_transactions_for_csv(uploaded_file, file_name: str, user_id: Optiona
             print(f"[FILE_PARSE] ⚠️ Python extraction found no transactions, trying AI extraction as fallback...")
             # Fallback to AI only if Python fails
             if AI_AGENTS_AVAILABLE:
-            try:
-                uploaded_file.seek(0)
-            except Exception:
-                pass
+                try:
+                    uploaded_file.seek(0)
+                except Exception:
+                    pass
                 method_used = 'ai'
                 transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
                 if transactions:
                     print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions as fallback")
             else:
-        # PDF or other formats: Try Python first, then AI (PDF uses Vision API to convert to images)
-        method_used = 'python'
-    try:
-        uploaded_file.seek(0)
-    except Exception:
-        pass
-    extraction_result = extract_transactions_python(uploaded_file, file_name)
-    if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
-            transactions, _python_log = extraction_result
-    else:
-            transactions = extraction_result or []
+                # PDF or other formats: Try Python first, then AI (PDF uses Vision API to convert to images)
+                method_used = 'python'
+                try:
+                    uploaded_file.seek(0)
+                except Exception:
+                    pass
+                extraction_result = extract_transactions_python(uploaded_file, file_name)
+                if isinstance(extraction_result, tuple) and len(extraction_result) == 2:
+                    transactions, _python_log = extraction_result
+                else:
+                    transactions = extraction_result or []
 
-    # Fall back to AI only when Python parser finds nothing
-    if not transactions:
-        if AI_AGENTS_AVAILABLE:
-            method_used = 'ai'
-            print(f"[FILE_PARSE] Python extraction found no transactions, trying AI extraction for {file_name}...")
-            if file_ext == '.pdf':
-                print(f"[FILE_PARSE]   PDF detected: Converting to images and extracting transactions using Vision API")
-            # Check if Vision API text was pre-extracted
-            if hasattr(uploaded_file, '_vision_api_text'):
-                print(f"[FILE_PARSE] ✅ Pre-extracted Vision API text found ({len(uploaded_file._vision_api_text)} characters) - will reuse it")
-            else:
-                print(f"[FILE_PARSE] ⚠️ No pre-extracted Vision API text found")
-            try:
-                uploaded_file.seek(0)
-            except Exception:
-                pass
-            transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
-            if transactions:
-                print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions")
-            else:
-                print(f"[FILE_PARSE] ⚠️ AI extraction also found no transactions")
-                # Check if this is a PDF that might be image-based
-                if file_name.lower().endswith('.pdf'):
-                    st.warning("""
-                    **⚠️ PDF Processing Issue**
-                    
-                    The PDF file appears to be **image-based (scanned)** and contains no extractable text.
-                    
-                    **Solutions:**
-                    1. **Use OCR software** (e.g., Adobe Acrobat, online OCR tools) to convert the PDF to text-selectable format
-                    2. **Provide the original source file** (CSV, Excel, or text-selectable PDF) instead
-                    3. **Check terminal logs** for detailed extraction diagnostics
-                    
-                    The system detected table structures but all cells were empty, and text extraction returned no content.
-                    """)
-        else:
-            print(f"[FILE_PARSE] ⚠️ Python extraction found no transactions and AI agents are not available")
-            print(f"[FILE_PARSE]   Check terminal logs above for details on why extraction failed")
+                # Fall back to AI only when Python parser finds nothing
+                if not transactions:
+                    if AI_AGENTS_AVAILABLE:
+                        method_used = 'ai'
+                        print(f"[FILE_PARSE] Python extraction found no transactions, trying AI extraction for {file_name}...")
+                        if file_ext == '.pdf':
+                            print(f"[FILE_PARSE]   PDF detected: Converting to images and extracting transactions using Vision API")
+                        # Check if Vision API text was pre-extracted
+                        if hasattr(uploaded_file, '_vision_api_text'):
+                            print(f"[FILE_PARSE] ✅ Pre-extracted Vision API text found ({len(uploaded_file._vision_api_text)} characters) - will reuse it")
+                        else:
+                            print(f"[FILE_PARSE] ⚠️ No pre-extracted Vision API text found")
+                        try:
+                            uploaded_file.seek(0)
+                        except Exception:
+                            pass
+                        transactions = process_file_with_ai(uploaded_file, file_name, user_id or '') or []
+                        if transactions:
+                            print(f"[FILE_PARSE] ✅ AI extraction found {len(transactions)} transactions")
+                        else:
+                            print(f"[FILE_PARSE] ⚠️ AI extraction also found no transactions")
+                            # Check if this is a PDF that might be image-based
+                            if file_name.lower().endswith('.pdf'):
+                                st.warning("""
+                                **⚠️ PDF Processing Issue**
+                                
+                                The PDF file appears to be **image-based (scanned)** and contains no extractable text.
+                                
+                                **Solutions:**
+                                1. **Use OCR software** (e.g., Adobe Acrobat, online OCR tools) to convert the PDF to text-selectable format
+                                2. **Provide the original source file** (CSV, Excel, or text-selectable PDF) instead
+                                3. **Check terminal logs** for detailed extraction diagnostics
+                                
+                                The system detected table structures but all cells were empty, and text extraction returned no content.
+                                """)
+                    else:
+                        print(f"[FILE_PARSE] ⚠️ Python extraction found no transactions and AI agents are not available")
+                        print(f"[FILE_PARSE]   Check terminal logs above for details on why extraction failed")
 
     normalized_rows = [
         _tx_prepare_preview_row(tx, file_name, method_used, use_price_fetcher=True)
@@ -7512,30 +7512,30 @@ def portfolio_overview_page():
                     if st.button(f"✅ Apply", key=f"fix_split_{idx}_{action['ticker']}"):
                         with st.spinner(f"Applying corporate action for {action['ticker']}..."):
                             try:
-                            adjusted = adjust_for_corporate_action(
-                                user['id'], 
-                                action['stock_id'], 
-                                action['split_ratio'],
+                                adjusted = adjust_for_corporate_action(
+                                    user['id'], 
+                                    action['stock_id'], 
+                                    action['split_ratio'],
                                     db,
                                     action_type=action.get('action_type', 'split')
-                            )
+                                )
                             
-                            if adjusted > 0:
+                                if adjusted > 0:
                                     st.success(f"✅ Successfully applied corporate action for {action['ticker']}!")
                                     st.info(f"📊 Updated {adjusted} transaction(s) and recalculated holdings")
                                     
-                                # Clear from session state
+                                    # Clear from session state
                                     remaining_actions = [
-                                    a for a in corporate_actions if a['ticker'] != action['ticker']
-                                ]
+                                        a for a in corporate_actions if a['ticker'] != action['ticker']
+                                    ]
                                     if remaining_actions:
                                         st.session_state.corporate_actions_detected = remaining_actions
                                     else:
                                         st.session_state.corporate_actions_detected = None
                                     
                                     time.sleep(2)
-                                st.rerun()
-                            else:
+                                    st.rerun()
+                                else:
                                     st.error(f"❌ No transactions found to adjust for {action['ticker']}")
                             except Exception as e:
                                 st.error(f"❌ Error applying corporate action: {str(e)[:200]}")
@@ -7554,9 +7554,9 @@ def portfolio_overview_page():
                         
                         for action in corporate_actions:
                             try:
-                            adjusted = adjust_for_corporate_action(
-                                user['id'],
-                                action['stock_id'],
+                                adjusted = adjust_for_corporate_action(
+                                    user['id'],
+                                    action['stock_id'],
                                     action.get('split_ratio', 1.0),
                                     db,
                                     action_type=action.get('action_type', 'split'),
@@ -7565,7 +7565,7 @@ def portfolio_overview_page():
                                     cash_per_share=action.get('cash_per_share', 0.0)
                                 )
                                 if adjusted > 0:
-                            total_adjusted += adjusted
+                                    total_adjusted += adjusted
                                     successful += 1
                                 else:
                                     failed.append(action['ticker'])
@@ -11694,13 +11694,13 @@ Always:
     )
     
     with st.expander("💡 Quick Tips", expanded=False):
-    st.caption("Try asking me:")
-    st.caption("• 'How is my portfolio performing overall?'")
-    st.caption("• 'Which sectors are my best performers?'")
-    st.caption("• 'How can I reduce portfolio risk?'")
-    st.caption("• 'Which channels are giving me the best returns?'")
-    st.caption("• 'Should I rebalance my portfolio?'")
-    st.caption("• 'Upload a research report for analysis'")
+        st.caption("Try asking me:")
+        st.caption("• 'How is my portfolio performing overall?'")
+        st.caption("• 'Which sectors are my best performers?'")
+        st.caption("• 'How can I reduce portfolio risk?'")
+        st.caption("• 'Which channels are giving me the best returns?'")
+        st.caption("• 'Should I rebalance my portfolio?'")
+        st.caption("• 'Upload a research report for analysis'")
 
 def ai_insights_page():
     """AI Insights page with agent analysis and recommendations"""
