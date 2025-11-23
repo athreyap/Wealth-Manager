@@ -11422,82 +11422,82 @@ Always:
         st.caption("💡 PDFs uploaded by any user are visible to everyone")
         
         if user_pdfs and len(user_pdfs) > 0:
-        for pdf in user_pdfs:
-            with st.expander(f"📄 {pdf['filename']}"):
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    st.caption(f"📅 Uploaded: {pdf['uploaded_at'][:10]}")
+            for pdf in user_pdfs:
+                with st.expander(f"📄 {pdf['filename']}"):
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        st.caption(f"📅 Uploaded: {pdf['uploaded_at'][:10]}")
+                        
+                        if pdf.get('ai_summary'):
+                            st.markdown("**🤖 AI Summary:**")
+                            st.info(pdf['ai_summary'])
+                        
+                        # Add button to use this PDF for analysis
+                        if st.button(f"🔍 Analyze {pdf['filename'][:20]}...", key=f"analyze_{pdf['id']}", help="Use this PDF for AI analysis"):
+                            try:
+                                import openai
+                                openai.api_key = st.secrets["api_keys"]["open_ai"]
+                                
+                                # Get portfolio context
+                                portfolio_summary = get_cached_portfolio_summary(holdings)
+                                
+                                # Analyze the stored PDF
+                                analysis_prompt = f"""
+                                Analyze this stored PDF document for portfolio management insights.
+                                
+                                📄 DOCUMENT INFO:
+                                - Filename: {pdf['filename']}
+                                - Uploaded: {pdf['uploaded_at'][:10]}
+                                
+                                💼 USER'S PORTFOLIO:
+                                {portfolio_summary}
+                                
+                                📝 PDF CONTENT:
+                                {pdf.get('pdf_text', '')[:5000]}...
+                                
+                                🤖 PREVIOUS AI SUMMARY:
+                                {pdf.get('ai_summary', 'No previous summary')}
+                                
+                                Please provide a fresh analysis focusing on:
+                                1. Key insights from the document
+                                2. How it relates to the user's current portfolio
+                                3. Actionable recommendations
+                                
+                                Be specific and actionable. Use emojis and clear formatting.
+                                """
+                                
+                                response = openai.chat.completions.create(
+                                    model="gpt-4o",  # Upgraded to GPT-5 for better results
+                                    messages=[{"role": "user", "content": analysis_prompt}]
+                                )
+                                
+                                fresh_analysis = response.choices[0].message.content
+                                
+                                # Display the fresh analysis
+                                st.markdown("### 🔍 Fresh Analysis")
+                                st.markdown(fresh_analysis)
+                                
+                                # Store in chat history (session state)
+                                st.session_state.chat_history.append({
+                                    "q": f"Analyze PDF: {pdf['filename']}", 
+                                    "a": fresh_analysis
+                                })
+                                # Save to database (user-specific, persistent)
+                                if hasattr(db, 'save_chat_history'):
+                                    try:
+                                        db.save_chat_history(user['id'], f"Analyze PDF: {pdf['filename']}", fresh_analysis)
+                                    except Exception:
+                                        pass
+                                
+                            except Exception as e:
+                                st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
                     
-                    if pdf.get('ai_summary'):
-                        st.markdown("**🤖 AI Summary:**")
-                        st.info(pdf['ai_summary'])
-                    
-                    # Add button to use this PDF for analysis
-                    if st.button(f"🔍 Analyze {pdf['filename'][:20]}...", key=f"analyze_{pdf['id']}", help="Use this PDF for AI analysis"):
-                        try:
-                            import openai
-                            openai.api_key = st.secrets["api_keys"]["open_ai"]
-                            
-                            # Get portfolio context
-                            portfolio_summary = get_cached_portfolio_summary(holdings)
-                            
-                            # Analyze the stored PDF
-                            analysis_prompt = f"""
-                            Analyze this stored PDF document for portfolio management insights.
-                            
-                            📄 DOCUMENT INFO:
-                            - Filename: {pdf['filename']}
-                            - Uploaded: {pdf['uploaded_at'][:10]}
-                            
-                            💼 USER'S PORTFOLIO:
-                            {portfolio_summary}
-                            
-                            📝 PDF CONTENT:
-                            {pdf.get('pdf_text', '')[:5000]}...
-                            
-                            🤖 PREVIOUS AI SUMMARY:
-                            {pdf.get('ai_summary', 'No previous summary')}
-                            
-                            Please provide a fresh analysis focusing on:
-                            1. Key insights from the document
-                            2. How it relates to the user's current portfolio
-                            3. Actionable recommendations
-                            
-                            Be specific and actionable. Use emojis and clear formatting.
-                            """
-                            
-                            response = openai.chat.completions.create(
-                                model="gpt-4o",  # Upgraded to GPT-5 for better results
-                                messages=[{"role": "user", "content": analysis_prompt}]
-                            )
-                            
-                            fresh_analysis = response.choices[0].message.content
-                            
-                            # Display the fresh analysis
-                            st.markdown("### 🔍 Fresh Analysis")
-                            st.markdown(fresh_analysis)
-                            
-                            # Store in chat history (session state)
-                            st.session_state.chat_history.append({
-                                "q": f"Analyze PDF: {pdf['filename']}", 
-                                "a": fresh_analysis
-                            })
-                            # Save to database (user-specific, persistent)
-                            if hasattr(db, 'save_chat_history'):
-                                try:
-                                    db.save_chat_history(user['id'], f"Analyze PDF: {pdf['filename']}", fresh_analysis)
-                                except Exception:
-                                    pass
-                            
-                        except Exception as e:
-                            st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
-                
-                with col2:
-                    if st.button("🗑️", key=f"del_{pdf['id']}", help="Delete this PDF"):
-                        if db.delete_pdf(pdf['id']):
-                            st.success("Deleted!")
-                            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                            st.rerun()
+                    with col2:
+                        if st.button("🗑️", key=f"del_{pdf['id']}", help="Delete this PDF"):
+                            if db.delete_pdf(pdf['id']):
+                                st.success("Deleted!")
+                                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+                                st.rerun()
         else:
             st.caption("No PDFs uploaded yet")
         
