@@ -541,10 +541,14 @@ class EnhancedPriceFetcher:
             elif ticker.isdigit():
                 candidates.append(f"{ticker}.BO")
             else:
+                # Try both .NS and .BO, and also try without suffix
                 candidates.extend([f"{ticker}.NS", f"{ticker}.BO", ticker])
             
             ticker_obj = None
             working_ticker = None
+            
+            # Enhanced logging for all tickers
+            print(f"[CORP_ACTION] 🔍 {ticker}: Checking ticker formats: {candidates}")
             
             for candidate in candidates:
                 try:
@@ -554,17 +558,25 @@ class EnhancedPriceFetcher:
                     if info and 'symbol' in info:
                         ticker_obj = test_ticker
                         working_ticker = candidate
+                        print(f"[CORP_ACTION] ✅ {ticker}: Found working ticker: {working_ticker} (symbol: {info.get('symbol')})")
                         break
-                except:
+                except Exception as e:
+                    print(f"[CORP_ACTION] ⚠️ {ticker}: Failed to fetch {candidate}: {str(e)[:100]}")
                     continue
             
             if not ticker_obj:
+                print(f"[CORP_ACTION] ❌ {ticker}: Could not find valid ticker in any format: {candidates}")
                 return corporate_actions
             
             # Fetch splits from yfinance
             try:
                 splits = ticker_obj.splits
                 if splits is not None and not splits.empty:
+                    print(f"[CORP_ACTION] 📊 {ticker}: Found {len(splits)} total splits in yfinance (working ticker: {working_ticker})")
+                    # Expand date range: check splits from 2 years before purchase to today
+                    # This ensures we catch splits that happened before purchase but affect current holdings
+                    expanded_from_date = from_date - timedelta(days=730) if from_date else datetime.now() - timedelta(days=730)
+                    
                     for split_date, split_ratio in splits.items():
                         # yfinance reports split ratio as fraction (e.g., 0.5 for 2:1 split, 2.0 for 1:2 split)
                         # Convert to our format: split_ratio = new_shares / old_shares
@@ -581,7 +593,10 @@ class EnhancedPriceFetcher:
                         if isinstance(split_date_dt, pd.Timestamp):
                             split_date_dt = split_date_dt.to_pydatetime()
                         
-                        if from_date <= split_date_dt <= to_date:
+                        # Check if split is in expanded date range
+                        if expanded_from_date <= split_date_dt <= to_date:
+                            print(f"[CORP_ACTION] ✅ {ticker}: SPLIT DETECTED on {split_date_dt.date()} - {old_ratio}:{new_ratio} (ratio: {actual_ratio:.4f})")
+                            
                             corporate_actions.append({
                                 'type': 'split',
                                 'date': split_date_dt,
@@ -590,8 +605,18 @@ class EnhancedPriceFetcher:
                                 'split_ratio': actual_ratio,
                                 'description': f"Stock split {old_ratio}:{new_ratio} (yfinance)"
                             })
+                        else:
+                            # Log splits outside range for debugging
+                            print(f"[CORP_ACTION] ⚠️ {ticker}: Split found but outside range: {split_date_dt.date()} (range: {expanded_from_date.date()} to {to_date.date()})")
+                else:
+                    # Enhanced logging when no splits found
+                    print(f"[CORP_ACTION] ℹ️ {ticker}: No splits data found in yfinance for {working_ticker}")
             except Exception as e:
-                print(f"[CORP_ACTION] ⚠️ Error fetching splits from yfinance for {ticker}: {str(e)}")
+                error_msg = str(e)
+                print(f"[CORP_ACTION] ⚠️ {ticker}: Error fetching splits from yfinance: {error_msg}")
+                print(f"[CORP_ACTION] 🔍 {ticker}: Tried ticker formats: {candidates}, Working ticker: {working_ticker}")
+                import traceback
+                print(f"[CORP_ACTION] 🔍 {ticker}: Full error trace: {traceback.format_exc()}")
             
             # Fetch dividends from yfinance (for reference, though we don't auto-adjust for dividends)
             try:

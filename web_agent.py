@@ -4223,15 +4223,34 @@ def detect_corporate_actions(user_id, db, holdings=None):
         @functools.lru_cache(maxsize=128)
         def _latest_split_info(symbol: str) -> Optional[Tuple[str, float]]:
             try:
-                split_series = yf.Ticker(symbol).splits
+                ticker_obj = yf.Ticker(symbol)
+                split_series = ticker_obj.splits
                 if split_series is not None and not split_series.empty:
-                    last_ratio = float(split_series.iloc[-1])
+                    # Get all splits from last 2 years, not just the last one
+                    two_years_ago = datetime.now() - timedelta(days=730)
+                    recent_splits = split_series[split_series.index >= two_years_ago] if hasattr(split_series.index, '__ge__') else split_series
+                    
+                    if not recent_splits.empty:
+                        # Use the most recent split
+                        last_ratio = float(recent_splits.iloc[-1])
+                        last_date = recent_splits.index[-1]
+                    else:
+                        # Fall back to most recent split even if older than 2 years
+                        last_ratio = float(split_series.iloc[-1])
+                        last_date = split_series.index[-1]
+                    
                     if last_ratio > 0:
                         # yfinance reports 0.25 for 4:1 split etc.
-                        resolved_ratio = round(1.0 / last_ratio)
-                        return split_series.index[-1], resolved_ratio
-            except Exception:
-                pass
+                        if last_ratio < 1.0:
+                            resolved_ratio = round(1.0 / last_ratio)
+                        else:
+                            resolved_ratio = round(last_ratio)
+                        
+                        print(f"[CORPORATE_ACTIONS] ✅ {symbol}: Found split on {last_date} with ratio {last_ratio:.4f} -> {resolved_ratio}:1")
+                        
+                        return last_date, resolved_ratio
+            except Exception as e:
+                print(f"[CORPORATE_ACTIONS] ⚠️ {symbol}: Error fetching split info: {str(e)[:150]}")
             return None
 
         def _find_split_confirmation(ticker_code: str) -> Optional[Tuple[str, float]]:
@@ -4243,10 +4262,15 @@ def detect_corporate_actions(user_id, db, holdings=None):
             else:
                 candidates.extend([f"{ticker_code}.NS", f"{ticker_code}.BO", ticker_code])
 
+            print(f"[CORPORATE_ACTIONS] 🔍 {ticker_code}: Checking split for formats: {candidates}")
+
             for candidate in candidates:
                 info = _latest_split_info(candidate)
                 if info:
+                    print(f"[CORPORATE_ACTIONS] ✅ {ticker_code}: Found split using {candidate}: {info}")
                     return info
+                else:
+                    print(f"[CORPORATE_ACTIONS] ℹ️ {ticker_code}: No split found for {candidate}")
             return None
 
         def _check_ticker_exists(ticker: str) -> bool:
@@ -4335,11 +4359,13 @@ def detect_corporate_actions(user_id, db, holdings=None):
             current_price = float(current_price)
             price_ratio = avg_price / current_price if current_price else 0
 
-            if price_ratio < 1.5:
-                continue
+            # Always check for splits - don't filter by price ratio as it can miss valid splits
+            # Price ratio check was too restrictive and could miss legitimate splits
+            print(f"[CORPORATE_ACTIONS] 🔍 {ticker}: Checking for splits (price_ratio: {price_ratio:.2f}, avg_price: {avg_price:.2f}, current_price: {current_price:.2f})")
 
             confirmation = _find_split_confirmation(ticker)
             if not confirmation:
+                print(f"[CORPORATE_ACTIONS] ℹ️ {ticker}: No split confirmation found from yfinance")
                 continue
 
             split_date, confirmed_ratio = confirmation
@@ -10709,66 +10735,131 @@ def sector_analytics_page():
     st.caption("Tip: Keep sector metadata consistent across uploads to unlock richer sector analytics.")
 
 def ai_assistant_page():
-    """Dedicated AI Assistant page"""
-    st.header("🤖 AI Assistant")
-    st.caption("Your intelligent portfolio advisor with access to all your data")
-    
+    """Dedicated AI Assistant page with ChatGPT-like layout"""
     user = st.session_state.user
     
-    # Initialize chat history and PDF context
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
+    # Initialize chat threads (conversations) and current thread
+    if 'chat_threads' not in st.session_state:
+        st.session_state.chat_threads = []
+    if 'current_thread_id' not in st.session_state:
+        st.session_state.current_thread_id = None
+    if 'current_thread_messages' not in st.session_state:
+        st.session_state.current_thread_messages = []
     
-    # Load chat history from database (user-specific)
+    # Load chat threads from database
     try:
-        # Check if method exists (for backward compatibility)
         if hasattr(db, 'get_user_chat_history'):
-            db_chat_history = db.get_user_chat_history(user['id'], limit=50)
+            db_chat_history = db.get_user_chat_history(user['id'], limit=100)
             if db_chat_history:
-                # Convert database format to session state format
-                st.session_state.chat_history = [
-                    {"q": chat['question'], "a": chat['answer']}
-                    for chat in reversed(db_chat_history)  # Reverse to show oldest first
-                ]
+                # Group by conversation (simple grouping by sequential Q&A pairs)
+                threads = {}
+                thread_id = 0
+                for i, chat in enumerate(db_chat_history):
+                    # Create new thread for each Q&A pair (can be improved with conversation grouping)
+                    thread_key = f"thread_{thread_id}"
+                    if thread_key not in threads:
+                        threads[thread_key] = {
+                            'id': thread_key,
+                            'title': chat['question'][:50] + ('...' if len(chat['question']) > 50 else ''),
+                            'created_at': chat.get('created_at', datetime.now().isoformat()),
+                            'messages': []
+                        }
+                    threads[thread_key]['messages'].append({
+                        'role': 'user',
+                        'content': chat['question']
+                    })
+                    threads[thread_key]['messages'].append({
+                        'role': 'assistant',
+                        'content': chat['answer']
+                    })
+                    thread_id += 1
+                
+                st.session_state.chat_threads = list(threads.values())
+    except Exception:
+        st.session_state.chat_threads = []
+    
+    # Sidebar for chat threads (like ChatGPT)
+    with st.sidebar:
+        st.header("💬 Chat History")
+        
+        # New chat button
+        if st.button("➕ New Chat", use_container_width=True, type="primary"):
+            st.session_state.current_thread_id = None
+            st.session_state.current_thread_messages = []
+            st.rerun()
+        
+        st.markdown("---")
+        
+        # Display chat threads
+        if st.session_state.chat_threads:
+            for thread in reversed(st.session_state.chat_threads[-20:]):  # Show last 20 threads
+                thread_title = thread['title']
+                is_selected = st.session_state.current_thread_id == thread['id']
+                
+                if st.button(
+                    thread_title,
+                    key=f"thread_{thread['id']}",
+                    use_container_width=True,
+                    type="primary" if is_selected else "secondary"
+                ):
+                    st.session_state.current_thread_id = thread['id']
+                    st.session_state.current_thread_messages = thread['messages']
+                    st.rerun()
         else:
-            # Method not available, use empty list
-            st.session_state.chat_history = []
-    except Exception as e:
-        # If table doesn't exist yet, just use empty list
-        st.session_state.chat_history = []
-    
-    # Always load PDF context from database to ensure older session PDFs are included
-    st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-    
-    # Show PDF context status and refresh option
-    pdf_count = len(db.get_user_pdfs(user['id']))
-    if pdf_count > 0:
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.caption(f"📚 Loaded {pdf_count} PDFs from shared library (all users) for AI context")
-        with col2:
-            if st.button("🔄", key="refresh_pdf_context_main", help="Refresh PDF context from database"):
+            st.caption("No chat history yet")
+        
+        st.markdown("---")
+        
+        # PDF context status
+        pdf_count = len(db.get_user_pdfs(user['id']))
+        if pdf_count > 0:
+            st.caption(f"📚 {pdf_count} PDFs loaded")
+            if st.button("🔄 Refresh PDFs", use_container_width=True):
                 st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                st.success("PDF context refreshed!")
+                st.success("Refreshed!")
                 st.rerun()
     
-    # Get portfolio context (cached)
+    # Main chat area
+    st.title("🤖 AI Assistant")
+    st.caption("Your intelligent portfolio advisor with access to all your data")
+    
+    # Always load PDF context
+    st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+    
+    # Get portfolio context
     holdings = get_cached_holdings(user['id'])
-    
-    # Get cached portfolio summary
     portfolio_summary = get_cached_portfolio_summary(holdings)
-    
-    # Get user PDFs for the session
     user_pdfs = db.get_user_pdfs(user['id'])
     
-    # Enhanced chat interface
-    st.markdown("---")
-    st.markdown("**💬 Chat with AI**")
+    # Display current thread messages
+    chat_container = st.container()
+    with chat_container:
+        if st.session_state.current_thread_messages:
+            for msg in st.session_state.current_thread_messages:
+                if msg['role'] == 'user':
+                    with st.chat_message("user"):
+                        st.write(msg['content'])
+                elif msg['role'] == 'assistant':
+                    with st.chat_message("assistant"):
+                        st.markdown(msg['content'])
+        else:
+            # Welcome message
+            with st.chat_message("assistant"):
+                st.markdown("""
+                👋 Hello! I'm your AI portfolio assistant. I can help you with:
+                
+                - 📊 Portfolio analysis and performance insights
+                - 💡 Investment recommendations
+                - 📈 Market trends and analysis
+                - 📄 Document analysis (PDFs, reports)
+                - 🔍 Answering questions about your holdings
+                
+                Ask me anything about your portfolio!
+                """)
     
-    # Chat input
-    user_question = st.text_input(
-        "Ask me anything about your portfolio:",
-        placeholder="e.g., 'How is my technology sector performing?' or 'Should I rebalance my portfolio?'",
+    # Chat input at the bottom (like ChatGPT)
+    user_question = st.chat_input(
+        "Ask me anything about your portfolio...",
         key="ai_chat_input"
     )
     
@@ -11323,25 +11414,14 @@ Always:
                         pass
                 
             except Exception as e:
-                st.error(f"❌ Error: {str(e)[:100]}")
-                st.error(f"Full error: {str(e)}")  # Show full error for debugging
+                with st.chat_message("assistant"):
+                    st.error(f"❌ Error: {str(e)[:200]}")
     
-    # Display chat history
-    if st.session_state.chat_history:
-        st.markdown("---")
-        st.markdown("**💭 Chat History**")
+    # Collapsible sections below chat
+    with st.expander("📚 PDF Library", expanded=False):
+        st.caption("💡 PDFs uploaded by any user are visible to everyone")
         
-        for i, chat in enumerate(reversed(st.session_state.chat_history[-5:])):  # Show last 5
-            with st.expander(f"Q: {chat['q'][:50]}..."):
-                st.markdown(f"**Question:** {chat['q']}")
-                st.markdown(f"**Answer:** {chat['a']}")
-    
-    # PDF Library Section (Shared across all users)
-    st.markdown("---")
-    st.markdown("**📚 Shared PDF Library (Available to All Users)**")
-    st.caption("💡 PDFs uploaded by any user are visible to everyone")
-    
-    if user_pdfs and len(user_pdfs) > 0:
+        if user_pdfs and len(user_pdfs) > 0:
         for pdf in user_pdfs:
             with st.expander(f"📄 {pdf['filename']}"):
                 col1, col2 = st.columns([4, 1])
@@ -11418,26 +11498,24 @@ Always:
                             st.success("Deleted!")
                             st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
                             st.rerun()
-    else:
-        st.caption("No PDFs uploaded yet")
+        else:
+            st.caption("No PDFs uploaded yet")
+        
+        _render_document_upload_section(
+            section_key="document_ai_primary",
+            user=user,
+            holdings=holdings,
+            db=db,
+        )
     
-    _render_document_upload_section(
-        section_key="document_ai_primary",
-        user=user,
-        holdings=holdings,
-        db=db,
-    )
-    
-    # Quick Tips Section
-    st.markdown("---")
-    st.markdown("**💡 Quick Tips**")
-    st.caption("Try asking me:")
-    st.caption("• 'How is my portfolio performing overall?'")
-    st.caption("• 'Which sectors are my best performers?'")
-    st.caption("• 'How can I reduce portfolio risk?'")
-    st.caption("• 'Which channels are giving me the best returns?'")
-    st.caption("• 'Should I rebalance my portfolio?'")
-    st.caption("• 'Upload a research report for analysis'")
+    with st.expander("💡 Quick Tips", expanded=False):
+        st.caption("Try asking me:")
+        st.caption("• 'How is my portfolio performing overall?'")
+        st.caption("• 'Which sectors are my best performers?'")
+        st.caption("• 'How can I reduce portfolio risk?'")
+        st.caption("• 'Which channels are giving me the best returns?'")
+        st.caption("• 'Should I rebalance my portfolio?'")
+        st.caption("• 'Upload a research report for analysis'")
 
 def ai_insights_page():
     """AI Insights page with agent analysis and recommendations"""
