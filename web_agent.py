@@ -4343,9 +4343,14 @@ def detect_corporate_actions(user_id, db, holdings=None):
             current_price = holding.get('current_price')
             quantity = holding.get('total_quantity', 0)
             stock_id = holding.get('stock_id')
+            stock_name = holding.get('stock_name', '')
 
             if avg_price == 0:
                 continue
+            
+            # Debug logging for WebSol specifically
+            if 'WEBSOL' in ticker.upper() or 'WEBSOL' in (stock_name or '').upper():
+                print(f"[CORPORATE_ACTIONS] [DEBUG] Processing WebSol: ticker={ticker}, stock_name={stock_name}, stock_id={stock_id}")
 
             # Get earliest purchase date for this stock to ensure we only detect corporate actions AFTER purchase
             earliest_purchase_date = None
@@ -4438,16 +4443,19 @@ def detect_corporate_actions(user_id, db, holdings=None):
                 price_fetcher = EnhancedPriceFetcher()
                 
                 # Use purchase date as from_date, or 2 years ago if no purchase date
+                # Extend to_date to 1 year in future to catch announced future splits
                 from_date = earliest_purchase_date if earliest_purchase_date else (datetime.now() - timedelta(days=730))
-                to_date = datetime.now()
+                to_date = datetime.now() + timedelta(days=365)  # Include future splits (announced but not yet executed)
                 
                 # Fetch actual corporate actions from yfinance
                 actual_actions = price_fetcher._fetch_corporate_actions_from_yfinance(ticker, from_date, to_date)
                 
-                # Filter to only splits that happened AFTER purchase
-                relevant_splits = []
+                # Filter to only corporate actions (splits and demergers) that happened AFTER purchase date
+                # CRITICAL: Only consider actions after purchase
+                relevant_actions = []
                 for action in actual_actions:
-                    if action.get('type') == 'split':
+                    action_type = action.get('type')
+                    if action_type in ['split', 'demerger']:
                         action_date = action.get('date')
                         if isinstance(action_date, str):
                             try:
@@ -4460,18 +4468,39 @@ def detect_corporate_actions(user_id, db, holdings=None):
                         elif hasattr(action_date, 'date'):
                             action_date = datetime.combine(action_date.date(), datetime.min.time())
                             
-                            if action_date.tzinfo is not None:
-                                action_date = action_date.replace(tzinfo=None)
+                        if action_date.tzinfo is not None:
+                            action_date = action_date.replace(tzinfo=None)
                         
-                            # Only include if split happened AFTER purchase (or if no purchase date, include all)
-                            if earliest_purchase_date is None or action_date >= earliest_purchase_date:
-                                relevant_splits.append(action)
-                                print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Found split on {action_date.date()} (ratio: {action.get('split_ratio')}) - AFTER purchase date")
+                        # CRITICAL: Only include if action happened AFTER purchase date
+                        # This ensures we don't apply actions that happened before the user bought the stock
+                        if earliest_purchase_date is None:
+                            # No purchase date - include all actions (shouldn't happen, but handle gracefully)
+                            relevant_actions.append(action)
+                            action_desc = f"{action_type} on {action_date.date()}"
+                            if action_type == 'split':
+                                action_desc += f" (ratio: {action.get('split_ratio')})"
+                            elif action_type == 'demerger':
+                                action_desc += f" (entity: {action.get('demerged_entity', 'N/A')})"
+                            print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Found {action_desc} - No purchase date, including")
+                        elif action_date >= earliest_purchase_date:
+                            # Action happened on or after purchase date - include it
+                            relevant_actions.append(action)
+                            action_desc = f"{action_type} on {action_date.date()}"
+                            if action_type == 'split':
+                                action_desc += f" (ratio: {action.get('split_ratio')})"
+                            elif action_type == 'demerger':
+                                action_desc += f" (entity: {action.get('demerged_entity', 'N/A')})"
+                            if action_date > datetime.now():
+                                print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Found FUTURE {action_desc} - Will be applied when executed (purchase: {earliest_purchase_date.date()})")
                             else:
-                                print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: Split on {action_date.date()} ignored (happened BEFORE purchase on {earliest_purchase_date.date()})")
+                                print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Found {action_desc} - AFTER purchase date ({earliest_purchase_date.date()})")
+                        else:
+                            # Action happened BEFORE purchase - exclude it
+                            action_desc = f"{action_type} on {action_date.date()}"
+                            print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: {action_desc} ignored (happened BEFORE purchase on {earliest_purchase_date.date()})")
                     
-                # Use the most recent relevant split
-                if relevant_splits:
+                # Process relevant actions (splits and demergers)
+                if relevant_actions:
                     # Sort by date (most recent first)
                     # Convert dates to comparable format for sorting
                     def get_sortable_date(action):
@@ -4490,28 +4519,54 @@ def detect_corporate_actions(user_id, db, holdings=None):
                             return datetime.combine(action_date.date(), datetime.min.time())
                         return action_date if isinstance(action_date, datetime) else datetime.min
                     
-                    relevant_splits.sort(key=get_sortable_date, reverse=True)
-                    latest_split = relevant_splits[0]
+                    relevant_actions.sort(key=get_sortable_date, reverse=True)
                     
-                    split_date = latest_split.get('date')
-                    confirmed_ratio = latest_split.get('split_ratio', 1)
-                    
-                    if confirmed_ratio > 1:
-                        corporate_actions.append({
-                            'ticker': ticker,
-                            'stock_name': holding.get('stock_name'),
-                            'stock_id': holding.get('stock_id'),
-                            'avg_price': avg_price,
-                            'current_price': current_price,
-                            'quantity': quantity,
-                            'ratio': price_ratio,
-                            'split_ratio': confirmed_ratio,
-                            'split_date': str(split_date.date() if hasattr(split_date, 'date') else split_date),
-                            'action_type': 'split',
-                        })
-                        print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Added corporate action - {confirmed_ratio}:1 split on {split_date.date() if hasattr(split_date, 'date') else split_date}")
-                    else:
-                        print(f"[CORPORATE_ACTIONS] ℹ️ {ticker}: Split ratio <= 1, skipping")
+                    # Process each action (splits and demergers)
+                    for latest_action in relevant_actions:
+                        action_type = latest_action.get('type')
+                        action_date = latest_action.get('date')
+                        
+                        if action_type == 'split':
+                            confirmed_ratio = latest_action.get('split_ratio', 1)
+                            
+                            if confirmed_ratio > 1:
+                                corporate_actions.append({
+                                    'ticker': ticker,
+                                    'stock_name': holding.get('stock_name'),
+                                    'stock_id': holding.get('stock_id'),
+                                    'avg_price': avg_price,
+                                    'current_price': current_price,
+                                    'quantity': quantity,
+                                    'ratio': price_ratio,
+                                    'split_ratio': confirmed_ratio,
+                                    'split_date': str(action_date.date() if hasattr(action_date, 'date') else action_date),
+                                    'action_type': 'split',
+                                })
+                                print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Added corporate action - {confirmed_ratio}:1 split on {action_date.date() if hasattr(action_date, 'date') else action_date}")
+                            else:
+                                print(f"[CORPORATE_ACTIONS] ℹ️ {ticker}: Split ratio <= 1, skipping")
+                        
+                        elif action_type == 'demerger':
+                            demerger_ratio = latest_action.get('demerger_ratio', 1.0)
+                            demerged_entity = latest_action.get('demerged_entity', '')
+                            demerged_ticker = latest_action.get('demerged_ticker', '')
+                            ratio_str = latest_action.get('ratio', '1:1')
+                            
+                            corporate_actions.append({
+                                'ticker': ticker,
+                                'stock_name': holding.get('stock_name'),
+                                'stock_id': holding.get('stock_id'),
+                                'avg_price': avg_price,
+                                'current_price': current_price,
+                                'quantity': quantity,
+                                'demerger_ratio': demerger_ratio,
+                                'demerger_date': str(action_date.date() if hasattr(action_date, 'date') else action_date),
+                                'demerged_entity': demerged_entity,
+                                'demerged_ticker': demerged_ticker,
+                                'ratio': ratio_str,
+                                'action_type': 'demerger',
+                            })
+                            print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Added corporate action - Demerger on {action_date.date() if hasattr(action_date, 'date') else action_date} (Ratio: {ratio_str}, Entity: {demerged_entity})")
                 else:
                     print(f"[CORPORATE_ACTIONS] ℹ️ {ticker}: No corporate actions found AFTER purchase date")
                     

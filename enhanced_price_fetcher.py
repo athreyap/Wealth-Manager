@@ -523,13 +523,13 @@ class EnhancedPriceFetcher:
         Args:
             ticker: Stock ticker symbol (e.g., 'RELIANCE', 'TCS.NS')
             from_date: Start date to check corporate actions from
-            to_date: End date (defaults to today)
+            to_date: End date (defaults to 1 year in future to catch announced splits)
         
         Returns:
             List of corporate action dicts with keys: type, date, ratio, description
         """
         if to_date is None:
-            to_date = datetime.now()
+            to_date = datetime.now() + timedelta(days=365)  # Include future splits (announced but not yet executed)
         
         corporate_actions = []
         
@@ -580,12 +580,10 @@ class EnhancedPriceFetcher:
                 splits = ticker_obj.splits
                 if splits is not None and not splits.empty:
                     print(f"[CORP_ACTION] [INFO] {ticker}: Found {len(splits)} total splits in yfinance (working ticker: {working_ticker})")
-                    # Expand date range: check splits from 2 years before purchase to today
-                    # This ensures we catch splits that happened before purchase but affect current holdings
-                    expanded_from_date = from_date - timedelta(days=730) if from_date else datetime.now() - timedelta(days=730)
+                    # CRITICAL: Use from_date directly (purchase date) - do NOT expand backwards
+                    # Only splits AFTER purchase date should be considered
+                    from_date_for_filter = from_date.replace(tzinfo=None) if from_date and from_date.tzinfo else from_date
                     # Ensure timezone-naive for comparison
-                    if expanded_from_date.tzinfo is not None:
-                        expanded_from_date = expanded_from_date.replace(tzinfo=None)
                     if to_date.tzinfo is not None:
                         to_date = to_date.replace(tzinfo=None) if to_date else datetime.now().replace(tzinfo=None)
                     
@@ -609,8 +607,9 @@ class EnhancedPriceFetcher:
                         if split_date_dt.tzinfo is not None:
                             split_date_dt = split_date_dt.replace(tzinfo=None)
                         
-                        # Check if split is in expanded date range
-                        if expanded_from_date <= split_date_dt <= to_date:
+                        # CRITICAL: Only include splits that are >= from_date (purchase date) and <= to_date
+                        # This ensures we only consider splits AFTER purchase date
+                        if (from_date_for_filter is None or split_date_dt >= from_date_for_filter) and split_date_dt <= to_date:
                             print(f"[CORP_ACTION] [OK] {ticker}: SPLIT DETECTED on {split_date_dt.date()} - {old_ratio}:{new_ratio} (ratio: {actual_ratio:.4f})")
                             
                             corporate_actions.append({
@@ -623,7 +622,13 @@ class EnhancedPriceFetcher:
                             })
                         else:
                             # Log splits outside range for debugging
-                            print(f"[CORP_ACTION] [WARNING] {ticker}: Split found but outside range: {split_date_dt.date()} (range: {expanded_from_date.date()} to {to_date.date()})")
+                            if from_date_for_filter:
+                                if split_date_dt < from_date_for_filter:
+                                    print(f"[CORP_ACTION] [WARNING] {ticker}: Split on {split_date_dt.date()} ignored (happened BEFORE purchase on {from_date_for_filter.date()})")
+                                else:
+                                    print(f"[CORP_ACTION] [WARNING] {ticker}: Split on {split_date_dt.date()} ignored (outside date range: {from_date_for_filter.date()} to {to_date.date()})")
+                            else:
+                                print(f"[CORP_ACTION] [WARNING] {ticker}: Split on {split_date_dt.date()} ignored (outside date range: up to {to_date.date()})")
                 else:
                     # Enhanced logging when no splits found
                     print(f"[CORP_ACTION] [INFO] {ticker}: No splits data found in yfinance for {working_ticker}")
@@ -756,17 +761,21 @@ class EnhancedPriceFetcher:
             if key in possible_tickers:
                 for split_info in split_list:
                     split_date = split_info['date']
-                    # Check if split is in date range (expand range by 2 years before to catch all relevant splits)
-                    expanded_from_date = from_date - timedelta(days=730) if from_date else datetime.now() - timedelta(days=730)
                     # Normalize dates for comparison
                     if split_date.tzinfo is not None:
                         split_date = split_date.replace(tzinfo=None)
-                    if expanded_from_date.tzinfo is not None:
-                        expanded_from_date = expanded_from_date.replace(tzinfo=None)
-                    if to_date.tzinfo is not None:
-                        to_date = to_date.replace(tzinfo=None) if to_date else datetime.now().replace(tzinfo=None)
-                    # Include split if it's in the expanded date range (or if no date range specified, include all)
-                    if expanded_from_date <= split_date <= to_date:
+                    if from_date and from_date.tzinfo is not None:
+                        from_date_normalized = from_date.replace(tzinfo=None)
+                    else:
+                        from_date_normalized = from_date
+                    if to_date and to_date.tzinfo is not None:
+                        to_date_normalized = to_date.replace(tzinfo=None) if to_date else datetime.now().replace(tzinfo=None)
+                    else:
+                        to_date_normalized = to_date if to_date else datetime.now()
+                    
+                    # CRITICAL: Only include splits that are >= from_date (purchase date) and <= to_date
+                    # This ensures we only consider splits AFTER purchase date
+                    if (from_date_normalized is None or split_date >= from_date_normalized) and split_date <= to_date_normalized:
                         splits.append({
                             'type': 'split',
                             'date': split_date,
@@ -809,12 +818,13 @@ class EnhancedPriceFetcher:
             except:
                 pass
             
-            # Expand date range: check splits from 2 years before purchase to today
-            expanded_from_date = from_date - timedelta(days=730) if from_date else datetime.now() - timedelta(days=730)
-            from_date_str = expanded_from_date.strftime('%Y-%m-%d')
+            # CRITICAL: Use from_date directly (purchase date) - do NOT expand backwards
+            # Only splits AFTER purchase date should be considered
+            from_date_for_filter = from_date.replace(tzinfo=None) if from_date and from_date.tzinfo else from_date
+            from_date_str = from_date_for_filter.strftime('%Y-%m-%d') if from_date_for_filter else (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
             to_date_str = to_date.strftime('%Y-%m-%d') if to_date else datetime.now().strftime('%Y-%m-%d')
             
-            prompt = f"""You are a financial data expert. I need to check if the Indian stock with ticker {working_ticker} (name: {stock_name}) had any stock splits, bonus issues, or stock consolidations.
+            prompt = f"""You are a financial data expert. I need to check if the Indian stock with ticker {working_ticker} (name: {stock_name}) had any stock splits, bonus issues, stock consolidations, or DEMERGERS.
 
 SPECIFIC COMPANY INFO:
 - Ticker: {working_ticker}
@@ -822,29 +832,39 @@ SPECIFIC COMPANY INFO:
 
 
 IMPORTANT INSTRUCTIONS:
-1. Search THOROUGHLY for ALL stock split announcements for {stock_name} ({working_ticker}) on:
+1. Search THOROUGHLY for ALL corporate action announcements for {stock_name} ({working_ticker}) on:
    - NSE (National Stock Exchange) corporate action announcements
    - BSE (Bombay Stock Exchange) corporate action announcements
    - Company website and investor relations pages
    - Financial news websites (Moneycontrol, Economic Times, Business Standard, etc.)
    - SEBI filings and announcements
    - Stock exchange circulars and notices
-2. Check for ANY stock splits, bonus issues, or stock consolidations that occurred:
-   - Between {from_date_str} and {to_date_str} (primary date range)
-   - OR before {from_date_str} but still relevant (expanded search)
-   - OR after {to_date_str} if announced (future splits)
+2. Check for ANY of the following corporate actions that occurred:
+   - Stock splits (e.g., 1:10, 1:2)
+   - Bonus issues (e.g., 1:1 bonus)
+   - Stock consolidations (reverse splits)
+   - DEMERGERS (company splitting into multiple entities, shareholders receiving shares in new demerged company)
+   - Between {from_date_str} and {to_date_str} (ONLY actions AFTER purchase date)
+   - OR after {to_date_str} if announced (future actions)
+   - DO NOT include actions before {from_date_str} (they happened before purchase)
 3. Pay special attention to:
    - Face value splits (e.g., ₹10 to ₹1 face value changes)
    - Record dates and ex-split dates
+   - Demerger record dates and entitlement ratios
    - Any announcements in 2024 or 2025 for this company
-4. Include splits even if they happened before or after the date range - we need to know about ALL splits
-5. If you find a split, provide the EXACT date (record date or ex-split date) and split ratio (e.g., 1:10 means 1 old share becomes 10 new shares)
-6. Be VERY thorough - check multiple sources and don't miss any splits
-7. If you're unsure, search more thoroughly before concluding no split exists
+4. For DEMERGERS specifically:
+   - Check if the company demerged any business unit or subsidiary
+   - Note the demerger ratio (e.g., 1:1 means 1 share of parent = 1 share of demerged entity)
+   - Include the demerged entity ticker/name if available
+   - Record the effective date of the demerger
+5. If you find a corporate action, provide the EXACT date (record date or ex-date) and ratio
+6. Be VERY thorough - check multiple sources and don't miss any corporate actions
+7. If you're unsure, search more thoroughly before concluding no action exists
 
 Return ONLY a JSON object with this exact format:
 {{
     "has_split": true,
+    "has_demerger": true,
     "splits": [
         {{
             "date": "YYYY-MM-DD",
@@ -852,20 +872,33 @@ Return ONLY a JSON object with this exact format:
             "new_ratio": 2,
             "description": "Stock split 1:2"
         }}
+    ],
+    "demergers": [
+        {{
+            "date": "YYYY-MM-DD",
+            "ratio": "1:1",
+            "demerged_entity": "Company Name",
+            "demerged_ticker": "TICKER.NS",
+            "description": "Demerger of business unit"
+        }}
     ]
 }}
 
-OR if no split found:
+OR if no corporate action found:
 {{
     "has_split": false,
-    "splits": []
+    "has_demerger": false,
+    "splits": [],
+    "demergers": []
 }}
 
 CRITICAL:
 - Return ONLY the JSON object, no other text
 - Date must be in YYYY-MM-DD format
 - Split ratio: old_ratio:new_ratio (e.g., 1:2 means 1 old share becomes 2 new shares)
-- If has_split is false, return empty splits array"""
+- Demerger ratio: e.g., "1:1" means 1 share of parent = 1 share of demerged entity
+- If has_split is false, return empty splits array
+- If has_demerger is false, return empty demergers array"""
             
             # Use gpt-5 as primary, with gpt-4o as fallback
             models_to_try = ["gpt-5", "gpt-4o"]
@@ -906,9 +939,12 @@ CRITICAL:
             print(f"[CORP_ACTION] [AI] [DEBUG] Raw AI response for {ticker}: {content[:500]}...")
             import json
             result = json.loads(content)
-            print(f"[CORP_ACTION] [AI] [DEBUG] Parsed result for {ticker}: has_split={result.get('has_split')}, splits_count={len(result.get('splits', []))}")
+            print(f"[CORP_ACTION] [AI] [DEBUG] Parsed result for {ticker}: has_split={result.get('has_split')}, splits_count={len(result.get('splits', []))}, has_demerger={result.get('has_demerger')}, demergers_count={len(result.get('demergers', []))}")
             
             splits = []
+            demergers = []
+            
+            # Process splits
             if result.get("has_split") and result.get("splits"):
                 for split_info in result.get("splits", []):
                     try:
@@ -927,9 +963,9 @@ CRITICAL:
                         # Calculate split ratio
                         actual_ratio = new_ratio / old_ratio if old_ratio > 0 else 1.0
                         
-                        # Check if split is in expanded date range (or include all splits found by AI)
-                        # AI may find splits outside our range, but we should still include them
-                        if expanded_from_date <= split_date_dt <= to_date:
+                        # CRITICAL: Only include splits that are >= from_date (purchase date) and <= to_date
+                        # This ensures we only consider splits AFTER purchase date
+                        if (from_date_for_filter is None or split_date_dt >= from_date_for_filter) and split_date_dt <= to_date:
                             print(f"[CORP_ACTION] [AI] [OK] {ticker}: SPLIT DETECTED on {split_date_dt.date()} - {old_ratio}:{new_ratio} (ratio: {actual_ratio:.4f})")
                             
                             splits.append({
@@ -941,23 +977,65 @@ CRITICAL:
                                 'description': f"{description} (AI)"
                             })
                         else:
-                            # Include splits outside range too - they're still valid splits
-                            print(f"[CORP_ACTION] [AI] [OK] {ticker}: SPLIT DETECTED (outside range) on {split_date_dt.date()} - {old_ratio}:{new_ratio} (ratio: {actual_ratio:.4f})")
-                            print(f"[CORP_ACTION] [AI] [INFO] Split date {split_date_dt.date()} is outside range {expanded_from_date.date()} to {to_date.date()}, but including it anyway")
-                            
-                            splits.append({
-                                'type': 'split',
-                                'date': split_date_dt,
-                                'old_ratio': old_ratio,
-                                'new_ratio': new_ratio,
-                                'split_ratio': actual_ratio,
-                                'description': f"{description} (AI - outside date range)"
-                            })
+                            # Exclude splits that happened before purchase date
+                            if from_date_for_filter and split_date_dt < from_date_for_filter:
+                                print(f"[CORP_ACTION] [AI] [WARNING] {ticker}: Split on {split_date_dt.date()} ignored (happened BEFORE purchase on {from_date_for_filter.date()})")
+                            else:
+                                print(f"[CORP_ACTION] [AI] [WARNING] {ticker}: Split on {split_date_dt.date()} ignored (outside date range)")
                     except Exception as e:
-                        print(f"[CORP_ACTION] [AI] [WARNING] {ticker}: Error parsing split info: {str(e)}")
-                        continue
+                        print(f"[CORP_ACTION] [AI] [ERROR] {ticker}: Error parsing split info: {str(e)[:100]}")
             
-            return splits
+            # Process demergers
+            if result.get("has_demerger") and result.get("demergers"):
+                for demerger_info in result.get("demergers", []):
+                    try:
+                        demerger_date_str = demerger_info.get("date")
+                        ratio_str = demerger_info.get("ratio", "1:1")
+                        demerged_entity = demerger_info.get("demerged_entity", "")
+                        demerged_ticker = demerger_info.get("demerged_ticker", "")
+                        description = demerger_info.get("description", f"Demerger: {demerged_entity}")
+                        
+                        # Parse date
+                        demerger_date_dt = datetime.strptime(demerger_date_str, '%Y-%m-%d')
+                        
+                        # Normalize to timezone-naive for comparison
+                        if demerger_date_dt.tzinfo is not None:
+                            demerger_date_dt = demerger_date_dt.replace(tzinfo=None)
+                        
+                        # Parse ratio (e.g., "1:1" means 1 share of parent = 1 share of demerged entity)
+                        ratio_parts = ratio_str.split(':')
+                        if len(ratio_parts) == 2:
+                            parent_ratio = float(ratio_parts[0])
+                            demerged_ratio = float(ratio_parts[1])
+                            demerger_ratio = demerged_ratio / parent_ratio if parent_ratio > 0 else 1.0
+                        else:
+                            demerger_ratio = 1.0
+                        
+                        # CRITICAL: Only include demergers that are >= from_date (purchase date) and <= to_date
+                        # This ensures we only consider demergers AFTER purchase date
+                        if (from_date_for_filter is None or demerger_date_dt >= from_date_for_filter) and demerger_date_dt <= to_date:
+                            print(f"[CORP_ACTION] [AI] [OK] {ticker}: DEMERGER DETECTED on {demerger_date_dt.date()} - Ratio: {ratio_str}, Entity: {demerged_entity}")
+                            
+                            demergers.append({
+                                'type': 'demerger',
+                                'date': demerger_date_dt,
+                                'ratio': ratio_str,
+                                'demerger_ratio': demerger_ratio,
+                                'demerged_entity': demerged_entity,
+                                'demerged_ticker': demerged_ticker,
+                                'description': f"{description} (AI)"
+                            })
+                        else:
+                            # Exclude demergers that happened before purchase date
+                            if from_date_for_filter and demerger_date_dt < from_date_for_filter:
+                                print(f"[CORP_ACTION] [AI] [WARNING] {ticker}: Demerger on {demerger_date_dt.date()} ignored (happened BEFORE purchase on {from_date_for_filter.date()})")
+                            else:
+                                print(f"[CORP_ACTION] [AI] [WARNING] {ticker}: Demerger on {demerger_date_dt.date()} ignored (outside date range)")
+                    except Exception as e:
+                        print(f"[CORP_ACTION] [AI] [ERROR] {ticker}: Error parsing demerger info: {str(e)[:100]}")
+            
+            # Return both splits and demergers
+            return splits + demergers
             
         except json.JSONDecodeError as e:
             print(f"[CORP_ACTION] [AI] [ERROR] {ticker}: Failed to parse AI response as JSON: {str(e)}")

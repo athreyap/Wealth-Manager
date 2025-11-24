@@ -54,7 +54,7 @@ class PMS_AIF_Calculator:
             
             # CRITICAL: Use AI to fetch actual NAVs instead of calculating from CAGR
             print(f"[PMS_AIF] 🔍 Fetching actual NAVs for {ticker} ({'AIF' if is_aif else 'PMS'}) - Investment: Rs. {investment_amount:,.2f} on {investment_date}")
-            nav_data = self._get_navs_from_ai(ticker, is_aif, pms_aif_name, investment_date)
+            nav_data = self._get_navs_from_ai(ticker, is_aif, pms_aif_name, investment_date, investment_amount)
             
             if nav_data and nav_data.get('navs') and len(nav_data.get('navs', [])) > 0:
                 # Use AI-provided NAVs
@@ -246,7 +246,8 @@ class PMS_AIF_Calculator:
         ticker: str,
         is_aif: bool,
         pms_aif_name: str = None,
-        investment_date: str = None
+        investment_date: str = None,
+        investment_amount: float = None
     ) -> Optional[Dict[str, Any]]:
         """
         Get actual NAVs (Net Asset Values) for PMS/AIF using AI - fetches 52 weeks of NAV data
@@ -256,6 +257,7 @@ class PMS_AIF_Calculator:
             is_aif: True for AIF, False for PMS
             pms_aif_name: Optional name for better context
             investment_date: Investment date for context
+            investment_amount: Optional investment amount (used for estimated NAVs if AI returns null)
         
         Returns:
             Dict with navs (list of {date, nav}), current_nav, source or None
@@ -334,16 +336,26 @@ OR if using closest available (partial official data):
     ]
 }}
 
-OR ONLY if absolutely no official data found:
+OR if absolutely no official data found (YOU MUST STILL PROVIDE ESTIMATED NAVs):
 {{
     "current_nav": 150.50,
-    "source": "Estimated from similar products",
+    "source": "Estimated from similar products/industry average",
     "data_type": "estimated",
     "navs": [
         {{"date": "2024-01-01", "nav": 100.00}},
+        {{"date": "2024-01-08", "nav": 101.50}},
         ...
+        {{"date": "{nav_dates[-1]}", "nav": 150.50}}
     ]
 }}
+
+CRITICAL RULES:
+- NEVER return null for current_nav
+- NEVER return an empty navs array
+- If you cannot find official NAVs, you MUST estimate NAVs based on typical {asset_type} performance
+- Use a reasonable CAGR assumption (12-18% for equity PMS, 10-15% for balanced PMS)
+- Calculate estimated NAVs for ALL 52 weeks using the CAGR assumption
+- Start with an initial NAV (e.g., 100) and grow it week by week using the CAGR
 
 CRITICAL: 
 - Provide at least 12 weeks of NAV data (preferably 52 weeks)
@@ -353,6 +365,12 @@ CRITICAL:
 - PREFER "exact" or "closest_available" over "estimated"
 - Only use "estimated" if you have searched extensively and found NO official NAV data
 - If you find any official NAV data (even partial), use "closest_available" instead of "estimated"
+- NEVER return null for current_nav or empty navs array - ALWAYS provide estimated NAVs based on typical PMS/AIF performance if official data is unavailable
+- If you cannot find official NAVs, estimate based on:
+  * Typical {asset_type} performance (usually 12-20% CAGR for equity-focused PMS)
+  * Similar products from the same fund house (if name is provided)
+  * Industry averages for the strategy type
+  * Calculate estimated NAVs using a reasonable CAGR assumption (e.g., 15% for equity PMS)
 """
 
             # Use gpt-5 as primary, with gpt-4o as fallback
@@ -415,6 +433,36 @@ CRITICAL:
                     return None
             
             navs = result.get('navs', [])
+            current_nav = result.get('current_nav')
+            
+            # If AI returned null or empty, generate estimated NAVs as fallback
+            if not navs or len(navs) == 0 or current_nav is None:
+                print(f"[PMS_AIF_AI] [WARNING] {ticker}: AI returned null/empty NAVs, generating estimated NAVs based on typical {asset_type} performance")
+                # Generate estimated NAVs using a reasonable CAGR assumption
+                # For equity-focused PMS, use 15% CAGR; for balanced, use 12%
+                estimated_cagr = 0.15 if 'equity' in (pms_aif_name or '').lower() else 0.12
+                
+                # Calculate estimated NAVs for the last 52 weeks
+                # Use investment amount as base if available, otherwise use 100
+                if investment_amount and investment_amount > 0:
+                    # Estimate initial NAV based on investment (assume 1 unit = initial investment)
+                    initial_nav = investment_amount
+                else:
+                    initial_nav = 100.0
+                
+                navs = []
+                for i, date_str in enumerate(nav_dates):
+                    weeks_ago = len(nav_dates) - 1 - i
+                    years_ago = weeks_ago / 52.0
+                    # Calculate NAV backwards from current (most recent) to oldest
+                    estimated_nav = initial_nav * ((1 + estimated_cagr) ** years_ago)
+                    navs.append({
+                        'date': date_str,
+                        'nav': round(estimated_nav, 2)
+                    })
+                current_nav = navs[-1].get('nav', initial_nav) if navs else initial_nav
+                print(f"[PMS_AIF_AI] [INFO] {ticker}: Generated {len(navs)} estimated NAVs using {estimated_cagr*100:.1f}% CAGR assumption (initial NAV: {initial_nav:,.2f})")
+            
             if navs and len(navs) > 0:
                 # Validate NAVs
                 valid_navs = []
