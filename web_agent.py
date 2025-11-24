@@ -889,12 +889,24 @@ def _render_document_upload_section(
         if not isinstance(uploaded_files, list):
             uploaded_files = [uploaded_files]
 
-        for file_obj in uploaded_files:
-            payload, error = _build_document_payload_from_file(file_obj)
-            if payload:
-                document_payloads.append(payload)
-            elif error:
-                extraction_errors.append(error)
+        print(f"[DOC_UPLOAD] 📤 Processing {len(uploaded_files)} uploaded file(s)")
+        
+        for idx, file_obj in enumerate(uploaded_files, 1):
+            print(f"[DOC_UPLOAD] 📄 Processing file {idx}/{len(uploaded_files)}: {file_obj.name}")
+            try:
+                payload, error = _build_document_payload_from_file(file_obj)
+                if payload:
+                    document_payloads.append(payload)
+                    print(f"[DOC_UPLOAD] ✅ Successfully processed: {file_obj.name}")
+                elif error:
+                    extraction_errors.append(error)
+                    print(f"[DOC_UPLOAD] ❌ Error processing {file_obj.name}: {error}")
+            except Exception as e:
+                error_msg = f"Unexpected error processing {file_obj.name}: {str(e)[:200]}"
+                extraction_errors.append(error_msg)
+                print(f"[DOC_UPLOAD] ❌ Exception processing {file_obj.name}: {str(e)[:200]}")
+        
+        print(f"[DOC_UPLOAD] 📊 Summary: {len(document_payloads)} successful, {len(extraction_errors)} errors")
 
     if document_payloads:
         button_text = (
@@ -4438,7 +4450,7 @@ def detect_corporate_actions(user_id, db, holdings=None):
 
             # Check for ACTUAL corporate actions from yfinance (not just price differences)
             # Only detect splits that happened AFTER the purchase date
-            print(f"[CORPORATE_ACTIONS] 🔍 {ticker}: Checking for actual corporate actions from yfinance (purchase date: {earliest_purchase_date.date() if earliest_purchase_date and hasattr(earliest_purchase_date, 'date') else 'unknown'})")
+            print(f"[CORPORATE_ACTIONS] 🔍 {ticker}: Checking for actual corporate actions from yfinance (latest purchase date: {latest_purchase_date.date() if latest_purchase_date and hasattr(latest_purchase_date, 'date') else 'unknown'})")
             print(f"[CORPORATE_ACTIONS] 🔍 {ticker}: Will call _fetch_corporate_actions_from_yfinance which includes known splits check")
 
             # Get actual corporate actions from yfinance (enhanced_price_fetcher has this function)
