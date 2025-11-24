@@ -7840,6 +7840,126 @@ def main_dashboard():
         st.caption("📚 Upload and analyze PDF documents")
         st.caption("💬 Chat with AI about your portfolio")
     st.sidebar.markdown("---")
+    
+    # Corporate Actions Notification in Sidebar
+    if 'corporate_actions_detected' in st.session_state and st.session_state.corporate_actions_detected:
+        corporate_actions = st.session_state.corporate_actions_detected
+        st.sidebar.warning(f"📊 **{len(corporate_actions)} Stock Splits/Bonus Shares Detected!**")
+        
+        with st.sidebar.expander(f"🔧 View and Fix Corporate Actions ({len(corporate_actions)} stocks)", expanded=False):
+            st.markdown("""
+            **Corporate actions detected!** Your portfolio has stocks that underwent splits or bonus issues.  
+            Click the "Fix" button to automatically adjust quantities and prices.
+            """)
+            
+            # Create a table of detected corporate actions
+            for idx, action in enumerate(corporate_actions):
+                st.markdown("---")
+                st.markdown(f"**{action['stock_name']}** (`{action['ticker']}`)")
+                st.caption(f"Your Avg: ₹{action['avg_price']:,.2f} | Current: ₹{action['current_price']:,.2f}")
+                
+                if action.get('action_type') == 'split':
+                    st.info(f"**1:{action['split_ratio']} Split** ({action['ratio']:.1f}x difference)")
+                elif action.get('action_type') == 'demerger':
+                    st.info(f"**Demerger** - Ratio: {action.get('ratio', 'N/A')}")
+                else:
+                    st.info(f"**{action.get('action_type', 'Corporate Action')}**")
+                
+                if st.button(f"✅ Apply", key=f"sidebar_fix_{idx}_{action['ticker']}", use_container_width=True):
+                    with st.spinner(f"Applying corporate action for {action['ticker']}..."):
+                        try:
+                            adjusted = adjust_for_corporate_action(
+                                user['id'], 
+                                action['stock_id'], 
+                                action.get('split_ratio', action.get('demerger_ratio', 1.0)),
+                                db,
+                                action_type=action.get('action_type', 'split'),
+                                new_ticker=action.get('new_ticker'),
+                                exchange_ratio=action.get('exchange_ratio', 1.0),
+                                cash_per_share=action.get('cash_per_share', 0.0)
+                            )
+                            
+                            if adjusted > 0:
+                                st.success(f"✅ Successfully applied corporate action for {action['ticker']}!")
+                                st.info(f"📊 Updated {adjusted} transaction(s) and recalculated holdings")
+                                
+                                # Clear from session state
+                                remaining_actions = [
+                                    a for a in corporate_actions if a['ticker'] != action['ticker']
+                                ]
+                                if remaining_actions:
+                                    st.session_state.corporate_actions_detected = remaining_actions
+                                else:
+                                    st.session_state.corporate_actions_detected = None
+                                
+                                time.sleep(2)
+                                st.info("🔄 Redirecting to dashboard...")
+                                time.sleep(2)
+                                st.rerun()
+                            elif adjusted == -1:
+                                st.info(f"ℹ️ Corporate action for {action['ticker']} was already applied.")
+                                remaining_actions = [
+                                    a for a in corporate_actions if a['ticker'] != action['ticker']
+                                ]
+                                if remaining_actions:
+                                    st.session_state.corporate_actions_detected = remaining_actions
+                                else:
+                                    st.session_state.corporate_actions_detected = None
+                                st.rerun()
+                            else:
+                                st.error(f"❌ No transactions found to adjust for {action['ticker']}")
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)[:200]}")
+            
+            st.markdown("---")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("✅ Apply All", type="primary", use_container_width=True):
+                    with st.spinner("Applying corporate actions to all stocks..."):
+                        total_adjusted = 0
+                        successful = 0
+                        failed = []
+                        
+                        for action in corporate_actions:
+                            try:
+                                adjusted = adjust_for_corporate_action(
+                                    user['id'],
+                                    action['stock_id'],
+                                    action.get('split_ratio', action.get('demerger_ratio', 1.0)),
+                                    db,
+                                    action_type=action.get('action_type', 'split'),
+                                    new_ticker=action.get('new_ticker'),
+                                    exchange_ratio=action.get('exchange_ratio', 1.0),
+                                    cash_per_share=action.get('cash_per_share', 0.0)
+                                )
+                                if adjusted > 0:
+                                    total_adjusted += adjusted
+                                    successful += 1
+                                elif adjusted == -1:
+                                    successful += 1
+                                else:
+                                    failed.append(action['ticker'])
+                            except Exception as e:
+                                failed.append(f"{action['ticker']} ({str(e)[:50]})")
+                        
+                        if total_adjusted > 0 or successful > 0:
+                            st.success(f"✅ Successfully applied corporate actions!")
+                            if total_adjusted > 0:
+                                st.info(f"📊 Updated {total_adjusted} transaction(s) across {successful} stock(s)")
+                            if failed:
+                                st.warning(f"⚠️ {len(failed)} stock(s) could not be updated: {', '.join(failed)}")
+                            st.session_state.corporate_actions_detected = None
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            st.error(f"❌ No transactions were updated.")
+            
+            with col_b:
+                if st.button("❌ Dismiss", use_container_width=True):
+                    st.session_state.corporate_actions_detected = None
+                    st.rerun()
+        
+        st.sidebar.markdown("---")
     st.sidebar.markdown(f"**👤 {user['full_name']}**")
     st.sidebar.markdown(f"📧 {user['email']}")
     
@@ -7933,131 +8053,7 @@ def portfolio_overview_page():
     user = st.session_state.user
     db = st.session_state.db  # Get database manager from session state
     
-    # Show Corporate Actions Alert (Stock Splits/Bonus)
-    if 'corporate_actions_detected' in st.session_state and st.session_state.corporate_actions_detected:
-        corporate_actions = st.session_state.corporate_actions_detected
-        
-        st.warning(f"📊 **{len(corporate_actions)} Stock Splits/Bonus Shares Detected!**")
-        
-        with st.expander(f"🔧 View and Fix Corporate Actions ({len(corporate_actions)} stocks)", expanded=True):
-            st.markdown("""
-            **Corporate actions detected!** Your portfolio has stocks that underwent splits or bonus issues.  
-            Click the "Fix" button to automatically adjust quantities and prices.
-            """)
-            
-            # Create a table of detected corporate actions
-            for idx, action in enumerate(corporate_actions):
-                col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
-                
-                with col1:
-                    st.write(f"**{action['stock_name']}** (`{action['ticker']}`)")
-                
-                with col2:
-                    st.caption(f"Your Avg: ₹{action['avg_price']:,.2f}")
-                    st.caption(f"Current: ₹{action['current_price']:,.2f}")
-                
-                with col3:
-                    st.info(f"**1:{action['split_ratio']} Split**")
-                    st.caption(f"({action['ratio']:.1f}x difference)")
-                
-                with col4:
-                    if st.button(f"✅ Apply", key=f"fix_split_{idx}_{action['ticker']}"):
-                        with st.spinner(f"Applying corporate action for {action['ticker']}..."):
-                            try:
-                                adjusted = adjust_for_corporate_action(
-                                user['id'], 
-                                action['stock_id'], 
-                                action['split_ratio'],
-                                    db,
-                                    action_type=action.get('action_type', 'split')
-                            )
-                            
-                                if adjusted > 0:
-                                    st.success(f"✅ Successfully applied corporate action for {action['ticker']}!")
-                                    st.info(f"📊 Updated {adjusted} transaction(s) and recalculated holdings")
-                                    
-                                # Clear from session state
-                                    remaining_actions = [
-                                    a for a in corporate_actions if a['ticker'] != action['ticker']
-                                ]
-                                    if remaining_actions:
-                                        st.session_state.corporate_actions_detected = remaining_actions
-                                    else:
-                                        st.session_state.corporate_actions_detected = None
-                                    
-                                    time.sleep(2)
-                                    st.info("🔄 Redirecting to dashboard...")
-                                    time.sleep(2)  # Brief pause to show success message
-                                    st.rerun()
-                                elif adjusted == -1:
-                                    # All transactions already adjusted - this is fine, show info and clear from list
-                                    st.info(f"ℹ️ Corporate action for {action['ticker']} was already applied. All transactions are up to date.")
-                                    
-                                    # Clear from session state since it's already done
-                                    remaining_actions = [
-                                        a for a in corporate_actions if a['ticker'] != action['ticker']
-                                    ]
-                                    if remaining_actions:
-                                        st.session_state.corporate_actions_detected = remaining_actions
-                                    else:
-                                        st.session_state.corporate_actions_detected = None
-                                else:
-                                    st.error(f"❌ No transactions found to adjust for {action['ticker']}")
-                            except Exception as e:
-                                st.error(f"❌ Error applying corporate action: {str(e)[:200]}")
-                                import traceback
-                                st.code(traceback.format_exc())
-            
-            # Add "Fix All" button
-            st.markdown("---")
-            col_a, col_b, col_c = st.columns([1, 1, 2])
-            with col_a:
-                if st.button("✅ Apply All", type="primary", use_container_width=True):
-                    with st.spinner("Applying corporate actions to all stocks..."):
-                        total_adjusted = 0
-                        successful = 0
-                        failed = []
-                        
-                        for action in corporate_actions:
-                            try:
-                                adjusted = adjust_for_corporate_action(
-                                user['id'],
-                                action['stock_id'],
-                                    action.get('split_ratio', 1.0),
-                                    db,
-                                    action_type=action.get('action_type', 'split'),
-                                    new_ticker=action.get('new_ticker'),
-                                    exchange_ratio=action.get('exchange_ratio', 1.0),
-                                    cash_per_share=action.get('cash_per_share', 0.0)
-                                )
-                                if adjusted > 0:
-                                    total_adjusted += adjusted
-                                    successful += 1
-                                elif adjusted == -1:
-                                    # Already adjusted - count as successful but don't add to total
-                                    successful += 1
-                                else:
-                                    failed.append(action['ticker'])
-                            except Exception as e:
-                                failed.append(f"{action['ticker']} ({str(e)[:50]})")
-                        
-                        if total_adjusted > 0:
-                            st.success(f"✅ Successfully applied corporate actions!")
-                            st.info(f"📊 Updated {total_adjusted} transaction(s) across {successful} stock(s)")
-                            if failed:
-                                st.warning(f"⚠️ {len(failed)} stock(s) could not be updated: {', '.join(failed)}")
-                            st.session_state.corporate_actions_detected = None
-                            time.sleep(2)
-                            st.rerun()
-                        else:
-                            st.error(f"❌ No transactions were updated. Please check the logs.")
-            
-            with col_b:
-                if st.button("❌ Dismiss", use_container_width=True):
-                    st.session_state.corporate_actions_detected = None
-                    st.rerun()
-        
-        st.markdown("---")
+    # Corporate actions are now shown in the sidebar (moved from main area)
     
     # Add AI-powered proactive alerts if available
     if AI_AGENTS_AVAILABLE:
