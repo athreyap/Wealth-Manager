@@ -4219,13 +4219,33 @@ if not hasattr(st.session_state.db, "get_channel_weekly_history") or not hasattr
     st.session_state.db = SharedDatabaseManager()
 
 # Function to detect corporate actions (splits/bonus/mergers)
-def detect_corporate_actions(user_id, db, holdings=None):
+# Note: Removed unused cache decorator - using session state caching instead for Streamlit Cloud compatibility
+
+def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
     """
     Detect stock splits, bonus shares, and mergers by comparing CSV prices with current prices
     Returns list of stocks with likely corporate actions
+    
+    Args:
+        skip_if_recent: If True, skip detection if done recently (within 1 hour)
     """
     try:
         import yfinance as yf
+        import hashlib
+        import json
+
+        # OPTIMIZATION: Skip if recently checked (within last hour)
+        if skip_if_recent:
+            last_check_key = f'corp_action_last_check_{user_id}'
+            if last_check_key in st.session_state:
+                last_check_time = st.session_state[last_check_key]
+                if last_check_time and (datetime.now() - last_check_time).total_seconds() < 3600:
+                    print(f"[CORPORATE_ACTIONS] ⏭️ Skipping detection - checked {int((datetime.now() - last_check_time).total_seconds()/60)} min ago")
+                    # Return cached result if available
+                    cached_key = f'corp_action_result_{user_id}'
+                    if cached_key in st.session_state:
+                        return st.session_state[cached_key]
+                    return []
 
         # Use provided holdings or fetch if not provided
         if holdings is None:
@@ -4681,7 +4701,7 @@ def detect_corporate_actions(user_id, db, holdings=None):
                             'quantity': quantity,
                             'ratio': price_ratio,
                             'split_ratio': confirmed_ratio,
-                            'split_date': str(split_date),
+                            'split_date': str(split_date) if hasattr(split_date, '__str__') else str(split_date),
                             'action_type': 'split',
                         })
                         print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Added corporate action (fallback) - {confirmed_ratio}:1 split on {split_date}")
@@ -4696,6 +4716,10 @@ def detect_corporate_actions(user_id, db, holdings=None):
                     print(f"  - {action['ticker']}: Merger to {action.get('new_ticker', 'unknown')}")
                 elif action_type == 'delisting':
                     print(f"  - {action['ticker']}: Delisted")
+        
+        # OPTIMIZATION: Cache the result and timestamp
+        st.session_state[f'corp_action_result_{user_id}'] = corporate_actions
+        st.session_state[f'corp_action_last_check_{user_id}'] = datetime.now()
         
         return corporate_actions
 
@@ -5299,53 +5323,34 @@ def login_page():
             if user:
                 st.session_state.user = user
                 
-                # OPTIMIZATION: Recalculate first, then fetch holdings ONCE and reuse
-                # This avoids multiple separate database calls (was 3+ calls, now 2 max)
+                # OPTIMIZATION: Fast login - defer slow operations
+                # Only do critical operations synchronously, defer the rest
                 try:
                     db.recalculate_holdings(user['id'])
                 except:
                     pass  # Silent failure
                 
-                # Fetch holdings ONCE after recalculation and reuse for all operations
+                # Fetch holdings ONCE after recalculation
                 try:
                     holdings = db.get_user_holdings(user['id'])
                 except:
                     holdings = []
                 
-                # Update bond prices automatically on login (AI-powered)
-                # Pass holdings to avoid another fetch
-                try:
-                    if holdings:
-                        bonds = [h for h in holdings if h.get('asset_type') == 'bond']
-                        if bonds:
-                            update_bond_prices_with_ai(user['id'], db, bonds=bonds)
-                except:
-                    pass  # Silent failure - don't break login
-                
+                # Set session state flags
                 st.session_state.needs_initial_refresh = True
                 st.session_state.missing_weeks_fetched = False
                 st.session_state.last_fetch_time = None
                 
-                # Detect corporate actions (splits/bonus/mergers) on login
-                # Pass holdings to avoid another fetch
-                try:
-                    if holdings:
-                        print(f"[CORP_ACTION] 🔍 Detecting corporate actions on login for {len(holdings)} holdings...")
-                        corporate_actions = detect_corporate_actions(user['id'], db, holdings=holdings)
-                        if corporate_actions:
-                            print(f"[CORP_ACTION] ✅ Detected {len(corporate_actions)} corporate actions on login")
-                            st.session_state.corporate_actions_detected = corporate_actions
-                        else:
-                            print(f"[CORP_ACTION] ℹ️ No corporate actions detected on login")
-                            st.session_state.corporate_actions_detected = None
-                    else:
-                        print(f"[CORP_ACTION] ⚠️ No holdings to check for corporate actions")
-                        st.session_state.corporate_actions_detected = None
-                except Exception as e:
-                    print(f"[CORP_ACTION] ❌ Error detecting corporate actions on login: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    st.session_state.corporate_actions_detected = None
+                # OPTIMIZATION: Defer slow operations to background
+                # Mark that background tasks need to run, but don't block login
+                st.session_state.pending_background_tasks = {
+                    'bond_updates': True,
+                    'corporate_actions': True,
+                    'last_check_time': None
+                }
+                
+                # Initialize corporate actions as None - will be populated in background
+                st.session_state.corporate_actions_detected = None
                 
                 st.success("Login successful!")
                 st.rerun()
@@ -7878,6 +7883,45 @@ def main_dashboard():
             run_portfolio_refresh(user['id'], auto=True)
         finally:
             st.session_state['_auto_refresh_running'] = False
+    
+    # OPTIMIZATION: Run background tasks if pending (non-blocking, after initial refresh)
+    if 'pending_background_tasks' in st.session_state and st.session_state.pending_background_tasks:
+        tasks = st.session_state.pending_background_tasks
+        if tasks.get('corporate_actions') or tasks.get('bond_updates'):
+            # Run in background without blocking UI
+            try:
+                # Get holdings once (use cache if available)
+                holdings = get_cached_holdings(user['id'])
+                
+                # Corporate actions detection (if needed)
+                if tasks.get('corporate_actions'):
+                    try:
+                        print(f"[BACKGROUND] 🔍 Detecting corporate actions for {len(holdings) if holdings else 0} holdings...")
+                        corporate_actions = detect_corporate_actions(user['id'], db, holdings=holdings, skip_if_recent=True)
+                        if corporate_actions:
+                            print(f"[BACKGROUND] ✅ Detected {len(corporate_actions)} corporate actions")
+                            st.session_state.corporate_actions_detected = corporate_actions
+                        else:
+                            st.session_state.corporate_actions_detected = None
+                    except Exception as e:
+                        print(f"[BACKGROUND] ⚠️ Error in corporate action detection: {str(e)[:100]}")
+                        st.session_state.corporate_actions_detected = None
+                
+                # Bond price updates (if needed)
+                if tasks.get('bond_updates'):
+                    try:
+                        bonds = [h for h in holdings if h.get('asset_type') == 'bond'] if holdings else []
+                        if bonds:
+                            print(f"[BACKGROUND] 🔄 Updating {len(bonds)} bond prices...")
+                            update_bond_prices_with_ai(user['id'], db, bonds=bonds)
+                    except Exception as e:
+                        print(f"[BACKGROUND] ⚠️ Error updating bond prices: {str(e)[:100]}")
+                
+                # Mark tasks as complete
+                st.session_state.pending_background_tasks = None
+            except Exception as e:
+                print(f"[BACKGROUND] ⚠️ Error in background tasks: {str(e)[:100]}")
+                # Don't fail - just log and continue
     
     # Sidebar
     st.sidebar.title("📊 Navigation")
