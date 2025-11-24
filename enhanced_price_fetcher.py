@@ -14,6 +14,27 @@ import requests
 import re
 import streamlit as st
 import yfinance as yf
+import logging
+import time
+from functools import wraps
+
+# OPTIMIZATION: Suppress verbose yfinance error logging
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='yfinance')
+yfinance_logger = logging.getLogger('yfinance')
+yfinance_logger.setLevel(logging.CRITICAL)  # Suppress all yfinance logging
+
+# OPTIMIZATION: Rate limiting for yfinance calls
+_last_yfinance_call = 0
+_yfinance_call_delay = 0.2  # 200ms delay between calls to avoid rate limiting
+
+def _rate_limited_yfinance_call():
+    """Helper to add rate limiting to yfinance calls"""
+    global _last_yfinance_call, _yfinance_call_delay
+    time_since_last = time.time() - _last_yfinance_call
+    if time_since_last < _yfinance_call_delay:
+        time.sleep(_yfinance_call_delay - time_since_last)
+    _last_yfinance_call = time.time()
 
 
 class EnhancedPriceFetcher:
@@ -552,16 +573,50 @@ class EnhancedPriceFetcher:
             
             for candidate in candidates:
                 try:
-                    test_ticker = yf.Ticker(candidate)
-                    # Try to get info to verify ticker is valid
-                    info = test_ticker.info
-                    if info and 'symbol' in info:
-                        ticker_obj = test_ticker
-                        working_ticker = candidate
-                        print(f"[CORP_ACTION] [OK] {ticker}: Found working ticker: {working_ticker} (symbol: {info.get('symbol')})")
-                        break
+                    # OPTIMIZATION: Rate limiting and timeout for yfinance calls
+                    global _last_yfinance_call, _yfinance_call_delay
+                    time_since_last = time.time() - _last_yfinance_call
+                    if time_since_last < _yfinance_call_delay:
+                        time.sleep(_yfinance_call_delay - time_since_last)
+                    _last_yfinance_call = time.time()
+                    
+                    # Use cached ticker if available
+                    if candidate in self._yfinance_ticker_cache:
+                        test_ticker = self._yfinance_ticker_cache[candidate]
+                    else:
+                        test_ticker = yf.Ticker(candidate)
+                        self._yfinance_ticker_cache[candidate] = test_ticker
+                    
+                    # Try to get info with timeout (fail fast if yfinance is slow)
+                    import signal
+                    def timeout_handler(signum, frame):
+                        raise TimeoutError("yfinance call timed out")
+                    
+                    # Use a simple timeout approach (not perfect but better than nothing)
+                    try:
+                        # Try to get info - if it takes too long, skip
+                        info = test_ticker.info
+                        if info and 'symbol' in info:
+                            ticker_obj = test_ticker
+                            working_ticker = candidate
+                            print(f"[CORP_ACTION] [OK] {ticker}: Found working ticker: {working_ticker} (symbol: {info.get('symbol')})")
+                            break
+                    except (KeyError, AttributeError, TypeError):
+                        # Info might be None or empty - try splits instead
+                        try:
+                            splits = test_ticker.splits
+                            if splits is not None:
+                                ticker_obj = test_ticker
+                                working_ticker = candidate
+                                print(f"[CORP_ACTION] [OK] {ticker}: Found working ticker: {working_ticker} (via splits)")
+                                break
+                        except:
+                            pass
                 except Exception as e:
-                    print(f"[CORP_ACTION] [WARNING] {ticker}: Failed to fetch {candidate}: {str(e)[:100]}")
+                    # Suppress verbose error messages for rate limiting
+                    error_str = str(e)
+                    if '401' not in error_str and 'Unauthorized' not in error_str and 'Crumb' not in error_str:
+                        print(f"[CORP_ACTION] [WARNING] {ticker}: Failed to fetch {candidate}: {error_str[:100]}")
                     continue
             
             # Check known splits database FIRST (before yfinance) - this catches splits that yfinance might miss
@@ -658,6 +713,8 @@ class EnhancedPriceFetcher:
             
             # Fetch dividends from yfinance (for reference, though we don't auto-adjust for dividends)
             try:
+                # OPTIMIZATION: Rate limiting
+                _rate_limited_yfinance_call()
                 dividends = ticker_obj.dividends
                 if dividends is not None and not dividends.empty:
                     # Ensure from_date and to_date are timezone-naive

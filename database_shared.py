@@ -2746,12 +2746,41 @@ class SharedDatabaseManager:
                 if required_pairs:
                     required_pairs -= existing_pairs
                 if not required_pairs:
-                    print("[HIST] All requested weeks already cached")
+                    print(f"[HIST] ✅ All {len(target_weeks)} requested weeks already cached for {ticker}")
                     return []
-            elif existing_count >= 40:
-                # Already has substantial data, skip to avoid duplicates
-                print(f"[HIST] SKIP: Already has {existing_count} records (>=40)")
-                return []
+                else:
+                    print(f"[HIST] 📊 Need to fetch {len(required_pairs)} missing weeks (out of {len(target_weeks)} requested) for {ticker}")
+            else:
+                # OPTIMIZATION: Even without target_weeks, check what's missing in last 52 weeks
+                # Don't fetch if we already have substantial recent data
+                current_date = datetime.now()
+                start_date = current_date - timedelta(weeks=52)
+                current_year, current_week, _ = current_date.isocalendar()
+                start_year, start_week, _ = start_date.isocalendar()
+                
+                # Generate last 52 weeks
+                last_52_weeks = set()
+                temp_date = start_date
+                while temp_date <= current_date:
+                    year, week, _ = temp_date.isocalendar()
+                    last_52_weeks.add((year, week))
+                    temp_date += timedelta(weeks=1)
+                
+                # Check how many of the last 52 weeks we already have
+                existing_recent = existing_pairs & last_52_weeks
+                if len(existing_recent) >= 40:  # Already have 40+ of last 52 weeks
+                    print(f"[HIST] ✅ SKIP: Already have {len(existing_recent)}/52 recent weeks for {ticker} (>=40, sufficient)")
+                    return []
+                elif existing_count >= 100:  # Have 100+ total records, likely complete
+                    print(f"[HIST] ✅ SKIP: Already have {existing_count} total records for {ticker} (>=100, likely complete)")
+                    return []
+                else:
+                    # Only fetch missing recent weeks
+                    required_pairs = last_52_weeks - existing_pairs
+                    if not required_pairs:
+                        print(f"[HIST] ✅ All recent weeks already cached for {ticker}")
+                        return []
+                    print(f"[HIST] 📊 Need to fetch {len(required_pairs)} missing recent weeks for {ticker} (have {len(existing_recent)}/52)")
             
             prices_to_insert = []
             
@@ -2794,11 +2823,22 @@ class SharedDatabaseManager:
                         df_nav = df_nav.sort_values('date')
 
                         if required_pairs:
+                            # Only fetch weeks that are actually missing
                             required_df = df_nav[df_nav.apply(
                                 lambda row: (int(row['iso_year']), int(row['iso_week'])) in required_pairs, axis=1)]
                         else:
-                            cutoff_date = datetime.now() - timedelta(weeks=60)
-                            required_df = df_nav[df_nav['date'] >= cutoff_date]
+                            # OPTIMIZATION: Only fetch missing recent weeks, not all historical data
+                            # Check what's missing in last 52 weeks
+                            cutoff_date = datetime.now() - timedelta(weeks=52)
+                            recent_df = df_nav[df_nav['date'] >= cutoff_date]
+                            # Filter out weeks we already have
+                            if existing_pairs:
+                                recent_df = recent_df[recent_df.apply(
+                                    lambda row: (int(row['iso_year']), int(row['iso_week'])) not in existing_pairs, axis=1)]
+                            required_df = recent_df
+                            if required_df.empty:
+                                print(f"[HIST] ✅ All recent weeks already cached for MF {ticker}")
+                                return []
 
                         if not required_df.empty:
                             df_weekly = required_df.groupby(['iso_year', 'iso_week']).tail(1)
@@ -3072,16 +3112,35 @@ class SharedDatabaseManager:
                 )
                 
                 if historical_data and len(historical_data) > 0:
-                    # Process returned data
+                    # Process returned data - only insert missing weeks
                     for item in historical_data:
                         try:
                             date_str = item.get('date')
                             price = item.get('price')
                             
+                            # Skip if we already have this week
+                            if date_str:
+                                try:
+                                    price_dt = datetime.strptime(date_str, '%Y-%m-%d')
+                                    iso_calendar = price_dt.isocalendar()
+                                    iso_pair = (iso_calendar[0], iso_calendar[1])
+                                    if iso_pair in existing_pairs:
+                                        continue  # Skip - already have this week
+                                    if required_pairs is not None and iso_pair not in required_pairs:
+                                        continue  # Skip - not in required weeks
+                                except:
+                                    pass  # Continue if date parsing fails
+                            
                             if date_str and price:
                                 price_date_obj = datetime.strptime(date_str, '%Y-%m-%d')
                                 iso_calendar = price_date_obj.isocalendar()
                                 iso_pair = (iso_calendar[0], iso_calendar[1])
+                                
+                                # OPTIMIZATION: Skip if we already have this week
+                                if iso_pair in existing_pairs:
+                                    continue  # Already have this week, skip
+                                
+                                # Skip if not in required weeks (when required_pairs is specified)
                                 if required_pairs is not None and iso_pair not in required_pairs:
                                     continue
                                 

@@ -4389,19 +4389,19 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                         if sid and txn_date:
                             # Convert to datetime if needed
                             if isinstance(txn_date, str):
-                                try:
+                            try:
                                     txn_date = datetime.strptime(txn_date, '%Y-%m-%d')
-                                except:
-                                    try:
+                            except:
+                                try:
                                         txn_date = datetime.strptime(txn_date, '%Y-%m-%d %H:%M:%S')
-                                    except:
+                                except:
                                         continue
                             elif hasattr(txn_date, 'date'):
                                 txn_date = datetime.combine(txn_date.date(), datetime.min.time())
-                            
+                        
                             if txn_date and txn_date.tzinfo is not None:
                                 txn_date = txn_date.replace(tzinfo=None)
-                            
+                        
                             # Keep the latest date for each stock_id
                             if sid not in latest_purchase_dates or txn_date > latest_purchase_dates[sid]:
                                 latest_purchase_dates[sid] = txn_date
@@ -4511,8 +4511,8 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                         elif hasattr(action_date, 'date'):
                             action_date = datetime.combine(action_date.date(), datetime.min.time())
                             
-                        if action_date.tzinfo is not None:
-                            action_date = action_date.replace(tzinfo=None)
+                            if action_date.tzinfo is not None:
+                                action_date = action_date.replace(tzinfo=None)
                         
                         # CRITICAL: Only include if action happened AFTER LATEST purchase date
                         # This ensures we don't apply splits to purchases made AFTER the split occurred
@@ -4571,8 +4571,8 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                         
                         if action_type == 'split':
                             confirmed_ratio = latest_action.get('split_ratio', 1)
-                            
-                            if confirmed_ratio > 1:
+                    
+                    if confirmed_ratio > 1:
                                 # OPTIMIZATION: Check if transactions have already been adjusted before adding to list
                                 should_skip = False
                                 try:
@@ -4629,21 +4629,21 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                                 if should_skip:
                                     continue  # Skip adding to corporate_actions list
                                 
-                                corporate_actions.append({
-                                    'ticker': ticker,
-                                    'stock_name': holding.get('stock_name'),
-                                    'stock_id': holding.get('stock_id'),
-                                    'avg_price': avg_price,
-                                    'current_price': current_price,
-                                    'quantity': quantity,
-                                    'ratio': price_ratio,
-                                    'split_ratio': confirmed_ratio,
+                        corporate_actions.append({
+                            'ticker': ticker,
+                            'stock_name': holding.get('stock_name'),
+                            'stock_id': holding.get('stock_id'),
+                            'avg_price': avg_price,
+                            'current_price': current_price,
+                            'quantity': quantity,
+                            'ratio': price_ratio,
+                            'split_ratio': confirmed_ratio,
                                     'split_date': str(action_date.date() if hasattr(action_date, 'date') else action_date),
-                                    'action_type': 'split',
-                                })
+                            'action_type': 'split',
+                        })
                                 print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Added corporate action - {confirmed_ratio}:1 split on {action_date.date() if hasattr(action_date, 'date') else action_date}")
-                            else:
-                                print(f"[CORPORATE_ACTIONS] ℹ️ {ticker}: Split ratio <= 1, skipping")
+                    else:
+                        print(f"[CORPORATE_ACTIONS] ℹ️ {ticker}: Split ratio <= 1, skipping")
                         
                         elif action_type == 'demerger':
                             demerger_ratio = latest_action.get('demerger_ratio', 1.0)
@@ -4691,19 +4691,19 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                                     continue
                             except:
                                 pass
-                        
-                        corporate_actions.append({
-                            'ticker': ticker,
-                            'stock_name': holding.get('stock_name'),
-                            'stock_id': holding.get('stock_id'),
-                            'avg_price': avg_price,
-                            'current_price': current_price,
-                            'quantity': quantity,
-                            'ratio': price_ratio,
-                            'split_ratio': confirmed_ratio,
+
+            corporate_actions.append({
+                'ticker': ticker,
+                'stock_name': holding.get('stock_name'),
+                'stock_id': holding.get('stock_id'),
+                'avg_price': avg_price,
+                'current_price': current_price,
+                'quantity': quantity,
+                'ratio': price_ratio,
+                'split_ratio': confirmed_ratio,
                             'split_date': str(split_date) if hasattr(split_date, '__str__') else str(split_date),
-                            'action_type': 'split',
-                        })
+                'action_type': 'split',
+            })
                         print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Added corporate action (fallback) - {confirmed_ratio}:1 split on {split_date}")
         
         if corporate_actions:
@@ -5350,7 +5350,7 @@ def login_page():
                 }
                 
                 # Initialize corporate actions as None - will be populated in background
-                st.session_state.corporate_actions_detected = None
+                    st.session_state.corporate_actions_detected = None
                 
                 st.success("Login successful!")
                 st.rerun()
@@ -8103,7 +8103,7 @@ def main_dashboard():
                     st.session_state.corporate_actions_detected = None
                     st.rerun()
         
-        st.sidebar.markdown("---")
+    st.sidebar.markdown("---")
     st.sidebar.markdown(f"**👤 {user['full_name']}**")
     st.sidebar.markdown(f"📧 {user['email']}")
     
@@ -8431,12 +8431,12 @@ def portfolio_overview_page():
                 try:
                     # Batch update using a transaction-like approach (update each in sequence but more efficiently)
                     for update in mf_updates:
-                        try:
-                            db.supabase.table('stock_master').update({
+                                try:
+                                    db.supabase.table('stock_master').update({
                                 'stock_name': update['new_name']
                             }).eq('id', update['stock_id']).execute()
                             print(f"[MF_RESOLVE] ✅ Applied update {update['ticker']}: '{update['old_name']}' → '{update['new_name']}'")
-                        except Exception as e:
+                                except Exception as e:
                             print(f"[MF_RESOLVE] ⚠️ Failed to update {update['ticker']}: {e}")
                 except Exception as e:
                     print(f"[MF_RESOLVE] ⚠️ Error in batch update: {e}")
@@ -11454,7 +11454,7 @@ def ai_assistant_page():
         # Use already fetched PDFs
         pdf_count = len(user_pdfs)
         
-        if pdf_count > 0:
+    if pdf_count > 0:
             st.caption(f"📚 {pdf_count} PDFs loaded")
             # Show PDFs in expandable sections
             for pdf in user_pdfs[:10]:  # Show first 10 in sidebar
@@ -11470,23 +11470,23 @@ def ai_assistant_page():
                     if st.button("🗑️ Delete", key=f"sidebar_del_{pdf['id']}", use_container_width=True):
                         if db.delete_pdf(pdf['id']):
                             st.success("Deleted!")
-                            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                            st.rerun()
+                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+                st.rerun()
             if pdf_count > 10:
                 st.caption(f"... and {pdf_count - 10} more PDFs")
-        else:
-            st.caption("No PDFs uploaded yet")
+            else:
+                st.caption("No PDFs uploaded yet")
         
-        if st.button("🔄 Refresh PDFs", use_container_width=True):
-            st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-            st.success("Refreshed!")
-            st.rerun()
+    if st.button("🔄 Refresh PDFs", use_container_width=True):
+        st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+        st.success("Refreshed!")
+        st.rerun()
         
-        st.markdown("---")
+    st.markdown("---")
         
         # Upload Documents Section
-        st.markdown("### 📤 Upload Documents")
-        _render_document_upload_section(
+    st.markdown("### 📤 Upload Documents")
+    _render_document_upload_section(
             section_key="document_ai_sidebar",
             user=user,
             holdings=holdings,
@@ -11494,17 +11494,17 @@ def ai_assistant_page():
             header_text="**📤 Upload for AI Analysis**"
         )
         
-        st.markdown("---")
+    st.markdown("---")
         
         # Quick Tips Section
-        st.markdown("### 💡 Quick Tips")
-        st.caption("Try asking me:")
-        st.caption("• 'How is my portfolio performing overall?'")
-        st.caption("• 'Which sectors are my best performers?'")
-        st.caption("• 'How can I reduce portfolio risk?'")
-        st.caption("• 'Which channels are giving me the best returns?'")
-        st.caption("• 'Should I rebalance my portfolio?'")
-        st.caption("• 'Upload a research report for analysis'")
+    st.markdown("### 💡 Quick Tips")
+    st.caption("Try asking me:")
+    st.caption("• 'How is my portfolio performing overall?'")
+    st.caption("• 'Which sectors are my best performers?'")
+    st.caption("• 'How can I reduce portfolio risk?'")
+    st.caption("• 'Which channels are giving me the best returns?'")
+    st.caption("• 'Should I rebalance my portfolio?'")
+    st.caption("• 'Upload a research report for analysis'")
     
     # Main chat area
     st.title("🤖 AI Assistant")
@@ -12160,12 +12160,12 @@ Always:
                         if iteration > 0:
                             st.info(f"🔄 AI is analyzing data (iteration {iteration + 1}/{max_iterations})...")
                         
-                        response = openai.chat.completions.create(
-                                model=model_used,
-                            messages=messages,
-                            tools=functions,
-                            tool_choice="auto"  # Let AI decide when to use functions
-                        )
+                    response = openai.chat.completions.create(
+                            model=model_used,
+                        messages=messages,
+                        tools=functions,
+                        tool_choice="auto"  # Let AI decide when to use functions
+                    )
                     except Exception as e:
                         st.error(f"❌ AI service error: {str(e)[:200]}")
                         st.stop()
@@ -12344,33 +12344,33 @@ Always:
                             Be specific and actionable. Use emojis and clear formatting.
                             """
                             
-                            with st.spinner("🤖 Analyzing PDF..."):
-                                response = openai.chat.completions.create(
-                                    model="gpt-5",  # Using GPT-5 as primary
-                                    messages=[{"role": "user", "content": analysis_prompt}]
-                                )
-                                
-                                fresh_analysis = response.choices[0].message.content
+                    with st.spinner("🤖 Analyzing PDF..."):
+                            response = openai.chat.completions.create(
+                                model="gpt-5",  # Using GPT-5 as primary
+                                messages=[{"role": "user", "content": analysis_prompt}]
+                            )
                             
-                            # Display in chat
-                            with st.chat_message("assistant"):
-                                st.markdown(f"### 🔍 Analysis of: {pdf['filename']}")
-                                st.markdown(fresh_analysis)
+                            fresh_analysis = response.choices[0].message.content
+                            
+                        # Display in chat
+                        with st.chat_message("assistant"):
+                            st.markdown(f"### 🔍 Analysis of: {pdf['filename']}")
+                            st.markdown(fresh_analysis)
                             
                         # Store in chat history
                             st.session_state.chat_history.append({
                                 "q": f"Analyze PDF: {pdf['filename']}", 
                                 "a": fresh_analysis
                             })
-                            st.session_state.current_thread_messages.append({
-                                'role': 'user',
-                                'content': f"Analyze PDF: {pdf['filename']}"
-                            })
-                            st.session_state.current_thread_messages.append({
-                                'role': 'assistant',
-                                'content': fresh_analysis
-                            })
-                            
+                        st.session_state.current_thread_messages.append({
+                            'role': 'user',
+                            'content': f"Analyze PDF: {pdf['filename']}"
+                        })
+                        st.session_state.current_thread_messages.append({
+                            'role': 'assistant',
+                            'content': fresh_analysis
+                        })
+                        
                         # Save to database
                             if hasattr(db, 'save_chat_history'):
                                 try:
@@ -12379,11 +12379,11 @@ Always:
                                     pass
                             
                     # Clear the flag
-                            st.session_state[f"analyze_pdf_{pdf['id']}"] = False
-                            st.rerun()
+                    st.session_state[f"analyze_pdf_{pdf['id']}"] = False
+                    st.rerun()
                         except Exception as e:
                             st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
-                        st.session_state[f"analyze_pdf_{pdf['id']}"] = False
+                    st.session_state[f"analyze_pdf_{pdf['id']}"] = False
 
 def ai_insights_page():
     """AI Insights page with agent analysis and recommendations"""
