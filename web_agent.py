@@ -4218,6 +4218,8 @@ def detect_corporate_actions(user_id, db, holdings=None):
         # Use provided holdings or fetch if not provided
         if holdings is None:
             holdings = db.get_user_holdings(user_id)
+        
+        print(f"[CORPORATE_ACTIONS] 🔍 Starting corporate actions detection for {len(holdings) if holdings else 0} holdings")
         corporate_actions: List[Dict[str, Any]] = []
 
         @functools.lru_cache(maxsize=128)
@@ -4436,6 +4438,7 @@ def detect_corporate_actions(user_id, db, holdings=None):
             # Check for ACTUAL corporate actions from yfinance (not just price differences)
             # Only detect splits that happened AFTER the purchase date
             print(f"[CORPORATE_ACTIONS] 🔍 {ticker}: Checking for actual corporate actions from yfinance (purchase date: {earliest_purchase_date.date() if earliest_purchase_date and hasattr(earliest_purchase_date, 'date') else 'unknown'})")
+            print(f"[CORPORATE_ACTIONS] 🔍 {ticker}: Will call _fetch_corporate_actions_from_yfinance which includes known splits check")
 
             # Get actual corporate actions from yfinance (enhanced_price_fetcher has this function)
             try:
