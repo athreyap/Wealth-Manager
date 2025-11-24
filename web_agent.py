@@ -4537,19 +4537,20 @@ def detect_corporate_actions(user_id, db, holdings=None):
                                     continue
                             except:
                                 pass
-
-            corporate_actions.append({
-                'ticker': ticker,
-                'stock_name': holding.get('stock_name'),
-                'stock_id': holding.get('stock_id'),
-                'avg_price': avg_price,
-                'current_price': current_price,
-                'quantity': quantity,
-                'ratio': price_ratio,
-                'split_ratio': confirmed_ratio,
-                'split_date': str(split_date),
-                'action_type': 'split',
-            })
+                        
+                        corporate_actions.append({
+                            'ticker': ticker,
+                            'stock_name': holding.get('stock_name'),
+                            'stock_id': holding.get('stock_id'),
+                            'avg_price': avg_price,
+                            'current_price': current_price,
+                            'quantity': quantity,
+                            'ratio': price_ratio,
+                            'split_ratio': confirmed_ratio,
+                            'split_date': str(split_date),
+                            'action_type': 'split',
+                        })
+                        print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Added corporate action (fallback) - {confirmed_ratio}:1 split on {split_date}")
         
         if corporate_actions:
             print(f"[CORPORATE_ACTIONS] Detected {len(corporate_actions)} stocks with corporate actions")
