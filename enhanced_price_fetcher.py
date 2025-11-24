@@ -565,10 +565,13 @@ class EnhancedPriceFetcher:
                     continue
             
             # Check known splits database FIRST (before yfinance) - this catches splits that yfinance might miss
+            print(f"[CORP_ACTION] [CHECK] {ticker}: Checking known splits database (working_ticker: {working_ticker or ticker})")
             known_splits = self._get_known_splits(ticker, working_ticker or ticker, from_date, to_date)
             if known_splits:
                 print(f"[CORP_ACTION] [INFO] {ticker}: Found {len(known_splits)} known split(s) from database")
                 corporate_actions.extend(known_splits)
+            else:
+                print(f"[CORP_ACTION] [INFO] {ticker}: No known splits found in database")
             
             if not ticker_obj:
                 print(f"[CORP_ACTION] [ERROR] {ticker}: Could not find valid ticker in any format: {candidates}")
@@ -757,8 +760,14 @@ class EnhancedPriceFetcher:
             possible_tickers.append(working_ticker.upper())
             possible_tickers.append(working_ticker.upper().replace('.NS', '').replace('.BO', ''))
         
+        # Remove empty strings and duplicates
+        possible_tickers = [t for t in set(possible_tickers) if t]
+        print(f"[CORP_ACTION] [KNOWN_SPLITS] {ticker}: Checking against possible tickers: {possible_tickers}")
+        print(f"[CORP_ACTION] [KNOWN_SPLITS] {ticker}: Known splits DB keys: {list(known_splits_db.keys())}")
+        
         for key, split_list in known_splits_db.items():
             if key in possible_tickers:
+                print(f"[CORP_ACTION] [KNOWN_SPLITS] {ticker}: MATCH FOUND for key '{key}' in possible_tickers")
                 for split_info in split_list:
                     split_date = split_info['date']
                     # Normalize dates for comparison
