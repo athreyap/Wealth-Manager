@@ -2405,12 +2405,16 @@ CRITICAL:
             # Get PMS/AIF name for better AI context
             pms_aif_name = holding.get('stock_name') or holding.get('scheme_name', '')
             
+            # Get current price from holdings (from uploaded file)
+            current_price_from_holdings = holding.get('current_price') or holding.get('live_price') or 0
+            
             result = calculator.calculate_pms_aif_value(
                 ticker,
                 investment_date,
                 investment_amount,
                 is_aif=(asset_type == 'aif'),
-                pms_aif_name=pms_aif_name
+                pms_aif_name=pms_aif_name,
+                current_price=current_price_from_holdings if current_price_from_holdings > 0 else None
             )
 
             current_value = result.get('current_value')

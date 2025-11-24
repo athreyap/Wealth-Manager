@@ -11680,12 +11680,15 @@ def ai_assistant_page():
                                     try:
                                         calculator = price_fetcher._get_pms_aif_calculator()
                                         if calculator:
+                                            # Use current_price from holdings (from uploaded file)
+                                            current_price_from_holdings = current_price if current_price and current_price > 0 else None
                                             result = calculator.calculate_pms_aif_value(
                                                 ticker_val,
                                                 investment_date,
                                                 investment_amount,
                                                 is_aif=(asset_type == 'aif'),
-                                                pms_aif_name=stock_name
+                                                pms_aif_name=stock_name,
+                                                current_price=current_price_from_holdings
                                             )
                                             
                                             nav_info['cagr_used'] = result.get('cagr_used', 0)

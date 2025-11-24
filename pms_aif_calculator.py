@@ -34,17 +34,19 @@ class PMS_AIF_Calculator:
         investment_date: str,
         investment_amount: float,
         is_aif: bool = False,
-        pms_aif_name: str = None
+        pms_aif_name: str = None,
+        current_price: Optional[float] = None
     ) -> Dict[str, Any]:
         """
-        Calculate current value and generate 52-week history for PMS/AIF using AI to fetch actual NAVs
+        Calculate current value and profit/loss for PMS/AIF using current price from holdings
         
         Args:
             ticker: PMS/AIF registration code (e.g., INP000005000)
             investment_date: Purchase date (YYYY-MM-DD)
             investment_amount: Initial investment (₹)
             is_aif: True if AIF, False if PMS
-            pms_aif_name: Optional name of PMS/AIF for better AI context
+            pms_aif_name: Optional name of PMS/AIF (not used)
+            current_price: Current price/NAV from holdings (from uploaded file) - if provided, use this for calculations
         
         Returns:
             Dict with current_value, weekly_values, cagr_used, source
@@ -56,115 +58,67 @@ class PMS_AIF_Calculator:
             years_elapsed = (current_dt - invest_dt).days / 365.25
             months_elapsed = years_elapsed * 12
             
-            # CRITICAL: Read NAVs from file - no calculation needed
-            print(f"[PMS_AIF] 📄 Reading NAVs from file for {ticker} ({'AIF' if is_aif else 'PMS'}) - Investment: Rs. {investment_amount:,.2f} on {investment_date}")
-            nav_data = self._read_navs_from_file(ticker)
-            
-            if nav_data and nav_data.get('navs') and len(nav_data.get('navs', [])) > 0:
-                # Use file-provided NAVs
-                navs = nav_data['navs']
-                current_nav = nav_data.get('current_nav', navs[-1].get('nav', 0) if navs else 0)
-                source = nav_data.get('source', 'File')
-                print(f"[PMS_AIF] Got {len(navs)} NAV values from file for {ticker}, current NAV: Rs. {current_nav:,.2f}")
+            # Use current_price from holdings (from uploaded file) if provided
+            if current_price and current_price > 0:
+                # Current price is from uploaded holdings file - use it directly
+                current_value = current_price  # For PMS/AIF, current_price is typically the total value
                 
-                # Calculate current value based on NAV
-                initial_nav = navs[0].get('nav', 0) if navs else investment_amount
-                if initial_nav > 0:
-                    units = investment_amount / initial_nav
-                    current_value = units * current_nav
-                else:
-                    current_value = investment_amount
+                # Calculate profit/loss
+                absolute_gain = current_value - investment_amount
+                percentage_gain = ((current_value - investment_amount) / investment_amount * 100) if investment_amount > 0 else 0
                 
-                # Calculate CAGR from NAVs if we have enough data
+                # Calculate CAGR from investment to current value
                 cagr_used = 0
-                if len(navs) >= 2:
-                    first_nav = navs[0].get('nav', 0)
-                    last_nav = navs[-1].get('nav', 0)
-                    if first_nav > 0 and last_nav > 0:
-                        # Calculate CAGR from first to last NAV
-                        weeks_elapsed = len(navs) - 1
-                        years_elapsed_nav = weeks_elapsed / 52.0
-                        if years_elapsed_nav > 0:
-                            cagr_used = ((last_nav / first_nav) ** (1 / years_elapsed_nav)) - 1
+                if years_elapsed > 0 and investment_amount > 0 and current_value > investment_amount:
+                    cagr_used = ((current_value / investment_amount) ** (1 / years_elapsed)) - 1
                 
-                # Format weekly_values to match expected structure (price_date, price, asset_symbol, asset_type)
+                print(f"[PMS_AIF] ✅ Using current price from holdings for {ticker}: ₹{current_value:,.2f} (Investment: ₹{investment_amount:,.2f}, Gain: {percentage_gain:+.2f}%)")
+                
+                # Generate simple weekly values (just current value for all weeks)
                 formatted_weekly_values = []
-                for nav_entry in navs:
+                for i in range(52):
+                    week_date = current_dt - timedelta(weeks=i)
+                    monday = week_date - timedelta(days=week_date.weekday())
                     formatted_weekly_values.append({
-                        'price_date': nav_entry.get('date'),
-                        'price': nav_entry.get('nav'),
+                        'price_date': monday.strftime('%Y-%m-%d'),
+                        'price': current_value,  # Use current value for all weeks (from holdings file)
                         'asset_symbol': ticker,
                         'asset_type': 'aif' if is_aif else 'pms'
                     })
+                formatted_weekly_values.reverse()  # Oldest first
                 
                 return {
                     'ticker': ticker,
                     'initial_investment': investment_amount,
                     'current_value': current_value,
-                    'absolute_gain': current_value - investment_amount,
-                    'percentage_gain': ((current_value - investment_amount) / investment_amount * 100) if investment_amount > 0 else 0,
+                    'absolute_gain': absolute_gain,
+                    'percentage_gain': percentage_gain,
                     'years_elapsed': years_elapsed,
                     'cagr_used': cagr_used,
-                    'cagr_period': f"{len(navs)} weeks",
-                    'source': source,
+                    'cagr_period': f"{years_elapsed:.2f} years" if years_elapsed > 0 else 'N/A',
+                    'source': 'Holdings file (uploaded)',
                     'weekly_values': formatted_weekly_values,
-                    'current_nav': current_nav,
-                    'initial_nav': initial_nav
+                    'current_nav': current_value,
+                    'initial_nav': investment_amount
                 }
             
-            # If file read fails, return error - no calculation fallback
-            if nav_data is None:
-                print(f"[PMS_AIF] ❌ ERROR: NAV file not found or no data for {ticker}. Please ensure pms_navs.csv exists with NAV data.")
-                return {
-                    'ticker': ticker,
-                    'initial_investment': investment_amount,
-                    'current_value': investment_amount,  # Return original investment if file not found
-                    'absolute_gain': 0,
-                    'percentage_gain': 0,
-                    'years_elapsed': years_elapsed,
-                    'cagr_used': 0,
-                    'cagr_period': 'N/A',
-                    'source': 'File not found - using investment value',
-                    'weekly_values': [],
-                    'error': f'NAV file (pms_navs.csv) not found or no data for ticker {ticker}. Please add NAV data to the file.',
-                    'current_nav': 0,
-                    'initial_nav': 0
-                }
-            
-            # Calculate current value
-            current_value = investment_amount * ((1 + cagr) ** years_elapsed)
-            
-            # Calculate absolute gain
-            absolute_gain = current_value - investment_amount
-            percentage_gain = (absolute_gain / investment_amount * 100) if investment_amount > 0 else 0
-            
-            # Generate 52-week historical values
-            weekly_values = self._generate_weekly_values(
-                investment_amount,
-                invest_dt,
-                cagr,
-                ticker,
-                'aif' if is_aif else 'pms',
-                weeks=52
-            )
-            
-            result = {
+            # If no current_price provided, just return investment amount (no calculation)
+            print(f"[PMS_AIF] ℹ️ No current price provided for {ticker}, using investment amount")
+            return {
                 'ticker': ticker,
                 'initial_investment': investment_amount,
-                'current_value': current_value,
-                'absolute_gain': absolute_gain,
-                'percentage_gain': percentage_gain,
+                'current_value': investment_amount,
+                'absolute_gain': 0,
+                'percentage_gain': 0,
                 'years_elapsed': years_elapsed,
-                'cagr_used': cagr,
-                'cagr_period': cagr_period,
-                'source': source,
-                'weekly_values': weekly_values,
-                'calculation_method': 'CAGR-based calculation'
+                'cagr_used': 0,
+                'cagr_period': 'N/A',
+                'source': 'No current price - using investment value',
+                'weekly_values': [],
+                'current_nav': investment_amount,
+                'initial_nav': investment_amount
             }
             
-            ##st.caption(f"💰 {ticker}: ₹{investment_amount:,.0f} → ₹{current_value:,.0f} ({percentage_gain:.2f}%) using {cagr_period}")
-            
-            return result
             
         except Exception as e:
             # Log error (don't use st.error as it may not be available)
