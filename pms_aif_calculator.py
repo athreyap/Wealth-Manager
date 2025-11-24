@@ -281,25 +281,33 @@ class PMS_AIF_Calculator:
                 nav_dates.append(monday.strftime('%Y-%m-%d'))
             nav_dates.reverse()  # Oldest first
             
-            prompt = f"""You are a financial data expert. I need the actual NAV (Net Asset Value) data for a {asset_type} (Portfolio Management Service/Alternative Investment Fund) with registration code {ticker}{name_context}{date_context}.
+            prompt = f"""You are a financial data expert. I need the ACTUAL NAV (Net Asset Value) data for a {asset_type} (Portfolio Management Service/Alternative Investment Fund) with registration code {ticker}{name_context}{date_context}.
+
+CRITICAL: You MUST search for EXACT, OFFICIAL NAV data first. Only use "estimated" as an absolute last resort if you cannot find ANY official data after extensive searching.
 
 IMPORTANT INSTRUCTIONS:
-1. Search for the specific {asset_type} product with registration code {ticker}
-2. Fetch ACTUAL NAV values from SEBI, fund house website, or financial databases
+1. Search THOROUGHLY for the specific {asset_type} product with registration code {ticker} on:
+   - SEBI website (sebi.gov.in) - search for registered PMS/AIF products
+   - Fund house/manager's official website - look for investor relations or NAV pages
+   - Financial databases (Moneycontrol, Value Research, Morningstar India, etc.)
+   - Stock exchange websites (NSE/BSE) if the product is listed
+   - Company annual reports and investor presentations
+2. Fetch ACTUAL, OFFICIAL NAV values from these sources - do NOT estimate unless you absolutely cannot find any data
 3. Provide NAV values for the last 52 weeks (one per week, typically Monday dates)
-4. If exact NAVs are not available, provide the closest available NAV data
-5. If only current NAV is available, use that and estimate historical NAVs based on typical performance patterns
+4. If you find official NAV data (even if incomplete), use "exact" or "closest_available" as data_type
+5. ONLY use "estimated" if you have searched extensively and found NO official NAV data anywhere
+6. If you find partial official data, use "closest_available" and note what percentage is official vs estimated
 
 For Indian PMS/AIF products, NAVs are typically published:
 - Weekly or monthly on fund house websites
-- On SEBI website for registered products
+- On SEBI website for registered products (search by registration code)
 - On financial data platforms like Moneycontrol, Value Research, etc.
 
 Please provide:
-1. Current NAV (most recent available)
+1. Current NAV (most recent available - prefer official sources)
 2. Historical NAVs for the last 52 weeks (one per week)
 3. The source of this data (e.g., "SEBI", "Fund House Website", "Financial Database", "Estimated")
-4. Whether this is exact data or estimated
+4. Whether this is exact data, closest available, or estimated (prefer "exact" or "closest_available" over "estimated")
 
 Return ONLY a JSON object with this exact format:
 {{
@@ -315,7 +323,18 @@ Return ONLY a JSON object with this exact format:
     ]
 }}
 
-OR if using estimated/closest available:
+OR if using closest available (partial official data):
+{{
+    "current_nav": 150.50,
+    "source": "Fund House Website (partial data)",
+    "data_type": "closest_available",
+    "navs": [
+        {{"date": "2024-01-01", "nav": 100.00}},
+        ...
+    ]
+}}
+
+OR ONLY if absolutely no official data found:
 {{
     "current_nav": 150.50,
     "source": "Estimated from similar products",
@@ -331,7 +350,10 @@ CRITICAL:
 - Ensure NAVs are in chronological order (oldest first)
 - Use actual dates from the list: {', '.join(nav_dates[:5])} ... {', '.join(nav_dates[-3:])}
 - NAV values should be positive numbers
-- If you cannot find exact NAVs, estimate based on typical {asset_type} performance patterns"""
+- PREFER "exact" or "closest_available" over "estimated"
+- Only use "estimated" if you have searched extensively and found NO official NAV data
+- If you find any official NAV data (even partial), use "closest_available" instead of "estimated"
+"""
 
             # Use gpt-5 as primary, with gpt-4o as fallback
             models_to_try = ["gpt-5", "gpt-4o"]

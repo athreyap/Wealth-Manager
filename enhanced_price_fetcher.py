@@ -564,8 +564,15 @@ class EnhancedPriceFetcher:
                     print(f"[CORP_ACTION] [WARNING] {ticker}: Failed to fetch {candidate}: {str(e)[:100]}")
                     continue
             
+            # Check known splits database FIRST (before yfinance) - this catches splits that yfinance might miss
+            known_splits = self._get_known_splits(ticker, working_ticker or ticker, from_date, to_date)
+            if known_splits:
+                print(f"[CORP_ACTION] [INFO] {ticker}: Found {len(known_splits)} known split(s) from database")
+                corporate_actions.extend(known_splits)
+            
             if not ticker_obj:
                 print(f"[CORP_ACTION] [ERROR] {ticker}: Could not find valid ticker in any format: {candidates}")
+                # Even if yfinance failed, we already checked known splits above
                 return corporate_actions
             
             # Fetch splits from yfinance
@@ -718,8 +725,8 @@ class EnhancedPriceFetcher:
             List of split dicts or empty list
         """
         # Normalize ticker for comparison
-        base_ticker = self._normalize_base_ticker(ticker).replace('.NS', '').replace('.BO', '').upper()
-        working_base = self._normalize_base_ticker(working_ticker).replace('.NS', '').replace('.BO', '').upper()
+        base_ticker = self._normalize_base_ticker(ticker).replace('.NS', '').replace('.BO', '').upper() if ticker else ''
+        working_base = self._normalize_base_ticker(working_ticker).replace('.NS', '').replace('.BO', '').upper() if working_ticker else ''
         
         # Known splits database
         known_splits_db = {
@@ -736,13 +743,30 @@ class EnhancedPriceFetcher:
         
         # Check if we have known splits for this ticker
         splits = []
+        # Build list of possible ticker matches
+        possible_tickers = [base_ticker, working_base]
+        if ticker:
+            possible_tickers.append(ticker.upper())
+            possible_tickers.append(ticker.upper().replace('.NS', '').replace('.BO', ''))
+        if working_ticker:
+            possible_tickers.append(working_ticker.upper())
+            possible_tickers.append(working_ticker.upper().replace('.NS', '').replace('.BO', ''))
+        
         for key, split_list in known_splits_db.items():
-            if key in [base_ticker, working_base, ticker.upper(), working_ticker.upper()]:
+            if key in possible_tickers:
                 for split_info in split_list:
                     split_date = split_info['date']
-                    # Check if split is in date range (or include all known splits)
+                    # Check if split is in date range (expand range by 2 years before to catch all relevant splits)
                     expanded_from_date = from_date - timedelta(days=730) if from_date else datetime.now() - timedelta(days=730)
-                    if expanded_from_date <= split_date <= to_date or True:  # Include all known splits
+                    # Normalize dates for comparison
+                    if split_date.tzinfo is not None:
+                        split_date = split_date.replace(tzinfo=None)
+                    if expanded_from_date.tzinfo is not None:
+                        expanded_from_date = expanded_from_date.replace(tzinfo=None)
+                    if to_date.tzinfo is not None:
+                        to_date = to_date.replace(tzinfo=None) if to_date else datetime.now().replace(tzinfo=None)
+                    # Include split if it's in the expanded date range (or if no date range specified, include all)
+                    if expanded_from_date <= split_date <= to_date:
                         splits.append({
                             'type': 'split',
                             'date': split_date,
@@ -767,12 +791,8 @@ class EnhancedPriceFetcher:
         Returns:
             List of split dicts with keys: type, date, old_ratio, new_ratio, split_ratio, description
         """
-        # Check for known splits first (hardcoded for splits that AI might miss)
-        known_splits = self._get_known_splits(ticker, working_ticker, from_date, to_date)
-        if known_splits:
-            print(f"[CORP_ACTION] [INFO] {ticker}: Found {len(known_splits)} known split(s) from hardcoded database")
-            return known_splits
-        
+        # Note: Known splits are already checked in _fetch_corporate_actions_from_yfinance before calling this function
+        # So we don't check them again here - just use AI as fallback when yfinance finds nothing
         client = self._get_openai_client()
         if not client:
             print(f"[CORP_ACTION] [INFO] {ticker}: OpenAI client not available - skipping AI split check")
