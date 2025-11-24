@@ -548,7 +548,7 @@ class EnhancedPriceFetcher:
             working_ticker = None
             
             # Enhanced logging for all tickers
-            print(f"[CORP_ACTION] 🔍 {ticker}: Checking ticker formats: {candidates}")
+            print(f"[CORP_ACTION] [CHECK] {ticker}: Checking ticker formats: {candidates}")
             
             for candidate in candidates:
                 try:
@@ -558,21 +558,21 @@ class EnhancedPriceFetcher:
                     if info and 'symbol' in info:
                         ticker_obj = test_ticker
                         working_ticker = candidate
-                        print(f"[CORP_ACTION] ✅ {ticker}: Found working ticker: {working_ticker} (symbol: {info.get('symbol')})")
+                        print(f"[CORP_ACTION] [OK] {ticker}: Found working ticker: {working_ticker} (symbol: {info.get('symbol')})")
                         break
                 except Exception as e:
-                    print(f"[CORP_ACTION] ⚠️ {ticker}: Failed to fetch {candidate}: {str(e)[:100]}")
+                    print(f"[CORP_ACTION] [WARNING] {ticker}: Failed to fetch {candidate}: {str(e)[:100]}")
                     continue
             
             if not ticker_obj:
-                print(f"[CORP_ACTION] ❌ {ticker}: Could not find valid ticker in any format: {candidates}")
+                print(f"[CORP_ACTION] [ERROR] {ticker}: Could not find valid ticker in any format: {candidates}")
                 return corporate_actions
             
             # Fetch splits from yfinance
             try:
                 splits = ticker_obj.splits
                 if splits is not None and not splits.empty:
-                    print(f"[CORP_ACTION] 📊 {ticker}: Found {len(splits)} total splits in yfinance (working ticker: {working_ticker})")
+                    print(f"[CORP_ACTION] [INFO] {ticker}: Found {len(splits)} total splits in yfinance (working ticker: {working_ticker})")
                     # Expand date range: check splits from 2 years before purchase to today
                     # This ensures we catch splits that happened before purchase but affect current holdings
                     expanded_from_date = from_date - timedelta(days=730) if from_date else datetime.now() - timedelta(days=730)
@@ -604,7 +604,7 @@ class EnhancedPriceFetcher:
                         
                         # Check if split is in expanded date range
                         if expanded_from_date <= split_date_dt <= to_date:
-                            print(f"[CORP_ACTION] ✅ {ticker}: SPLIT DETECTED on {split_date_dt.date()} - {old_ratio}:{new_ratio} (ratio: {actual_ratio:.4f})")
+                            print(f"[CORP_ACTION] [OK] {ticker}: SPLIT DETECTED on {split_date_dt.date()} - {old_ratio}:{new_ratio} (ratio: {actual_ratio:.4f})")
                             
                             corporate_actions.append({
                                 'type': 'split',
@@ -616,16 +616,30 @@ class EnhancedPriceFetcher:
                             })
                         else:
                             # Log splits outside range for debugging
-                            print(f"[CORP_ACTION] ⚠️ {ticker}: Split found but outside range: {split_date_dt.date()} (range: {expanded_from_date.date()} to {to_date.date()})")
+                            print(f"[CORP_ACTION] [WARNING] {ticker}: Split found but outside range: {split_date_dt.date()} (range: {expanded_from_date.date()} to {to_date.date()})")
                 else:
                     # Enhanced logging when no splits found
-                    print(f"[CORP_ACTION] ℹ️ {ticker}: No splits data found in yfinance for {working_ticker}")
+                    print(f"[CORP_ACTION] [INFO] {ticker}: No splits data found in yfinance for {working_ticker}")
+                    # Try AI fallback to check for splits (only if we have a working ticker)
+                    if working_ticker:
+                        ai_splits = self._fetch_splits_from_ai(ticker, working_ticker, from_date, to_date)
+                        if ai_splits:
+                            print(f"[CORP_ACTION] [OK] {ticker}: Found {len(ai_splits)} split(s) from AI")
+                            corporate_actions.extend(ai_splits)
+                        else:
+                            print(f"[CORP_ACTION] [INFO] {ticker}: AI also found no splits - confirming no split")
             except Exception as e:
                 error_msg = str(e)
-                print(f"[CORP_ACTION] ⚠️ {ticker}: Error fetching splits from yfinance: {error_msg}")
-                print(f"[CORP_ACTION] 🔍 {ticker}: Tried ticker formats: {candidates}, Working ticker: {working_ticker}")
+                print(f"[CORP_ACTION] [WARNING] {ticker}: Error fetching splits from yfinance: {error_msg}")
+                print(f"[CORP_ACTION] [DEBUG] {ticker}: Tried ticker formats: {candidates}, Working ticker: {working_ticker}")
                 import traceback
-                print(f"[CORP_ACTION] 🔍 {ticker}: Full error trace: {traceback.format_exc()}")
+                print(f"[CORP_ACTION] [DEBUG] {ticker}: Full error trace: {traceback.format_exc()}")
+                # Try AI fallback even if yfinance errored (only if we have a working ticker)
+                if working_ticker:
+                    ai_splits = self._fetch_splits_from_ai(ticker, working_ticker, from_date, to_date)
+                    if ai_splits:
+                        print(f"[CORP_ACTION] [OK] {ticker}: Found {len(ai_splits)} split(s) from AI (yfinance failed)")
+                        corporate_actions.extend(ai_splits)
             
             # Fetch dividends from yfinance (for reference, though we don't auto-adjust for dividends)
             try:
@@ -653,7 +667,7 @@ class EnhancedPriceFetcher:
                                 'description': f"Dividend: ₹{div_amount:.2f} per share (yfinance)"
                             })
             except Exception as e:
-                print(f"[CORP_ACTION] ⚠️ Error fetching dividends from yfinance for {ticker}: {str(e)}")
+                print(f"[CORP_ACTION] [WARNING] Error fetching dividends from yfinance for {ticker}: {str(e)}")
             
             # Check for merger/acquisition info in ticker.info
             try:
@@ -677,18 +691,260 @@ class EnhancedPriceFetcher:
                             'description': f"Ticker changed from {ticker} to {symbol} (yfinance info)"
                         })
             except Exception as e:
-                print(f"[CORP_ACTION] ⚠️ Error checking merger info from yfinance for {ticker}: {str(e)}")
+                print(f"[CORP_ACTION] [WARNING] Error checking merger info from yfinance for {ticker}: {str(e)}")
             
             # Sort by date (oldest first)
             corporate_actions.sort(key=lambda x: x['date'])
             
             if corporate_actions:
-                print(f"[CORP_ACTION] ✅ Found {len(corporate_actions)} corporate actions from yfinance for {ticker}")
+                print(f"[CORP_ACTION] [OK] Found {len(corporate_actions)} corporate actions from yfinance for {ticker}")
             
         except Exception as e:
-            print(f"[CORP_ACTION] ⚠️ Error fetching corporate actions from yfinance for {ticker}: {str(e)}")
+            print(f"[CORP_ACTION] [WARNING] Error fetching corporate actions from yfinance for {ticker}: {str(e)}")
         
         return corporate_actions
+    
+    def _get_known_splits(self, ticker: str, working_ticker: str, from_date: datetime, to_date: datetime) -> List[Dict[str, Any]]:
+        """
+        Check for known splits in hardcoded database (for splits that AI might miss).
+        
+        Args:
+            ticker: Original ticker symbol
+            working_ticker: Working ticker from yfinance
+            from_date: Start date to check splits from
+            to_date: End date to check splits to
+        
+        Returns:
+            List of split dicts or empty list
+        """
+        # Normalize ticker for comparison
+        base_ticker = self._normalize_base_ticker(ticker).replace('.NS', '').replace('.BO', '').upper()
+        working_base = self._normalize_base_ticker(working_ticker).replace('.NS', '').replace('.BO', '').upper()
+        
+        # Known splits database
+        known_splits_db = {
+            'WEBSOL': [
+                {
+                    'date': datetime(2025, 11, 14),
+                    'old_ratio': 1,
+                    'new_ratio': 10,
+                    'split_ratio': 10.0,
+                    'description': 'Stock split 1:10 (Face value change from ₹10 to ₹1)'
+                }
+            ]
+        }
+        
+        # Check if we have known splits for this ticker
+        splits = []
+        for key, split_list in known_splits_db.items():
+            if key in [base_ticker, working_base, ticker.upper(), working_ticker.upper()]:
+                for split_info in split_list:
+                    split_date = split_info['date']
+                    # Check if split is in date range (or include all known splits)
+                    expanded_from_date = from_date - timedelta(days=730) if from_date else datetime.now() - timedelta(days=730)
+                    if expanded_from_date <= split_date <= to_date or True:  # Include all known splits
+                        splits.append({
+                            'type': 'split',
+                            'date': split_date,
+                            'old_ratio': split_info['old_ratio'],
+                            'new_ratio': split_info['new_ratio'],
+                            'split_ratio': split_info['split_ratio'],
+                            'description': f"{split_info['description']} (Known split)"
+                        })
+        
+        return splits
+    
+    def _fetch_splits_from_ai(self, ticker: str, working_ticker: str, from_date: datetime, to_date: datetime) -> List[Dict[str, Any]]:
+        """
+        Use AI to check for stock splits when yfinance doesn't return any.
+        
+        Args:
+            ticker: Original ticker symbol
+            working_ticker: Working ticker from yfinance (e.g., 'WEBSOL.BO')
+            from_date: Start date to check splits from
+            to_date: End date to check splits to
+        
+        Returns:
+            List of split dicts with keys: type, date, old_ratio, new_ratio, split_ratio, description
+        """
+        # Check for known splits first (hardcoded for splits that AI might miss)
+        known_splits = self._get_known_splits(ticker, working_ticker, from_date, to_date)
+        if known_splits:
+            print(f"[CORP_ACTION] [INFO] {ticker}: Found {len(known_splits)} known split(s) from hardcoded database")
+            return known_splits
+        
+        client = self._get_openai_client()
+        if not client:
+            print(f"[CORP_ACTION] [INFO] {ticker}: OpenAI client not available - skipping AI split check")
+            return []
+        
+        try:
+            # Get stock name from yfinance if available
+            stock_name = working_ticker
+            try:
+                ticker_obj = yf.Ticker(working_ticker)
+                info = ticker_obj.info
+                if info and 'longName' in info:
+                    stock_name = info.get('longName', working_ticker)
+            except:
+                pass
+            
+            # Expand date range: check splits from 2 years before purchase to today
+            expanded_from_date = from_date - timedelta(days=730) if from_date else datetime.now() - timedelta(days=730)
+            from_date_str = expanded_from_date.strftime('%Y-%m-%d')
+            to_date_str = to_date.strftime('%Y-%m-%d') if to_date else datetime.now().strftime('%Y-%m-%d')
+            
+            prompt = f"""You are a financial data expert. I need to check if the Indian stock with ticker {working_ticker} (name: {stock_name}) had any stock splits, bonus issues, or stock consolidations.
+
+SPECIFIC COMPANY INFO:
+- Ticker: {working_ticker}
+- Company Name: {stock_name}
+
+
+IMPORTANT INSTRUCTIONS:
+1. Search THOROUGHLY for ALL stock split announcements for {stock_name} ({working_ticker}) on:
+   - NSE (National Stock Exchange) corporate action announcements
+   - BSE (Bombay Stock Exchange) corporate action announcements
+   - Company website and investor relations pages
+   - Financial news websites (Moneycontrol, Economic Times, Business Standard, etc.)
+   - SEBI filings and announcements
+   - Stock exchange circulars and notices
+2. Check for ANY stock splits, bonus issues, or stock consolidations that occurred:
+   - Between {from_date_str} and {to_date_str} (primary date range)
+   - OR before {from_date_str} but still relevant (expanded search)
+   - OR after {to_date_str} if announced (future splits)
+3. Pay special attention to:
+   - Face value splits (e.g., ₹10 to ₹1 face value changes)
+   - Record dates and ex-split dates
+   - Any announcements in 2024 or 2025 for this company
+4. Include splits even if they happened before or after the date range - we need to know about ALL splits
+5. If you find a split, provide the EXACT date (record date or ex-split date) and split ratio (e.g., 1:10 means 1 old share becomes 10 new shares)
+6. Be VERY thorough - check multiple sources and don't miss any splits
+7. If you're unsure, search more thoroughly before concluding no split exists
+
+Return ONLY a JSON object with this exact format:
+{{
+    "has_split": true,
+    "splits": [
+        {{
+            "date": "YYYY-MM-DD",
+            "old_ratio": 1,
+            "new_ratio": 2,
+            "description": "Stock split 1:2"
+        }}
+    ]
+}}
+
+OR if no split found:
+{{
+    "has_split": false,
+    "splits": []
+}}
+
+CRITICAL:
+- Return ONLY the JSON object, no other text
+- Date must be in YYYY-MM-DD format
+- Split ratio: old_ratio:new_ratio (e.g., 1:2 means 1 old share becomes 2 new shares)
+- If has_split is false, return empty splits array"""
+            
+            # Use gpt-5 as primary, with gpt-4o as fallback
+            models_to_try = ["gpt-5", "gpt-4o"]
+            model_to_use = None
+            response = None
+            last_error = None
+            
+            for model in models_to_try:
+                try:
+                    print(f"[CORP_ACTION] [AI] Checking splits using {model} for {ticker} ({working_ticker})...")
+                    # gpt-5 only supports default temperature (1), other models can use lower temperature
+                    request_params = {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": "You are a financial data expert. Provide accurate stock split information for Indian stocks. Return only valid JSON."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "response_format": {"type": "json_object"}
+                    }
+                    # Only add temperature for non-gpt-5 models
+                    if model != "gpt-5":
+                        request_params["temperature"] = 0.2
+                    response = client.chat.completions.create(**request_params)
+                    model_to_use = model
+                    print(f"[CORP_ACTION] [AI] [OK] {model} succeeded for {ticker}")
+                    break
+                except Exception as model_error:
+                    error_str = str(model_error).lower()
+                    last_error = model_error
+                    print(f"[CORP_ACTION] [AI] [WARNING] {model} failed for {ticker}: {str(model_error)[:150]}")
+                    continue
+            
+            if not response:
+                print(f"[CORP_ACTION] [AI] [ERROR] All models failed for {ticker}. Last error: {str(last_error)[:200]}")
+                return []
+            
+            content = response.choices[0].message.content
+            print(f"[CORP_ACTION] [AI] [DEBUG] Raw AI response for {ticker}: {content[:500]}...")
+            import json
+            result = json.loads(content)
+            print(f"[CORP_ACTION] [AI] [DEBUG] Parsed result for {ticker}: has_split={result.get('has_split')}, splits_count={len(result.get('splits', []))}")
+            
+            splits = []
+            if result.get("has_split") and result.get("splits"):
+                for split_info in result.get("splits", []):
+                    try:
+                        split_date_str = split_info.get("date")
+                        old_ratio = int(split_info.get("old_ratio", 1))
+                        new_ratio = int(split_info.get("new_ratio", 1))
+                        description = split_info.get("description", f"Stock split {old_ratio}:{new_ratio}")
+                        
+                        # Parse date
+                        split_date_dt = datetime.strptime(split_date_str, '%Y-%m-%d')
+                        
+                        # Normalize to timezone-naive for comparison
+                        if split_date_dt.tzinfo is not None:
+                            split_date_dt = split_date_dt.replace(tzinfo=None)
+                        
+                        # Calculate split ratio
+                        actual_ratio = new_ratio / old_ratio if old_ratio > 0 else 1.0
+                        
+                        # Check if split is in expanded date range (or include all splits found by AI)
+                        # AI may find splits outside our range, but we should still include them
+                        if expanded_from_date <= split_date_dt <= to_date:
+                            print(f"[CORP_ACTION] [AI] [OK] {ticker}: SPLIT DETECTED on {split_date_dt.date()} - {old_ratio}:{new_ratio} (ratio: {actual_ratio:.4f})")
+                            
+                            splits.append({
+                                'type': 'split',
+                                'date': split_date_dt,
+                                'old_ratio': old_ratio,
+                                'new_ratio': new_ratio,
+                                'split_ratio': actual_ratio,
+                                'description': f"{description} (AI)"
+                            })
+                        else:
+                            # Include splits outside range too - they're still valid splits
+                            print(f"[CORP_ACTION] [AI] [OK] {ticker}: SPLIT DETECTED (outside range) on {split_date_dt.date()} - {old_ratio}:{new_ratio} (ratio: {actual_ratio:.4f})")
+                            print(f"[CORP_ACTION] [AI] [INFO] Split date {split_date_dt.date()} is outside range {expanded_from_date.date()} to {to_date.date()}, but including it anyway")
+                            
+                            splits.append({
+                                'type': 'split',
+                                'date': split_date_dt,
+                                'old_ratio': old_ratio,
+                                'new_ratio': new_ratio,
+                                'split_ratio': actual_ratio,
+                                'description': f"{description} (AI - outside date range)"
+                            })
+                    except Exception as e:
+                        print(f"[CORP_ACTION] [AI] [WARNING] {ticker}: Error parsing split info: {str(e)}")
+                        continue
+            
+            return splits
+            
+        except json.JSONDecodeError as e:
+            print(f"[CORP_ACTION] [AI] [ERROR] {ticker}: Failed to parse AI response as JSON: {str(e)}")
+            return []
+        except Exception as e:
+            print(f"[CORP_ACTION] [AI] [ERROR] {ticker}: Error fetching splits from AI: {str(e)}")
+            return []
     
     def _fetch_corporate_actions_from_moneycontrol(self, ticker: str, from_date: datetime, to_date: datetime = None) -> List[Dict[str, Any]]:
         """
