@@ -4753,6 +4753,11 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
             print(f"[CORP_ACTION_ADJUST] ❌ No transactions found after all attempts for stock_id={stock_id}")
             return 0
         
+        # If all transactions are already adjusted, return a special code
+        if already_adjusted_count > 0 and updated_count == 0:
+            print(f"[CORP_ACTION_ADJUST] ✅ All {already_adjusted_count} transaction(s) already adjusted - no action needed")
+            return -1  # Special return code: already adjusted
+        
         updated_count = 0
         new_stock_id = None
         
@@ -4766,10 +4771,12 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
             )
             new_stock_id = new_stock['id']
         
+        already_adjusted_count = 0
         for txn in transactions.data:
             # CRITICAL: Skip transactions that have already been adjusted
             notes = txn.get('notes', '') or ''
             if 'Auto-adjusted' in notes or 'auto-adjusted' in notes.lower():
+                already_adjusted_count += 1
                 print(f"[CORP_ACTION_ADJUST] ⏭️ Skipping transaction {txn.get('id', 'unknown')} - already adjusted (notes: {notes[:50]})")
                 continue
             
@@ -4889,6 +4896,13 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
                 import traceback
                 traceback.print_exc()
         
+        # If all transactions were already adjusted, return special code
+        if already_adjusted_count > 0 and updated_count == 0:
+            print(f"[CORP_ACTION] ✅ All {already_adjusted_count} transaction(s) already adjusted - no action needed")
+            return -1  # Special return code: already adjusted
+        
+        print(f"[CORPORATE_ACTIONS] Adjusted {updated_count} transactions for {action_type}")
+        
         # For mergers, also update holdings directly (in addition to recalculation)
         if action_type == 'merger' and new_stock_id:
             def _get_holdings():
@@ -4972,6 +4986,11 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
         action_desc = f"{action_type}"
         if action_type == 'merger':
             action_desc += f" to {new_ticker}"
+        # If all transactions were already adjusted, return special code
+        if already_adjusted_count > 0 and updated_count == 0:
+            print(f"[CORPORATE_ACTIONS] ✅ All {already_adjusted_count} transaction(s) already adjusted for {action_desc} - no action needed")
+            return -1  # Special return code: already adjusted
+        
         print(f"[CORPORATE_ACTIONS] Adjusted {updated_count} transactions for {action_desc}")
         return updated_count
         
@@ -7957,6 +7976,18 @@ def portfolio_overview_page():
                                     st.info("🔄 Redirecting to dashboard...")
                                     time.sleep(2)  # Brief pause to show success message
                                     st.rerun()
+                                elif adjusted == -1:
+                                    # All transactions already adjusted - this is fine, show info and clear from list
+                                    st.info(f"ℹ️ Corporate action for {action['ticker']} was already applied. All transactions are up to date.")
+                                    
+                                    # Clear from session state since it's already done
+                                    remaining_actions = [
+                                        a for a in corporate_actions if a['ticker'] != action['ticker']
+                                    ]
+                                    if remaining_actions:
+                                        st.session_state.corporate_actions_detected = remaining_actions
+                                    else:
+                                        st.session_state.corporate_actions_detected = None
                                 else:
                                     st.error(f"❌ No transactions found to adjust for {action['ticker']}")
                             except Exception as e:
@@ -7988,6 +8019,9 @@ def portfolio_overview_page():
                                 )
                                 if adjusted > 0:
                                     total_adjusted += adjusted
+                                    successful += 1
+                                elif adjusted == -1:
+                                    # Already adjusted - count as successful but don't add to total
                                     successful += 1
                                 else:
                                     failed.append(action['ticker'])
