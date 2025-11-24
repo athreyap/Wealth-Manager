@@ -4354,36 +4354,37 @@ def detect_corporate_actions(user_id, db, holdings=None):
             if 'WEBSOL' in ticker.upper() or 'WEBSOL' in (stock_name or '').upper():
                 print(f"[CORPORATE_ACTIONS] [DEBUG] Processing WebSol: ticker={ticker}, stock_name={stock_name}, stock_id={stock_id}")
 
-            # Get earliest purchase date for this stock to ensure we only detect corporate actions AFTER purchase
-            earliest_purchase_date = None
+            # Get LATEST buy transaction date for this stock to ensure we only detect corporate actions AFTER latest purchase
+            # CRITICAL: We use LATEST buy date, not earliest, because splits should only apply to purchases made BEFORE the split
+            latest_purchase_date = None
             try:
                 purchase_txns = db.supabase.table('user_transactions').select('transaction_date').eq(
                     'user_id', user_id
-                ).eq('stock_id', stock_id).eq('transaction_type', 'buy').order('transaction_date', desc=False).limit(1).execute()
+                ).eq('stock_id', stock_id).eq('transaction_type', 'buy').order('transaction_date', desc=True).limit(1).execute()
                 
                 if purchase_txns.data and len(purchase_txns.data) > 0:
-                    earliest_purchase_date = purchase_txns.data[0].get('transaction_date')
-                    if earliest_purchase_date:
+                    latest_purchase_date = purchase_txns.data[0].get('transaction_date')
+                    if latest_purchase_date:
                         # Convert to datetime if it's a string
-                        if isinstance(earliest_purchase_date, str):
+                        if isinstance(latest_purchase_date, str):
                             try:
-                                earliest_purchase_date = datetime.strptime(earliest_purchase_date, '%Y-%m-%d')
+                                latest_purchase_date = datetime.strptime(latest_purchase_date, '%Y-%m-%d')
                             except:
                                 try:
-                                    earliest_purchase_date = datetime.strptime(earliest_purchase_date, '%Y-%m-%d %H:%M:%S')
+                                    latest_purchase_date = datetime.strptime(latest_purchase_date, '%Y-%m-%d %H:%M:%S')
                                 except:
-                                    earliest_purchase_date = None
-                        elif hasattr(earliest_purchase_date, 'date'):
-                            earliest_purchase_date = earliest_purchase_date.date()
-                            earliest_purchase_date = datetime.combine(earliest_purchase_date, datetime.min.time())
+                                    latest_purchase_date = None
+                        elif hasattr(latest_purchase_date, 'date'):
+                            latest_purchase_date = latest_purchase_date.date()
+                            latest_purchase_date = datetime.combine(latest_purchase_date, datetime.min.time())
                         
-                        if earliest_purchase_date and earliest_purchase_date.tzinfo is not None:
-                            earliest_purchase_date = earliest_purchase_date.replace(tzinfo=None)
+                        if latest_purchase_date and latest_purchase_date.tzinfo is not None:
+                            latest_purchase_date = latest_purchase_date.replace(tzinfo=None)
                         
-                        print(f"[CORPORATE_ACTIONS] 📅 {ticker}: Earliest purchase date: {earliest_purchase_date.date() if hasattr(earliest_purchase_date, 'date') else earliest_purchase_date}")
+                        print(f"[CORPORATE_ACTIONS] 📅 {ticker}: Latest purchase date: {latest_purchase_date.date() if hasattr(latest_purchase_date, 'date') else latest_purchase_date}")
             except Exception as e:
                 print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: Could not fetch purchase date: {str(e)[:100]}")
-                earliest_purchase_date = None
+                latest_purchase_date = None
 
             # Check if ticker still exists (might be merged/delisted)
             ticker_exists = _check_ticker_exists(ticker)
@@ -4445,16 +4446,16 @@ def detect_corporate_actions(user_id, db, holdings=None):
                 from enhanced_price_fetcher import EnhancedPriceFetcher
                 price_fetcher = EnhancedPriceFetcher()
                 
-                # Use purchase date as from_date, or 2 years ago if no purchase date
+                # Use latest purchase date as from_date, or 2 years ago if no purchase date
                 # Extend to_date to 1 year in future to catch announced future splits
-                from_date = earliest_purchase_date if earliest_purchase_date else (datetime.now() - timedelta(days=730))
+                from_date = latest_purchase_date if latest_purchase_date else (datetime.now() - timedelta(days=730))
                 to_date = datetime.now() + timedelta(days=365)  # Include future splits (announced but not yet executed)
                 
                 # Fetch actual corporate actions from yfinance
                 actual_actions = price_fetcher._fetch_corporate_actions_from_yfinance(ticker, from_date, to_date)
                 
-                # Filter to only corporate actions (splits and demergers) that happened AFTER purchase date
-                # CRITICAL: Only consider actions after purchase
+                # Filter to only corporate actions (splits and demergers) that happened AFTER LATEST purchase date
+                # CRITICAL: Only consider actions after LATEST purchase - splits should only apply to purchases made BEFORE the split
                 relevant_actions = []
                 for action in actual_actions:
                     action_type = action.get('type')
@@ -4474,9 +4475,9 @@ def detect_corporate_actions(user_id, db, holdings=None):
                         if action_date.tzinfo is not None:
                             action_date = action_date.replace(tzinfo=None)
                         
-                        # CRITICAL: Only include if action happened AFTER purchase date
-                        # This ensures we don't apply actions that happened before the user bought the stock
-                        if earliest_purchase_date is None:
+                        # CRITICAL: Only include if action happened AFTER LATEST purchase date
+                        # This ensures we don't apply splits to purchases made AFTER the split occurred
+                        if latest_purchase_date is None:
                             # No purchase date - include all actions (shouldn't happen, but handle gracefully)
                             relevant_actions.append(action)
                             action_desc = f"{action_type} on {action_date.date()}"
@@ -4485,8 +4486,8 @@ def detect_corporate_actions(user_id, db, holdings=None):
                             elif action_type == 'demerger':
                                 action_desc += f" (entity: {action.get('demerged_entity', 'N/A')})"
                             print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Found {action_desc} - No purchase date, including")
-                        elif action_date >= earliest_purchase_date:
-                            # Action happened on or after purchase date - include it
+                        elif action_date >= latest_purchase_date:
+                            # Action happened on or after LATEST purchase date - include it
                             relevant_actions.append(action)
                             action_desc = f"{action_type} on {action_date.date()}"
                             if action_type == 'split':
@@ -4494,13 +4495,13 @@ def detect_corporate_actions(user_id, db, holdings=None):
                             elif action_type == 'demerger':
                                 action_desc += f" (entity: {action.get('demerged_entity', 'N/A')})"
                             if action_date > datetime.now():
-                                print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Found FUTURE {action_desc} - Will be applied when executed (purchase: {earliest_purchase_date.date()})")
+                                print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Found FUTURE {action_desc} - Will be applied when executed (latest purchase: {latest_purchase_date.date()})")
                             else:
-                                print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Found {action_desc} - AFTER purchase date ({earliest_purchase_date.date()})")
+                                print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Found {action_desc} - AFTER latest purchase date ({latest_purchase_date.date()})")
                         else:
-                            # Action happened BEFORE purchase - exclude it
+                            # Action happened BEFORE latest purchase - exclude it (split happened before latest buy, so latest buy already reflects the split)
                             action_desc = f"{action_type} on {action_date.date()}"
-                            print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: {action_desc} ignored (happened BEFORE purchase on {earliest_purchase_date.date()})")
+                            print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: {action_desc} ignored (happened BEFORE latest purchase on {latest_purchase_date.date()} - latest buy already reflects this split)")
                     
                 # Process relevant actions (splits and demergers)
                 if relevant_actions:
@@ -4583,15 +4584,15 @@ def detect_corporate_actions(user_id, db, holdings=None):
                     split_date, confirmed_ratio = confirmation
                     if confirmed_ratio > 1:
                         # Check if split date is after purchase date
-                        if earliest_purchase_date:
+                        if latest_purchase_date:
                             try:
                                 if isinstance(split_date, str):
                                     split_date_dt = datetime.strptime(split_date, '%Y-%m-%d')
                                 else:
                                     split_date_dt = split_date
                                 
-                                if split_date_dt < earliest_purchase_date:
-                                    print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: Split on {split_date} happened BEFORE purchase, ignoring")
+                                if split_date_dt < latest_purchase_date:
+                                    print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: Split on {split_date} happened BEFORE latest purchase, ignoring")
                                     continue
                             except:
                                 pass
