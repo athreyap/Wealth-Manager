@@ -4645,12 +4645,21 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
     """
     try:
         # Get all transactions for this stock and user
+        # CRITICAL: Order by transaction_date to ensure we process in chronological order
         print(f"[CORP_ACTION_ADJUST] 🔍 Looking for transactions: user_id={user_id}, stock_id={stock_id}")
         transactions = db.supabase.table('user_transactions').select('*').eq(
             'user_id', user_id
-        ).eq('stock_id', stock_id).execute()
+        ).eq('stock_id', stock_id).order('transaction_date', desc=False).execute()
         
-        print(f"[CORP_ACTION_ADJUST] 📊 Found {len(transactions.data) if transactions.data else 0} transactions for stock_id={stock_id}")
+        total_txns = len(transactions.data) if transactions.data else 0
+        already_adjusted = 0
+        if transactions.data:
+            for txn in transactions.data:
+                notes = txn.get('notes', '') or ''
+                if 'Auto-adjusted' in notes or 'auto-adjusted' in notes.lower():
+                    already_adjusted += 1
+        
+        print(f"[CORP_ACTION_ADJUST] 📊 Found {total_txns} transactions for stock_id={stock_id} ({already_adjusted} already adjusted, {total_txns - already_adjusted} need adjustment)")
         
         # If no transactions found, try to find by ticker as fallback
         if not transactions.data:
@@ -4662,48 +4671,83 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
                 print(f"[CORP_ACTION_ADJUST] ⚠️ No transactions found by stock_id={stock_id}, trying ticker={ticker}, stock_name={stock_name}")
                 
                 # Try to find transactions by matching ticker in stock_master
-                # Get all user transactions and check their stock_id's ticker
-                all_user_txns = db.supabase.table('user_transactions').select('*, stock_master!inner(ticker, stock_name)').eq(
+                # Get all user transactions first
+                all_user_txns = db.supabase.table('user_transactions').select('*').eq(
                     'user_id', user_id
                 ).execute()
                 
-                matching_txns = []
-                for txn in all_user_txns.data:
-                    stock_data = txn.get('stock_master', {})
-                    if isinstance(stock_data, list) and len(stock_data) > 0:
-                        stock_data = stock_data[0]
-                    txn_ticker = stock_data.get('ticker', '') if stock_data else ''
-                    txn_stock_name = stock_data.get('stock_name', '') if stock_data else ''
-                    
-                    # Check if ticker matches (normalize for comparison)
-                    ticker_match = ticker and txn_ticker and (
-                        ticker.upper().replace('.NS', '').replace('.BO', '') == txn_ticker.upper().replace('.NS', '').replace('.BO', '') or
-                        ticker.upper() == txn_ticker.upper()
-                    )
-                    # Check if stock name matches
-                    name_match = stock_name and txn_stock_name and (
-                        stock_name.upper() == txn_stock_name.upper() or
-                        stock_name.upper() in txn_stock_name.upper() or
-                        txn_stock_name.upper() in stock_name.upper()
-                    )
-                    
-                    if ticker_match or name_match:
-                        matching_txns.append(txn)
-                        print(f"[CORP_ACTION_ADJUST] ✅ Found matching transaction: stock_id={txn.get('stock_id')}, ticker={txn_ticker}, name={txn_stock_name}")
+                print(f"[CORP_ACTION_ADJUST] 🔍 Checking {len(all_user_txns.data) if all_user_txns.data else 0} total user transactions for ticker/name match")
                 
-                if matching_txns:
-                    print(f"[CORP_ACTION_ADJUST] 📊 Found {len(matching_txns)} transactions by ticker/name match")
-                    # Use the first matching transaction's stock_id
-                    actual_stock_id = matching_txns[0].get('stock_id')
+                matching_txns = []
+                matching_stock_ids = set()
+                
+                # Normalize ticker for comparison
+                ticker_normalized = ticker.upper().replace('.NS', '').replace('.BO', '') if ticker else ''
+                
+                for txn in (all_user_txns.data or []):
+                    txn_stock_id = txn.get('stock_id')
+                    if not txn_stock_id:
+                        continue
+                    
+                    # Get stock info for this transaction's stock_id
+                    try:
+                        txn_stock_info = db.supabase.table('stock_master').select('ticker, stock_name').eq('id', txn_stock_id).execute()
+                        if txn_stock_info.data:
+                            txn_ticker = txn_stock_info.data[0].get('ticker', '')
+                            txn_stock_name = txn_stock_info.data[0].get('stock_name', '')
+                            
+                            # Normalize ticker for comparison
+                            txn_ticker_normalized = txn_ticker.upper().replace('.NS', '').replace('.BO', '') if txn_ticker else ''
+                            
+                            # Check if ticker matches (normalize for comparison)
+                            ticker_match = (
+                                ticker_normalized and txn_ticker_normalized and 
+                                (ticker_normalized == txn_ticker_normalized or ticker.upper() == txn_ticker.upper())
+                            )
+                            # Check if stock name matches
+                            name_match = stock_name and txn_stock_name and (
+                                stock_name.upper() == txn_stock_name.upper() or
+                                stock_name.upper() in txn_stock_name.upper() or
+                                txn_stock_name.upper() in stock_name.upper()
+                            )
+                            
+                            if ticker_match or name_match:
+                                matching_txns.append(txn)
+                                matching_stock_ids.add(txn_stock_id)
+                                print(f"[CORP_ACTION_ADJUST] ✅ Found matching transaction: stock_id={txn_stock_id}, ticker={txn_ticker}, name={txn_stock_name}")
+                    except Exception as e:
+                        print(f"[CORP_ACTION_ADJUST] ⚠️ Error checking stock_id={txn_stock_id}: {str(e)[:100]}")
+                        continue
+                
+                if matching_txns and matching_stock_ids:
+                    print(f"[CORP_ACTION_ADJUST] 📊 Found {len(matching_txns)} transactions by ticker/name match across {len(matching_stock_ids)} stock_id(s)")
+                    # Use the first matching stock_id (or the one with most transactions)
+                    # Count transactions per stock_id
+                    stock_id_counts = {}
+                    for txn in matching_txns:
+                        sid = txn.get('stock_id')
+                        stock_id_counts[sid] = stock_id_counts.get(sid, 0) + 1
+                    
+                    # Get stock_id with most transactions
+                    actual_stock_id = max(stock_id_counts.items(), key=lambda x: x[1])[0]
+                    
                     if actual_stock_id != stock_id:
-                        print(f"[CORP_ACTION_ADJUST] ⚠️ Stock ID mismatch! Expected={stock_id}, Actual={actual_stock_id}")
-                        # Retry with the actual stock_id
+                        print(f"[CORP_ACTION_ADJUST] ⚠️ Stock ID mismatch! Expected={stock_id}, Actual={actual_stock_id} (has {stock_id_counts[actual_stock_id]} transactions)")
+                        # Retry with the actual stock_id (ordered by date)
                         transactions = db.supabase.table('user_transactions').select('*').eq(
                             'user_id', user_id
-                        ).eq('stock_id', actual_stock_id).execute()
+                        ).eq('stock_id', actual_stock_id).order('transaction_date', desc=False).execute()
                         if transactions.data:
                             stock_id = actual_stock_id  # Update stock_id for rest of function
                             print(f"[CORP_ACTION_ADJUST] ✅ Using actual stock_id={actual_stock_id}, found {len(transactions.data)} transactions")
+                    else:
+                        # Use the matching transactions directly (already have them from the loop)
+                        # But we need to recreate the response object structure
+                        class TransactionResponse:
+                            def __init__(self, data):
+                                self.data = data
+                        transactions = TransactionResponse(matching_txns)
+                        print(f"[CORP_ACTION_ADJUST] ✅ Using matching transactions directly, found {len(transactions.data)} transactions")
         
         if not transactions.data:
             print(f"[CORP_ACTION_ADJUST] ❌ No transactions found after all attempts for stock_id={stock_id}")
@@ -4723,14 +4767,23 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
             new_stock_id = new_stock['id']
         
         for txn in transactions.data:
+            # CRITICAL: Skip transactions that have already been adjusted
+            notes = txn.get('notes', '') or ''
+            if 'Auto-adjusted' in notes or 'auto-adjusted' in notes.lower():
+                print(f"[CORP_ACTION_ADJUST] ⏭️ Skipping transaction {txn.get('id', 'unknown')} - already adjusted (notes: {notes[:50]})")
+                continue
+            
             old_quantity = float(txn['quantity'])
             old_price = float(txn['price'])
+            
+            print(f"[CORP_ACTION_ADJUST] 📝 Transaction {txn.get('id', 'unknown')}: Before - qty={old_quantity}, price={old_price}")
             
             if action_type == 'split':
                 # Stock split: quantity increases, price decreases
                 new_quantity = old_quantity * split_ratio
                 new_price = old_price / split_ratio
                 notes = f"Auto-adjusted for 1:{split_ratio} stock split"
+                print(f"[CORP_ACTION_ADJUST] 📝 Transaction {txn.get('id', 'unknown')}: After split - qty={new_quantity}, price={new_price} (ratio={split_ratio})")
                 
             elif action_type == 'bonus':
                 # Bonus issue: quantity increases, price adjusts
@@ -4803,6 +4856,13 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
         if updated_count > 0:
             try:
                 print(f"[CORP_ACTION] 🔄 Recalculating holdings after adjusting {updated_count} transactions...")
+                
+                # Log transaction details before recalculation for debugging
+                print(f"[CORP_ACTION] 📊 Transaction details after adjustment for stock_id={stock_id}:")
+                final_txns = db.supabase.table('user_transactions').select('*').eq('user_id', user_id).eq('stock_id', stock_id).execute()
+                for txn in (final_txns.data or []):
+                    print(f"  - Txn {txn.get('id', 'unknown')[:8]}: qty={txn.get('quantity')}, price={txn.get('price')}, type={txn.get('transaction_type')}, notes={txn.get('notes', '')[:50]}")
+                
                 # Get all portfolios for this user (with retry)
                 def _get_portfolios():
                     return db.supabase.table('portfolios').select('id').eq('user_id', user_id).execute()
@@ -4816,6 +4876,12 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
                     portfolio_id = portfolio['id']
                     # Recalculate holdings for this portfolio
                     db.recalculate_holdings(user_id, portfolio_id)
+                    
+                    # Log the calculated holding after recalculation
+                    holding = db.supabase.table('holdings').select('*').eq('user_id', user_id).eq('portfolio_id', portfolio_id).eq('stock_id', stock_id).execute()
+                    if holding.data:
+                        h = holding.data[0]
+                        print(f"[CORP_ACTION] 📊 Calculated holding: qty={h.get('total_quantity')}, avg_price={h.get('average_price')}")
                 
                 print(f"[CORP_ACTION] ✅ Holdings recalculated for {len(portfolios.data)} portfolio(s)")
             except Exception as e:
