@@ -4348,10 +4348,47 @@ def detect_corporate_actions(user_id, db, holdings=None):
             except:
                 return False
 
-        for holding in holdings:
-            if holding.get('asset_type') != 'stock':
-                continue
-
+        # OPTIMIZATION: Batch fetch all latest purchase dates at once
+        stock_holdings = [h for h in holdings if h.get('asset_type') == 'stock' and float(h.get('average_price') or 0) > 0]
+        stock_ids = [h.get('stock_id') for h in stock_holdings if h.get('stock_id')]
+        
+        # Batch fetch latest purchase dates for all stocks
+        latest_purchase_dates = {}
+        if stock_ids:
+            try:
+                # Fetch all buy transactions for these stocks in one query
+                purchase_txns = db.supabase.table('user_transactions').select('stock_id, transaction_date').eq(
+                    'user_id', user_id
+                ).eq('transaction_type', 'buy').in_('stock_id', stock_ids).order('transaction_date', desc=False).execute()
+                
+                # Group by stock_id and get latest date for each
+                if purchase_txns.data:
+                    for txn in purchase_txns.data:
+                        sid = txn.get('stock_id')
+                        txn_date = txn.get('transaction_date')
+                        if sid and txn_date:
+                            # Convert to datetime if needed
+                            if isinstance(txn_date, str):
+                                try:
+                                    txn_date = datetime.strptime(txn_date, '%Y-%m-%d')
+                                except:
+                                    try:
+                                        txn_date = datetime.strptime(txn_date, '%Y-%m-%d %H:%M:%S')
+                                    except:
+                                        continue
+                            elif hasattr(txn_date, 'date'):
+                                txn_date = datetime.combine(txn_date.date(), datetime.min.time())
+                            
+                            if txn_date and txn_date.tzinfo is not None:
+                                txn_date = txn_date.replace(tzinfo=None)
+                            
+                            # Keep the latest date for each stock_id
+                            if sid not in latest_purchase_dates or txn_date > latest_purchase_dates[sid]:
+                                latest_purchase_dates[sid] = txn_date
+            except Exception as e:
+                print(f"[CORPORATE_ACTIONS] ⚠️ Error batch fetching purchase dates: {str(e)[:100]}")
+        
+        for holding in stock_holdings:
             ticker = str(holding.get('ticker') or '').strip()
             avg_price = float(holding.get('average_price') or 0)
             current_price = holding.get('current_price')
@@ -4359,44 +4396,14 @@ def detect_corporate_actions(user_id, db, holdings=None):
             stock_id = holding.get('stock_id')
             stock_name = holding.get('stock_name', '')
 
-            if avg_price == 0:
-                continue
-            
             # Debug logging for WebSol specifically
             if 'WEBSOL' in ticker.upper() or 'WEBSOL' in (stock_name or '').upper():
                 print(f"[CORPORATE_ACTIONS] [DEBUG] Processing WebSol: ticker={ticker}, stock_name={stock_name}, stock_id={stock_id}")
 
-            # Get LATEST buy transaction date for this stock to ensure we only detect corporate actions AFTER latest purchase
-            # CRITICAL: We use LATEST buy date, not earliest, because splits should only apply to purchases made BEFORE the split
-            latest_purchase_date = None
-            try:
-                purchase_txns = db.supabase.table('user_transactions').select('transaction_date').eq(
-                    'user_id', user_id
-                ).eq('stock_id', stock_id).eq('transaction_type', 'buy').order('transaction_date', desc=True).limit(1).execute()
-                
-                if purchase_txns.data and len(purchase_txns.data) > 0:
-                    latest_purchase_date = purchase_txns.data[0].get('transaction_date')
-                    if latest_purchase_date:
-                        # Convert to datetime if it's a string
-                        if isinstance(latest_purchase_date, str):
-                            try:
-                                latest_purchase_date = datetime.strptime(latest_purchase_date, '%Y-%m-%d')
-                            except:
-                                try:
-                                    latest_purchase_date = datetime.strptime(latest_purchase_date, '%Y-%m-%d %H:%M:%S')
-                                except:
-                                    latest_purchase_date = None
-                        elif hasattr(latest_purchase_date, 'date'):
-                            latest_purchase_date = latest_purchase_date.date()
-                            latest_purchase_date = datetime.combine(latest_purchase_date, datetime.min.time())
-                        
-                        if latest_purchase_date and latest_purchase_date.tzinfo is not None:
-                            latest_purchase_date = latest_purchase_date.replace(tzinfo=None)
-                        
-                        print(f"[CORPORATE_ACTIONS] 📅 {ticker}: Latest purchase date: {latest_purchase_date.date() if hasattr(latest_purchase_date, 'date') else latest_purchase_date}")
-            except Exception as e:
-                print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: Could not fetch purchase date: {str(e)[:100]}")
-                latest_purchase_date = None
+            # Get latest purchase date from cached map
+            latest_purchase_date = latest_purchase_dates.get(stock_id)
+            if latest_purchase_date:
+                print(f"[CORPORATE_ACTIONS] 📅 {ticker}: Latest purchase date: {latest_purchase_date.date() if hasattr(latest_purchase_date, 'date') else latest_purchase_date}")
 
             # Check if ticker still exists (might be merged/delisted)
             ticker_exists = _check_ticker_exists(ticker)
@@ -4546,6 +4553,62 @@ def detect_corporate_actions(user_id, db, holdings=None):
                             confirmed_ratio = latest_action.get('split_ratio', 1)
                             
                             if confirmed_ratio > 1:
+                                # OPTIMIZATION: Check if transactions have already been adjusted before adding to list
+                                should_skip = False
+                                try:
+                                    # Check if all transactions for this stock have already been adjusted
+                                    txns_check = db.supabase.table('user_transactions').select('id, notes').eq(
+                                        'user_id', user_id
+                                    ).eq('stock_id', stock_id).execute()
+                                    
+                                    if txns_check.data:
+                                        all_adjusted = True
+                                        has_unadjusted = False
+                                        for txn in txns_check.data:
+                                            notes = txn.get('notes', '') or ''
+                                            if 'Auto-adjusted' not in notes and 'auto-adjusted' not in notes.lower():
+                                                all_adjusted = False
+                                                has_unadjusted = True
+                                                break
+                                        
+                                        if all_adjusted and len(txns_check.data) > 0:
+                                            print(f"[CORPORATE_ACTIONS] ⏭️ {ticker}: Skipping - all {len(txns_check.data)} transaction(s) already adjusted for {confirmed_ratio}:1 split")
+                                            should_skip = True
+                                        elif has_unadjusted:
+                                            print(f"[CORPORATE_ACTIONS] 📊 {ticker}: Some transactions need adjustment for {confirmed_ratio}:1 split")
+                                    
+                                    # Also check if the average price has been recalculated correctly
+                                    # After a split is applied, avg_price should be close to current_price (within reasonable range)
+                                    # If avg_price is still much higher than current_price after adjustment, something is wrong
+                                    if not should_skip:
+                                        # Re-fetch the holding to get updated average price
+                                        try:
+                                            updated_holdings = db.get_user_holdings(user_id)
+                                            for h in updated_holdings:
+                                                if h.get('stock_id') == stock_id:
+                                                    updated_avg = float(h.get('average_price') or 0)
+                                                    updated_current = float(h.get('current_price') or 0)
+                                                    if updated_avg > 0 and updated_current > 0:
+                                                        # After split adjustment, avg should be close to current (within 20% difference)
+                                                        # If avg is still much higher, the split adjustment didn't work
+                                                        # But if it's close to 1.0 (within 20%), the split was already applied
+                                                        price_diff_ratio = updated_avg / updated_current if updated_current > 0 else 0
+                                                        # If the ratio is still very high (>1.5), the split adjustment didn't work
+                                                        # But if it's close to 1.0 (within 20%), the split was already applied
+                                                        if price_diff_ratio > 0 and price_diff_ratio < 1.2:
+                                                            print(f"[CORPORATE_ACTIONS] ⏭️ {ticker}: Skipping - average price ({updated_avg:.2f}) is close to current ({updated_current:.2f}), split already applied")
+                                                            should_skip = True
+                                                    break
+                                        except Exception as e:
+                                            print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: Error checking updated holdings: {str(e)[:100]}")
+                                            # Continue - don't skip if we can't verify
+                                except Exception as e:
+                                    print(f"[CORPORATE_ACTIONS] ⚠️ {ticker}: Error checking transaction status: {str(e)[:100]}")
+                                    # Continue anyway - better to show action than miss it
+                                
+                                if should_skip:
+                                    continue  # Skip adding to corporate_actions list
+                                
                                 corporate_actions.append({
                                     'ticker': ticker,
                                     'stock_name': holding.get('stock_name'),
@@ -4697,40 +4760,65 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
                 # Normalize ticker for comparison
                 ticker_normalized = ticker.upper().replace('.NS', '').replace('.BO', '') if ticker else ''
                 
+                # OPTIMIZATION: Batch fetch all stock info at once instead of querying in loop
+                unique_stock_ids = set()
+                for txn in (all_user_txns.data or []):
+                    txn_stock_id = txn.get('stock_id')
+                    if txn_stock_id:
+                        unique_stock_ids.add(txn_stock_id)
+                
+                # Batch fetch all stock info
+                stock_info_map = {}
+                if unique_stock_ids:
+                    try:
+                        # Fetch all stock info in one query using 'in' filter
+                        stock_ids_list = list(unique_stock_ids)
+                        # Supabase 'in' filter has limits, so batch if needed
+                        batch_size = 100
+                        for i in range(0, len(stock_ids_list), batch_size):
+                            batch_ids = stock_ids_list[i:i+batch_size]
+                            batch_stocks = db.supabase.table('stock_master').select('id, ticker, stock_name').in_('id', batch_ids).execute()
+                            if batch_stocks.data:
+                                for stock in batch_stocks.data:
+                                    stock_info_map[stock['id']] = {
+                                        'ticker': stock.get('ticker', ''),
+                                        'stock_name': stock.get('stock_name', '')
+                                    }
+                    except Exception as e:
+                        print(f"[CORP_ACTION_ADJUST] ⚠️ Error batch fetching stock info: {str(e)[:100]}")
+                
+                # Now match transactions using cached stock info
                 for txn in (all_user_txns.data or []):
                     txn_stock_id = txn.get('stock_id')
                     if not txn_stock_id:
                         continue
                     
-                    # Get stock info for this transaction's stock_id
-                    try:
-                        txn_stock_info = db.supabase.table('stock_master').select('ticker, stock_name').eq('id', txn_stock_id).execute()
-                        if txn_stock_info.data:
-                            txn_ticker = txn_stock_info.data[0].get('ticker', '')
-                            txn_stock_name = txn_stock_info.data[0].get('stock_name', '')
-                            
-                            # Normalize ticker for comparison
-                            txn_ticker_normalized = txn_ticker.upper().replace('.NS', '').replace('.BO', '') if txn_ticker else ''
-                            
-                            # Check if ticker matches (normalize for comparison)
-                            ticker_match = (
-                                ticker_normalized and txn_ticker_normalized and 
-                                (ticker_normalized == txn_ticker_normalized or ticker.upper() == txn_ticker.upper())
-                            )
-                            # Check if stock name matches
-                            name_match = stock_name and txn_stock_name and (
-                                stock_name.upper() == txn_stock_name.upper() or
-                                stock_name.upper() in txn_stock_name.upper() or
-                                txn_stock_name.upper() in stock_name.upper()
-                            )
-                            
-                            if ticker_match or name_match:
-                                matching_txns.append(txn)
-                                matching_stock_ids.add(txn_stock_id)
-                                print(f"[CORP_ACTION_ADJUST] ✅ Found matching transaction: stock_id={txn_stock_id}, ticker={txn_ticker}, name={txn_stock_name}")
-                    except Exception as e:
-                        print(f"[CORP_ACTION_ADJUST] ⚠️ Error checking stock_id={txn_stock_id}: {str(e)[:100]}")
+                    stock_info = stock_info_map.get(txn_stock_id)
+                    if not stock_info:
                         continue
+                    
+                    txn_ticker = stock_info.get('ticker', '')
+                    txn_stock_name = stock_info.get('stock_name', '')
+                    
+                    # Normalize ticker for comparison
+                    txn_ticker_normalized = txn_ticker.upper().replace('.NS', '').replace('.BO', '') if txn_ticker else ''
+                    
+                    # Check if ticker matches (normalize for comparison)
+                    ticker_match = (
+                        ticker_normalized and txn_ticker_normalized and 
+                        (ticker_normalized == txn_ticker_normalized or ticker.upper() == txn_ticker.upper())
+                    )
+                    # Check if stock name matches
+                    name_match = stock_name and txn_stock_name and (
+                        stock_name.upper() == txn_stock_name.upper() or
+                        stock_name.upper() in txn_stock_name.upper() or
+                        txn_stock_name.upper() in stock_name.upper()
+                    )
+                    
+                    if ticker_match or name_match:
+                        matching_txns.append(txn)
+                        matching_stock_ids.add(txn_stock_id)
+                        print(f"[CORP_ACTION_ADJUST] ✅ Found matching transaction: stock_id={txn_stock_id}, ticker={txn_ticker}, name={txn_stock_name}")
                 
                 if matching_txns and matching_stock_ids:
                     print(f"[CORP_ACTION_ADJUST] 📊 Found {len(matching_txns)} transactions by ticker/name match across {len(matching_stock_ids)} stock_id(s)")
@@ -7883,6 +7971,9 @@ def main_dashboard():
                                 st.success(f"✅ Successfully applied corporate action for {action['ticker']}!")
                                 st.info(f"📊 Updated {adjusted} transaction(s) and recalculated holdings")
                                 
+                                # Clear cache to force fresh data on next load
+                                get_cached_holdings.clear()
+                                
                                 # Clear from session state
                                 remaining_actions = [
                                     a for a in corporate_actions if a['ticker'] != action['ticker']
@@ -7898,6 +7989,11 @@ def main_dashboard():
                                 st.rerun()
                             elif adjusted == -1:
                                 st.info(f"ℹ️ Corporate action for {action['ticker']} was already applied.")
+                                
+                                # Clear cache to force fresh data
+                                get_cached_holdings.clear()
+                                
+                                # Clear from session state
                                 remaining_actions = [
                                     a for a in corporate_actions if a['ticker'] != action['ticker']
                                 ]
@@ -7948,6 +8044,10 @@ def main_dashboard():
                                 st.info(f"📊 Updated {total_adjusted} transaction(s) across {successful} stock(s)")
                             if failed:
                                 st.warning(f"⚠️ {len(failed)} stock(s) could not be updated: {', '.join(failed)}")
+                            
+                            # Clear cache to force fresh data
+                            get_cached_holdings.clear()
+                            
                             st.session_state.corporate_actions_detected = None
                             time.sleep(2)
                             st.rerun()
@@ -8262,26 +8362,40 @@ def portfolio_overview_page():
                             amfi_name = scheme.get('name').strip()
                             # Only update if AMFI name is different and more specific (longer/more detailed)
                             if amfi_name and amfi_name.lower() != stock_name_lower and len(amfi_name) > len(stock_name):
-                                try:
-                                    db.supabase.table('stock_master').update({
-                                        'stock_name': amfi_name
-                                    }).eq('id', stock_id).execute()
-                                    mf_updates.append(ticker_clean)
-                                    print(f"[MF_RESOLVE] ✅ Updated {ticker_clean}: '{stock_name}' → '{amfi_name}'")
-                                except Exception as e:
-                                    print(f"[MF_RESOLVE] ⚠️ Failed to update {ticker_clean}: {e}")
+                                # Collect updates to batch process later
+                                mf_updates.append({
+                                    'stock_id': stock_id,
+                                    'ticker': ticker_clean,
+                                    'old_name': stock_name,
+                                    'new_name': amfi_name
+                                })
+                                print(f"[MF_RESOLVE] ✅ Queued update {ticker_clean}: '{stock_name}' → '{amfi_name}'")
                             elif amfi_name and amfi_name.lower() != stock_name_lower:
                                 # Even if not longer, update if different (AMFI is authoritative)
-                                try:
-                                    db.supabase.table('stock_master').update({
-                                        'stock_name': amfi_name
-                                    }).eq('id', stock_id).execute()
-                                    mf_updates.append(ticker_clean)
-                                    print(f"[MF_RESOLVE] ✅ Updated {ticker_clean}: '{stock_name}' → '{amfi_name}'")
-                                except Exception as e:
-                                    print(f"[MF_RESOLVE] ⚠️ Failed to update {ticker_clean}: {e}")
+                                mf_updates.append({
+                                    'stock_id': stock_id,
+                                    'ticker': ticker_clean,
+                                    'old_name': stock_name,
+                                    'new_name': amfi_name
+                                })
+                                print(f"[MF_RESOLVE] ✅ Queued update {ticker_clean}: '{stock_name}' → '{amfi_name}'")
                         else:
                             print(f"[MF_RESOLVE] ⚠️ Ticker {ticker_clean} not found in AMFI dataset")
+            
+            # OPTIMIZATION: Batch update all MF name changes at once
+            if mf_updates:
+                try:
+                    # Batch update using a transaction-like approach (update each in sequence but more efficiently)
+                    for update in mf_updates:
+                        try:
+                            db.supabase.table('stock_master').update({
+                                'stock_name': update['new_name']
+                            }).eq('id', update['stock_id']).execute()
+                            print(f"[MF_RESOLVE] ✅ Applied update {update['ticker']}: '{update['old_name']}' → '{update['new_name']}'")
+                        except Exception as e:
+                            print(f"[MF_RESOLVE] ⚠️ Failed to update {update['ticker']}: {e}")
+                except Exception as e:
+                    print(f"[MF_RESOLVE] ⚠️ Error in batch update: {e}")
                 
                 # Check if PMS/AIF needs price update (current price equals average or is missing)
                 if asset_type in ['pms', 'aif']:
