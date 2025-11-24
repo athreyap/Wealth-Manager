@@ -4389,15 +4389,15 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                         if sid and txn_date:
                             # Convert to datetime if needed
                             if isinstance(txn_date, str):
-                            try:
-                                    txn_date = datetime.strptime(txn_date, '%Y-%m-%d')
-                            except:
                                 try:
-                                        txn_date = datetime.strptime(txn_date, '%Y-%m-%d %H:%M:%S')
+                                    txn_date = datetime.strptime(txn_date, '%Y-%m-%d')
                                 except:
+                                    try:
+                                        txn_date = datetime.strptime(txn_date, '%Y-%m-%d %H:%M:%S')
+                                    except:
                                         continue
-                            elif hasattr(txn_date, 'date'):
-                                txn_date = datetime.combine(txn_date.date(), datetime.min.time())
+                        elif hasattr(txn_date, 'date'):
+                            txn_date = datetime.combine(txn_date.date(), datetime.min.time())
                         
                             if txn_date and txn_date.tzinfo is not None:
                                 txn_date = txn_date.replace(tzinfo=None)
@@ -4571,8 +4571,8 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                         
                         if action_type == 'split':
                             confirmed_ratio = latest_action.get('split_ratio', 1)
-                    
-                    if confirmed_ratio > 1:
+                            
+                            if confirmed_ratio > 1:
                                 # OPTIMIZATION: Check if transactions have already been adjusted before adding to list
                                 should_skip = False
                                 try:
@@ -4629,21 +4629,21 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                                 if should_skip:
                                     continue  # Skip adding to corporate_actions list
                                 
-                        corporate_actions.append({
-                            'ticker': ticker,
-                            'stock_name': holding.get('stock_name'),
-                            'stock_id': holding.get('stock_id'),
-                            'avg_price': avg_price,
-                            'current_price': current_price,
-                            'quantity': quantity,
-                            'ratio': price_ratio,
-                            'split_ratio': confirmed_ratio,
+                                corporate_actions.append({
+                                    'ticker': ticker,
+                                    'stock_name': holding.get('stock_name'),
+                                    'stock_id': holding.get('stock_id'),
+                                    'avg_price': avg_price,
+                                    'current_price': current_price,
+                                    'quantity': quantity,
+                                    'ratio': price_ratio,
+                                    'split_ratio': confirmed_ratio,
                                     'split_date': str(action_date.date() if hasattr(action_date, 'date') else action_date),
-                            'action_type': 'split',
-                        })
+                                    'action_type': 'split',
+                                })
                                 print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Added corporate action - {confirmed_ratio}:1 split on {action_date.date() if hasattr(action_date, 'date') else action_date}")
-                    else:
-                        print(f"[CORPORATE_ACTIONS] ℹ️ {ticker}: Split ratio <= 1, skipping")
+                            else:
+                                print(f"[CORPORATE_ACTIONS] ℹ️ {ticker}: Split ratio <= 1, skipping")
                         
                         elif action_type == 'demerger':
                             demerger_ratio = latest_action.get('demerger_ratio', 1.0)
@@ -4692,18 +4692,18 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                             except:
                                 pass
 
-            corporate_actions.append({
-                'ticker': ticker,
-                'stock_name': holding.get('stock_name'),
-                'stock_id': holding.get('stock_id'),
-                'avg_price': avg_price,
-                'current_price': current_price,
-                'quantity': quantity,
-                'ratio': price_ratio,
-                'split_ratio': confirmed_ratio,
+                        corporate_actions.append({
+                            'ticker': ticker,
+                            'stock_name': holding.get('stock_name'),
+                            'stock_id': holding.get('stock_id'),
+                            'avg_price': avg_price,
+                            'current_price': current_price,
+                            'quantity': quantity,
+                            'ratio': price_ratio,
+                            'split_ratio': confirmed_ratio,
                             'split_date': str(split_date) if hasattr(split_date, '__str__') else str(split_date),
-                'action_type': 'split',
-            })
+                            'action_type': 'split',
+                        })
                         print(f"[CORPORATE_ACTIONS] ✅ {ticker}: Added corporate action (fallback) - {confirmed_ratio}:1 split on {split_date}")
         
         if corporate_actions:
@@ -5350,7 +5350,7 @@ def login_page():
                 }
                 
                 # Initialize corporate actions as None - will be populated in background
-                    st.session_state.corporate_actions_detected = None
+                st.session_state.corporate_actions_detected = None
                 
                 st.success("Login successful!")
                 st.rerun()
@@ -8431,12 +8431,12 @@ def portfolio_overview_page():
                 try:
                     # Batch update using a transaction-like approach (update each in sequence but more efficiently)
                     for update in mf_updates:
-                                try:
-                                    db.supabase.table('stock_master').update({
+                        try:
+                            db.supabase.table('stock_master').update({
                                 'stock_name': update['new_name']
                             }).eq('id', update['stock_id']).execute()
                             print(f"[MF_RESOLVE] ✅ Applied update {update['ticker']}: '{update['old_name']}' → '{update['new_name']}'")
-                                except Exception as e:
+                        except Exception as e:
                             print(f"[MF_RESOLVE] ⚠️ Failed to update {update['ticker']}: {e}")
                 except Exception as e:
                     print(f"[MF_RESOLVE] ⚠️ Error in batch update: {e}")
@@ -12160,12 +12160,12 @@ Always:
                         if iteration > 0:
                             st.info(f"🔄 AI is analyzing data (iteration {iteration + 1}/{max_iterations})...")
                         
-                    response = openai.chat.completions.create(
+                        response = openai.chat.completions.create(
                             model=model_used,
-                        messages=messages,
-                        tools=functions,
-                        tool_choice="auto"  # Let AI decide when to use functions
-                    )
+                            messages=messages,
+                            tools=functions,
+                            tool_choice="auto"  # Let AI decide when to use functions
+                        )
                     except Exception as e:
                         st.error(f"❌ AI service error: {str(e)[:200]}")
                         st.stop()
@@ -12312,77 +12312,77 @@ Always:
     if user_pdfs and len(user_pdfs) > 0:
         for pdf in user_pdfs:
             if st.session_state.get(f"analyze_pdf_{pdf['id']}", False):
-                        try:
-                            import openai
-                            openai.api_key = st.secrets["api_keys"]["open_ai"]
-                            
-                            # Get portfolio context
-                            portfolio_summary = get_cached_portfolio_summary(holdings)
-                            
-                            # Analyze the stored PDF
-                            analysis_prompt = f"""
-                            Analyze this stored PDF document for portfolio management insights.
-                            
-                            📄 DOCUMENT INFO:
-                            - Filename: {pdf['filename']}
-                            - Uploaded: {pdf['uploaded_at'][:10]}
-                            
-                            💼 USER'S PORTFOLIO:
-                            {portfolio_summary}
-                            
-                            📝 PDF CONTENT:
-                            {pdf.get('pdf_text', '')[:5000]}...
-                            
-                            🤖 PREVIOUS AI SUMMARY:
-                            {pdf.get('ai_summary', 'No previous summary')}
-                            
-                            Please provide a fresh analysis focusing on:
-                            1. Key insights from the document
-                            2. How it relates to the user's current portfolio
-                            3. Actionable recommendations
-                            
-                            Be specific and actionable. Use emojis and clear formatting.
-                            """
-                            
+                try:
+                    import openai
+                    openai.api_key = st.secrets["api_keys"]["open_ai"]
+                    
+                    # Get portfolio context
+                    portfolio_summary = get_cached_portfolio_summary(holdings)
+                    
+                    # Analyze the stored PDF
+                    analysis_prompt = f"""
+                    Analyze this stored PDF document for portfolio management insights.
+                    
+                    📄 DOCUMENT INFO:
+                    - Filename: {pdf['filename']}
+                    - Uploaded: {pdf['uploaded_at'][:10]}
+                    
+                    💼 USER'S PORTFOLIO:
+                    {portfolio_summary}
+                    
+                    📝 PDF CONTENT:
+                    {pdf.get('pdf_text', '')[:5000]}...
+                    
+                    🤖 PREVIOUS AI SUMMARY:
+                    {pdf.get('ai_summary', 'No previous summary')}
+                    
+                    Please provide a fresh analysis focusing on:
+                    1. Key insights from the document
+                    2. How it relates to the user's current portfolio
+                    3. Actionable recommendations
+                    
+                    Be specific and actionable. Use emojis and clear formatting.
+                    """
+                    
                     with st.spinner("🤖 Analyzing PDF..."):
-                            response = openai.chat.completions.create(
-                                model="gpt-5",  # Using GPT-5 as primary
-                                messages=[{"role": "user", "content": analysis_prompt}]
-                            )
-                            
-                            fresh_analysis = response.choices[0].message.content
-                            
-                        # Display in chat
-                        with st.chat_message("assistant"):
-                            st.markdown(f"### 🔍 Analysis of: {pdf['filename']}")
-                            st.markdown(fresh_analysis)
-                            
-                        # Store in chat history
-                            st.session_state.chat_history.append({
-                                "q": f"Analyze PDF: {pdf['filename']}", 
-                                "a": fresh_analysis
-                            })
-                        st.session_state.current_thread_messages.append({
-                            'role': 'user',
-                            'content': f"Analyze PDF: {pdf['filename']}"
-                        })
-                        st.session_state.current_thread_messages.append({
-                            'role': 'assistant',
-                            'content': fresh_analysis
-                        })
+                        response = openai.chat.completions.create(
+                            model="gpt-5",  # Using GPT-5 as primary
+                            messages=[{"role": "user", "content": analysis_prompt}]
+                        )
                         
-                        # Save to database
-                            if hasattr(db, 'save_chat_history'):
-                                try:
-                                    db.save_chat_history(user['id'], f"Analyze PDF: {pdf['filename']}", fresh_analysis)
-                                except Exception:
-                                    pass
-                            
+                        fresh_analysis = response.choices[0].message.content
+                    
+                    # Display in chat
+                    with st.chat_message("assistant"):
+                        st.markdown(f"### 🔍 Analysis of: {pdf['filename']}")
+                        st.markdown(fresh_analysis)
+                    
+                    # Store in chat history
+                    st.session_state.chat_history.append({
+                        "q": f"Analyze PDF: {pdf['filename']}", 
+                        "a": fresh_analysis
+                    })
+                    st.session_state.current_thread_messages.append({
+                        'role': 'user',
+                        'content': f"Analyze PDF: {pdf['filename']}"
+                    })
+                    st.session_state.current_thread_messages.append({
+                        'role': 'assistant',
+                        'content': fresh_analysis
+                    })
+                    
+                    # Save to database
+                    if hasattr(db, 'save_chat_history'):
+                        try:
+                            db.save_chat_history(user['id'], f"Analyze PDF: {pdf['filename']}", fresh_analysis)
+                        except Exception:
+                            pass
+                    
                     # Clear the flag
                     st.session_state[f"analyze_pdf_{pdf['id']}"] = False
                     st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
+                except Exception as e:
+                    st.error(f"❌ Error analyzing PDF: {str(e)[:100]}")
                     st.session_state[f"analyze_pdf_{pdf['id']}"] = False
 
 def ai_insights_page():
