@@ -4055,38 +4055,14 @@ def _tx_build_db_transaction(
     # Keep the stock_name and scheme_name from the file as-is
     # The ticker will be resolved/verified using the file name, but the name stays from the file
     
-    # For PMS/AIF, calculate current value using CAGR and store that instead of original values
-    pms_aif_calculated_price = None
+    # For PMS/AIF, just use the price/NAV value from the uploaded file - no calculation or lookup needed
     if asset_type in ['pms', 'aif']:
-        try:
-            from pms_aif_calculator import PMS_AIF_Calculator
-            
-            # Get the original investment amount (from file)
-            original_investment = amount_value if amount_value > 0 else (quantity_value * price_value if quantity_value > 0 and price_value > 0 else 0)
-            
-            if original_investment > 0 and normalized_date:
-                # Calculate current value using CAGR
-                calculator = PMS_AIF_Calculator()
-                result = calculator.calculate_pms_aif_value(
-                    ticker,
-                    normalized_date,
-                    original_investment,
-                    is_aif=(asset_type == 'aif')
-                )
-                
-                current_value = result.get('current_value', 0)
-                if current_value > 0:
-                    # Store current value as amount
-                    amount_value = current_value
-                    # For PMS/AIF, quantity is typically 1 (single investment)
-                    quantity_value = 1.0
-                    # Price is the current value (since quantity = 1)
-                    price_value = current_value
-                    pms_aif_calculated_price = current_value  # Store for later use
-                    print(f"[TX_BUILD] ✅ PMS/AIF: Calculated current value ₹{current_value:,.2f} from original ₹{original_investment:,.2f} (CAGR: {result.get('cagr_used', 0)*100:.1f}%)")
-        except Exception as e:
-            print(f"[TX_BUILD] ⚠️ Failed to calculate PMS/AIF current value: {e}")
-            # Continue with original values if CAGR calculation fails
+        # The price/NAV should already be extracted from the uploaded file
+        # Just use whatever price_value was extracted - no need to look up or calculate anything
+        if price_value > 0:
+            print(f"[TX_BUILD] ✅ PMS/AIF: Using price ₹{price_value:,.2f} from uploaded file for {ticker} on {normalized_date}")
+        else:
+            print(f"[TX_BUILD] ⚠️ PMS/AIF: No price found in uploaded file for {ticker} on {normalized_date}")
 
     # For mutual funds, prefer scheme_name for ticker resolution (AMFI code lookup)
     # scheme_name is already set above during AMFI resolution
@@ -4153,9 +4129,7 @@ def _tx_build_db_transaction(
         'notes': notes,
     }
     
-    # Store PMS/AIF calculated price for later use in updating live_price
-    if pms_aif_calculated_price:
-        result['_pms_aif_calculated_price'] = pms_aif_calculated_price
+    # For PMS/AIF, NAV is read from file - no need to store calculated price
     
     return result
 

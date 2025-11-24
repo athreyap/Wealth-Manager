@@ -1,6 +1,6 @@
 """
 PMS and AIF Value Calculator
-Calculates current value and 52-week historical values using CAGR from SEBI
+Reads NAVs from file - no calculation needed
 """
 
 import pandas as pd
@@ -11,6 +11,8 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import json
+import os
+import csv
 
 
 class PMS_AIF_Calculator:
@@ -23,6 +25,8 @@ class PMS_AIF_Calculator:
         self.sebi_cache = {}
         self._openai_client = None
         self._openai_initialized = False
+        # Default NAV file path - can be configured
+        self.nav_file_path = "pms_navs.csv"  # CSV format: ticker,date,nav
     
     def calculate_pms_aif_value(
         self,
@@ -52,16 +56,16 @@ class PMS_AIF_Calculator:
             years_elapsed = (current_dt - invest_dt).days / 365.25
             months_elapsed = years_elapsed * 12
             
-            # CRITICAL: Use AI to fetch actual NAVs instead of calculating from CAGR
-            print(f"[PMS_AIF] 🔍 Fetching actual NAVs for {ticker} ({'AIF' if is_aif else 'PMS'}) - Investment: Rs. {investment_amount:,.2f} on {investment_date}")
-            nav_data = self._get_navs_from_ai(ticker, is_aif, pms_aif_name, investment_date, investment_amount)
+            # CRITICAL: Read NAVs from file - no calculation needed
+            print(f"[PMS_AIF] 📄 Reading NAVs from file for {ticker} ({'AIF' if is_aif else 'PMS'}) - Investment: Rs. {investment_amount:,.2f} on {investment_date}")
+            nav_data = self._read_navs_from_file(ticker)
             
             if nav_data and nav_data.get('navs') and len(nav_data.get('navs', [])) > 0:
-                # Use AI-provided NAVs
+                # Use file-provided NAVs
                 navs = nav_data['navs']
                 current_nav = nav_data.get('current_nav', navs[-1].get('nav', 0) if navs else 0)
-                source = nav_data.get('source', 'AI')
-                print(f"[PMS_AIF] Got {len(navs)} NAV values from AI for {ticker}, current NAV: Rs. {current_nav:,.2f}")
+                source = nav_data.get('source', 'File')
+                print(f"[PMS_AIF] Got {len(navs)} NAV values from file for {ticker}, current NAV: Rs. {current_nav:,.2f}")
                 
                 # Calculate current value based on NAV
                 initial_nav = navs[0].get('nav', 0) if navs else investment_amount
@@ -108,68 +112,24 @@ class PMS_AIF_Calculator:
                     'initial_nav': initial_nav
                 }
             
-            # Fallback: Try CAGR-based calculation if NAV fetch fails
+            # If file read fails, return error - no calculation fallback
             if nav_data is None:
-                print(f"[PMS_AIF] ⚠️ WARNING: NAV fetch returned None for {ticker} (OpenAI client may not be available), falling back to CAGR calculation...")
-            else:
-                print(f"[PMS_AIF] ⚠️ WARNING: AI NAV fetch failed for {ticker} (no NAVs returned), falling back to CAGR calculation...")
-            print(f"[PMS_AIF] 🔍 Fetching CAGR for {ticker} ({'AIF' if is_aif else 'PMS'}) - Investment: Rs. {investment_amount:,.2f} on {investment_date}")
-            cagr_data = self._get_cagr_from_ai(ticker, is_aif, pms_aif_name, investment_date)
-            
-            if cagr_data and cagr_data.get('cagr') is not None and cagr_data.get('cagr') > 0:
-                # Use AI-provided CAGR
-                cagr = cagr_data['cagr']
-                cagr_period = cagr_data.get('period', 'AI Estimated')
-                source = f"AI ({cagr_period})"
-                print(f"[PMS_AIF] Got CAGR {cagr:.2%} ({cagr_period}) for {ticker}")
-            else:
-                # If AI fails, try SEBI data as fallback
-                print(f"[PMS_AIF] WARNING: AI CAGR failed for {ticker}, trying SEBI data...")
-                sebi_data = None
-                if not is_aif:
-                    # Try SEBI PMS data
-                    sebi_data = self._fetch_pms_from_sebi(ticker)
-                else:
-                    # Try SEBI AIF data
-                    sebi_data = self._fetch_aif_from_sebi(ticker)
-                
-                if sebi_data and not sebi_data.empty:
-                    best_cagr = self._extract_best_cagr(sebi_data)
-                    if best_cagr and best_cagr.get('cagr') and best_cagr.get('cagr') > 0:
-                        cagr = best_cagr['cagr']
-                        cagr_period = best_cagr.get('period', 'SEBI')
-                        source = f"SEBI ({cagr_period})"
-                        print(f"[PMS_AIF] Got CAGR {cagr:.2%} from SEBI ({cagr_period}) for {ticker}")
-                    else:
-                        print(f"[PMS_AIF] ERROR: SEBI data available but no valid CAGR found for {ticker}")
-                        return {
-                            'ticker': ticker,
-                            'initial_investment': investment_amount,
-                            'current_value': investment_amount,  # Return original investment if all fails
-                            'absolute_gain': 0,
-                            'percentage_gain': 0,
-                            'years_elapsed': years_elapsed,
-                            'cagr_used': 0,
-                            'cagr_period': 'Unavailable',
-                            'source': 'CAGR fetch failed - using investment value',
-                            'weekly_values': [],
-                            'error': f'AI and SEBI CAGR calculation failed. AI result: {cagr_data}, SEBI result: {best_cagr}'
-                        }
-                else:
-                    print(f"[PMS_AIF] ERROR: No SEBI data available for {ticker}")
-                    return {
-                        'ticker': ticker,
-                        'initial_investment': investment_amount,
-                        'current_value': investment_amount,  # Return original investment if all fails
-                        'absolute_gain': 0,
-                        'percentage_gain': 0,
-                        'years_elapsed': years_elapsed,
-                        'cagr_used': 0,
-                        'cagr_period': 'AI Unavailable',
-                        'source': 'AI fetch failed - using investment value',
-                        'weekly_values': [],
-                        'error': f'AI CAGR calculation failed. AI result: {cagr_data}'
-                    }
+                print(f"[PMS_AIF] ❌ ERROR: NAV file not found or no data for {ticker}. Please ensure pms_navs.csv exists with NAV data.")
+                return {
+                    'ticker': ticker,
+                    'initial_investment': investment_amount,
+                    'current_value': investment_amount,  # Return original investment if file not found
+                    'absolute_gain': 0,
+                    'percentage_gain': 0,
+                    'years_elapsed': years_elapsed,
+                    'cagr_used': 0,
+                    'cagr_period': 'N/A',
+                    'source': 'File not found - using investment value',
+                    'weekly_values': [],
+                    'error': f'NAV file (pms_navs.csv) not found or no data for ticker {ticker}. Please add NAV data to the file.',
+                    'current_nav': 0,
+                    'initial_nav': 0
+                }
             
             # Calculate current value
             current_value = investment_amount * ((1 + cagr) ** years_elapsed)
@@ -222,6 +182,120 @@ class PMS_AIF_Calculator:
                 'weekly_values': [],
                 'error': str(e)
             }
+    
+    def get_nav_for_date(self, ticker: str, date: str) -> Optional[float]:
+        """
+        Get NAV value for a specific date from the file
+        
+        Args:
+            ticker: PMS/AIF registration code (e.g., INP000005000)
+            date: Date in YYYY-MM-DD format
+        
+        Returns:
+            NAV value for that date or None if not found
+        """
+        nav_file = self.nav_file_path
+        
+        # Try multiple possible file locations
+        possible_paths = [
+            nav_file,
+            os.path.join("data", nav_file),
+            os.path.join("navs", nav_file),
+            os.path.join("pms_navs", nav_file),
+        ]
+        
+        for file_path in possible_paths:
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            if row.get('ticker', '').strip().upper() == ticker.upper():
+                                row_date = row.get('date', '').strip()
+                                if row_date == date:
+                                    nav_str = row.get('nav', '').strip()
+                                    try:
+                                        nav_value = float(nav_str)
+                                        if nav_value > 0:
+                                            print(f"[PMS_AIF] ✅ Found NAV for {ticker} on {date}: ₹{nav_value:,.2f}")
+                                            return nav_value
+                                    except (ValueError, TypeError):
+                                        continue
+                    # If we get here, file exists but no matching date found
+                    return None
+                except Exception as e:
+                    print(f"[PMS_AIF] ⚠️ Error reading NAV file {file_path}: {str(e)}")
+                    continue
+        
+        print(f"[PMS_AIF] ⚠️ NAV file not found or no NAV for {ticker} on {date}")
+        return None
+    
+    def _read_navs_from_file(self, ticker: str) -> Optional[Dict[str, Any]]:
+        """
+        Read NAVs from CSV file - no calculation needed
+        
+        Expected CSV format:
+        ticker,date,nav
+        INP000005000,2024-01-01,100.50
+        INP000005000,2024-01-08,101.25
+        ...
+        
+        Args:
+            ticker: PMS/AIF registration code (e.g., INP000005000)
+        
+        Returns:
+            Dict with navs (list of {date, nav}), current_nav, source or None
+        """
+        nav_file = self.nav_file_path
+        
+        # Try multiple possible file locations
+        possible_paths = [
+            nav_file,
+            os.path.join("data", nav_file),
+            os.path.join("navs", nav_file),
+            os.path.join("pms_navs", nav_file),
+        ]
+        
+        for file_path in possible_paths:
+            if os.path.exists(file_path):
+                try:
+                    navs = []
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            if row.get('ticker', '').strip().upper() == ticker.upper():
+                                date_str = row.get('date', '').strip()
+                                nav_str = row.get('nav', '').strip()
+                                try:
+                                    nav_value = float(nav_str)
+                                    if nav_value > 0:
+                                        navs.append({
+                                            'date': date_str,
+                                            'nav': nav_value
+                                        })
+                                except (ValueError, TypeError):
+                                    continue
+                    
+                    if navs:
+                        # Sort by date (oldest first)
+                        navs.sort(key=lambda x: x['date'])
+                        current_nav = navs[-1].get('nav', 0) if navs else 0
+                        print(f"[PMS_AIF] ✅ Read {len(navs)} NAVs from file for {ticker}, current NAV: Rs. {current_nav:,.2f}")
+                        return {
+                            'navs': navs,
+                            'current_nav': current_nav,
+                            'source': 'File (pms_navs.csv)',
+                            'data_type': 'exact'
+                        }
+                    else:
+                        print(f"[PMS_AIF] ⚠️ No NAVs found in file for {ticker}")
+                        return None
+                except Exception as e:
+                    print(f"[PMS_AIF] ⚠️ Error reading NAV file {file_path}: {str(e)}")
+                    continue
+        
+        print(f"[PMS_AIF] ⚠️ NAV file not found. Tried: {', '.join(possible_paths)}")
+        return None
     
     def _get_openai_client(self):
         """Lazy initialization of OpenAI client"""
