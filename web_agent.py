@@ -11983,14 +11983,30 @@ def ai_assistant_page():
                         
                         # If channel filter is needed, filter results by checking transactions
                         if channel and response.data:
-                            # Get all transactions for this user to find holdings by channel
-                            txn_query = db.supabase.table('user_transactions_detailed').select('stock_id, channel').eq('user_id', user_id).eq('channel', channel).execute()
-                            if txn_query.data:
-                                # Get unique stock_ids for this channel
-                                channel_stock_ids = set(txn['stock_id'] for txn in txn_query.data if txn.get('stock_id'))
-                                # Filter holdings to only those in this channel
-                                filtered_holdings = [h for h in response.data if h.get('stock_id') in channel_stock_ids]
-                                response.data = filtered_holdings
+                            # Get all transactions for this user with this channel (case-insensitive)
+                            # First, get all unique channels to find exact match
+                            all_txns = db.supabase.table('user_transactions_detailed').select('stock_id, channel').eq('user_id', user_id).execute()
+                            if all_txns.data:
+                                # Find matching channel (case-insensitive)
+                                channel_lower = channel.lower().strip()
+                                matching_channels = set()
+                                channel_stock_ids = set()
+                                
+                                for txn in all_txns.data:
+                                    txn_channel = (txn.get('channel') or '').strip()
+                                    if txn_channel.lower() == channel_lower:
+                                        matching_channels.add(txn_channel)  # Keep original case
+                                        stock_id = txn.get('stock_id')
+                                        if stock_id:
+                                            channel_stock_ids.add(stock_id)
+                                
+                                if channel_stock_ids:
+                                    # Filter holdings to only those in this channel
+                                    filtered_holdings = [h for h in response.data if h.get('stock_id') in channel_stock_ids]
+                                    response.data = filtered_holdings
+                                else:
+                                    # No matching channel found, return empty
+                                    response.data = []
                         
                         return json.dumps(response.data if response.data else [], indent=2)
                     except Exception as e:
@@ -12392,7 +12408,7 @@ def ai_assistant_page():
                         "type": "function",
                         "function": {
                             "name": "get_holdings",
-                            "description": "Get user holdings from the database. Use this to query portfolio holdings. CRITICAL: When user asks about a specific portfolio (e.g., 'deepak pf', 'main portfolio'), use portfolio_name parameter to filter. When user asks about a channel (e.g., 'Zerodha', 'HDFC'), use channel parameter. Can also filter by asset_type, sector, or portfolio_id.",
+                            "description": "Get user holdings from the database. Use this to query portfolio holdings. CRITICAL: When user asks about a specific portfolio (e.g., 'deepak pf', 'main portfolio'), use portfolio_name parameter to filter. When user asks about a channel (e.g., 'deepak', 'Zerodha', 'HDFC'), use channel parameter - channel matching is case-insensitive. Can also filter by asset_type, sector, or portfolio_id.",
                             "parameters": {
                                 "type": "object",
                                 "properties": {
@@ -12550,15 +12566,44 @@ def ai_assistant_page():
 - Analyzing transaction dates and holding periods
 Do NOT use 2024 or any other year - use {current_year}.
 
-🔑 DATABASE ACCESS:
-You have DIRECT ACCESS to query the database using these functions:
-1. get_holdings(user_id, asset_type, sector, limit) - Query holdings
-2. get_transactions(user_id, date_from, date_to, transaction_type, ticker, limit) - Query transactions
-3. get_historical_prices(ticker, date_from, date_to, limit) - Query historical prices
-4. get_stock_master(ticker, asset_type, limit) - Query stock metadata
-5. get_pdfs(user_id, search_term, limit) - Query PDF documents
-6. get_pms_aif_navs(user_id, ticker, limit) - Get PMS/AIF NAVs (Net Asset Values) with CAGR, current NAV, and historical NAVs
-7. get_financial_news(ticker, company_name, sector, limit) - Get latest financial news from Moneycontrol, Economic Times, and other sources
+🔑 DATABASE ACCESS - COMPLETE FILTERING CAPABILITIES:
+You have DIRECT ACCESS to query the database using these functions with FULL FILTERING:
+
+1. get_portfolios(user_id) - Get all portfolios for user (returns portfolio_id and portfolio_name)
+   Use this to find portfolio_id when user mentions a portfolio name.
+
+2. get_holdings(user_id, asset_type, sector, portfolio_id, portfolio_name, channel, limit) - Query holdings
+   ✅ FILTERS: asset_type, sector, portfolio_id, portfolio_name, channel
+   ⚠️ CRITICAL: When user asks about a specific portfolio (e.g., "deepak pf", "main portfolio"), use portfolio_name parameter!
+   ⚠️ CRITICAL: When user asks about a channel (e.g., "deepak", "Zerodha", "HDFC"), use channel parameter! Channel matching is case-insensitive.
+   ⚠️ CRITICAL: When user asks about a sector (e.g., "tech stocks", "banking"), use sector parameter!
+
+3. get_transactions(user_id, date_from, date_to, transaction_type, ticker, portfolio_id, portfolio_name, channel, sector, asset_type, limit) - Query transactions
+   ✅ FILTERS: date_from, date_to, transaction_type, ticker, portfolio_id, portfolio_name, channel, sector, asset_type
+   ⚠️ CRITICAL: When user asks about transactions in a specific portfolio, use portfolio_name parameter!
+   ⚠️ CRITICAL: When user asks about transactions in a specific channel, use channel parameter!
+   ⚠️ CRITICAL: When user asks about transactions for a sector, use sector parameter!
+   Returns: All transaction details including channel, portfolio_id, ticker, sector, asset_type, quantity, price, date
+
+4. get_historical_prices(ticker, date_from, date_to, limit) - Query historical prices
+   ✅ FILTERS: ticker, date_from, date_to
+   Returns: Historical price data with dates
+
+5. get_stock_master(ticker, asset_type, limit) - Query stock metadata
+   ✅ FILTERS: ticker, asset_type
+   Returns: Stock master data including ticker, stock_name, asset_type, sector
+
+6. get_pdfs(user_id, search_term, limit) - Query PDF documents
+   ✅ FILTERS: user_id, search_term
+   Returns: PDF documents with summaries
+
+7. get_pms_aif_navs(user_id, ticker, limit) - Get PMS/AIF NAVs
+   ✅ FILTERS: user_id, ticker
+   Returns: PMS/AIF NAVs with CAGR, current NAV, and historical NAVs
+
+8. get_financial_news(ticker, company_name, sector, limit) - Get latest financial news
+   ✅ FILTERS: ticker, company_name, sector
+   Returns: Financial news from Moneycontrol, Economic Times, and other sources
 
 📰 FINANCIAL NEWS ACCESS:
 - Use get_financial_news() to fetch latest market news, company updates, and sector trends
@@ -12577,6 +12622,7 @@ You have DIRECT ACCESS to query the database using these functions:
    - "Show my tech stocks" → get_holdings(user_id="{user['id']}", asset_type="stock", sector="Technology")
    - "Show deepak pf holdings" → get_holdings(user_id="{user['id']}", portfolio_name="deepak pf")
    - "Show Zerodha holdings" → get_holdings(user_id="{user['id']}", channel="Zerodha")
+   - "Show deepak channel" or "analysis of deepak channel" → get_holdings(user_id="{user['id']}", channel="deepak")
    - "Show tech stocks in Zerodha" → get_holdings(user_id="{user['id']}", asset_type="stock", sector="Technology", channel="Zerodha")
    - "1 year buy transactions" → get_transactions(user_id="{user['id']}", date_from="{datetime.now().replace(year=current_year-1).strftime('%Y-%m-%d')}", transaction_type="buy")
    - "Transactions in deepak pf" → get_transactions(user_id="{user['id']}", portfolio_name="deepak pf")
@@ -12597,9 +12643,13 @@ You have DIRECT ACCESS to query the database using these functions:
 Always:
 - Use the database functions to get the exact data you need based on the question
 - ⚠️ CRITICAL: When user mentions a portfolio name (e.g., "deepak pf"), ALWAYS filter by portfolio_name - don't show all portfolio data!
-- ⚠️ CRITICAL: When user mentions a channel (e.g., "Zerodha"), ALWAYS filter by channel - don't show all channel data!
+- ⚠️ CRITICAL: When user mentions a channel (e.g., "deepak", "Zerodha", "deepak channel", "analysis of deepak channel"), ALWAYS filter by channel parameter - don't show all portfolio data!
 - ⚠️ CRITICAL: When user mentions a sector, ALWAYS filter by sector - don't show all sector data!
 - Combine multiple filters when user asks for specific combinations (e.g., "tech stocks in Zerodha" = sector="Technology" AND channel="Zerodha")
+- Examples of channel filtering:
+  * "deepak channel" → get_holdings(user_id=..., channel="deepak")
+  * "analysis of deepak channel" → get_holdings(user_id=..., channel="deepak")
+  * "show deepak holdings" → get_holdings(user_id=..., channel="deepak")
 - Cite specific tickers, dates, and amounts from the queried data
 - Reference PDF research documents when making recommendations
 - Provide data-driven recommendations based on actual numbers from the database
