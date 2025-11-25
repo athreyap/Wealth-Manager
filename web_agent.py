@@ -4686,6 +4686,8 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                 action_type = action.get('action_type', 'unknown')
                 if action_type == 'split':
                     print(f"  - {action['ticker']}: 1:{action['split_ratio']} {action_type} on {action.get('split_date')}")
+                elif action_type == 'demerger':
+                    print(f"  - {action['ticker']}: Demerger on {action.get('demerger_date')} (Ratio: {action.get('ratio', 'N/A')}, Entity: {action.get('demerged_entity', 'N/A')})")
                 elif action_type == 'merger':
                     print(f"  - {action['ticker']}: Merger to {action.get('new_ticker', 'unknown')}")
                 elif action_type == 'delisting':
@@ -7940,11 +7942,13 @@ def main_dashboard():
                 if tasks.get('corporate_actions'):
                     try:
                         print(f"[BACKGROUND] 🔍 Detecting corporate actions for {len(holdings) if holdings else 0} holdings...")
-                        corporate_actions = detect_corporate_actions(user['id'], db, holdings=holdings, skip_if_recent=True)
-                        if corporate_actions:
+                        corporate_actions = detect_corporate_actions(user['id'], db, holdings=holdings, skip_if_recent=False)  # Changed to False to always run
+                        if corporate_actions and len(corporate_actions) > 0:
                             print(f"[BACKGROUND] ✅ Detected {len(corporate_actions)} corporate actions")
                             st.session_state.corporate_actions_detected = corporate_actions
+                            print(f"[BACKGROUND] ✅ Stored {len(corporate_actions)} corporate actions in session state")
                         else:
+                            print(f"[BACKGROUND] ℹ️ No corporate actions detected")
                             st.session_state.corporate_actions_detected = None
                     except Exception as e:
                         print(f"[BACKGROUND] ⚠️ Error in corporate action detection: {str(e)[:100]}")
@@ -7982,6 +7986,27 @@ def main_dashboard():
     if st.sidebar.button("🔄 Refresh All Prices"):
         run_portfolio_refresh(user['id'])
     
+    # Add button to manually trigger corporate actions detection
+    if st.sidebar.button("🔍 Check for Splits/Demergers"):
+        with st.spinner("Detecting corporate actions..."):
+            try:
+                holdings = get_cached_holdings(user['id'])
+                if holdings:
+                    # Force detection (skip_if_recent=False to always run)
+                    corporate_actions = detect_corporate_actions(user['id'], db, holdings=holdings, skip_if_recent=False)
+                    if corporate_actions:
+                        st.session_state.corporate_actions_detected = corporate_actions
+                        st.success(f"✅ Found {len(corporate_actions)} corporate action(s)!")
+                    else:
+                        st.session_state.corporate_actions_detected = None
+                        st.info("ℹ️ No corporate actions detected.")
+                else:
+                    st.warning("⚠️ No holdings found.")
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)[:200]}")
+                import traceback
+                traceback.print_exc()
+    
     # Navigation
     navigation_options = [
         "🏠 Portfolio Overview",
@@ -8017,14 +8042,36 @@ def main_dashboard():
     st.sidebar.markdown("---")
     
     # Corporate Actions Notification in Sidebar
-    if 'corporate_actions_detected' in st.session_state and st.session_state.corporate_actions_detected:
-        corporate_actions = st.session_state.corporate_actions_detected
-        st.sidebar.warning(f"📊 **{len(corporate_actions)} Stock Splits/Bonus Shares Detected!**")
+    # Check if corporate_actions_detected exists and has content
+    corporate_actions_detected = st.session_state.get('corporate_actions_detected')
+    
+    # Debug logging
+    if corporate_actions_detected is not None:
+        print(f"[SIDEBAR] corporate_actions_detected exists: {len(corporate_actions_detected) if isinstance(corporate_actions_detected, list) else 'not a list'} items")
+    
+    if corporate_actions_detected and isinstance(corporate_actions_detected, list) and len(corporate_actions_detected) > 0:
+        corporate_actions = corporate_actions_detected
+        
+        # Count different action types for better messaging
+        splits_count = sum(1 for a in corporate_actions if a.get('action_type') == 'split')
+        demergers_count = sum(1 for a in corporate_actions if a.get('action_type') == 'demerger')
+        
+        # Create appropriate message based on detected actions
+        if splits_count > 0 and demergers_count > 0:
+            action_msg = f"📊 **{len(corporate_actions)} Corporate Actions Detected!** ({splits_count} Split(s), {demergers_count} Demerger(s))"
+        elif splits_count > 0:
+            action_msg = f"📊 **{splits_count} Stock Split(s)/Bonus Share(s) Detected!**"
+        elif demergers_count > 0:
+            action_msg = f"📊 **{demergers_count} Demerger(s) Detected!**"
+        else:
+            action_msg = f"📊 **{len(corporate_actions)} Corporate Action(s) Detected!**"
+        
+        st.sidebar.warning(action_msg)
         
         with st.sidebar.expander(f"🔧 View and Fix Corporate Actions ({len(corporate_actions)} stocks)", expanded=False):
             st.markdown("""
-            **Corporate actions detected!** Your portfolio has stocks that underwent splits or bonus issues.  
-            Click the "Fix" button to automatically adjust quantities and prices.
+            **Corporate actions detected!** Your portfolio has stocks that underwent splits, bonus issues, or demergers.  
+            Click the "Apply" button to automatically adjust quantities and prices.
             """)
             
             # Create a table of detected corporate actions
@@ -10496,17 +10543,33 @@ def charts_page():
                 if 'selected_channels_state' not in st.session_state:
                     st.session_state.selected_channels_state = channels[:min(3, len(channels))]
                 
+                # Add "All Channels" option at the beginning
+                all_channels_option = "All Channels"
+                channels_with_all = [all_channels_option] + sorted(channels)
+                
                 selected_channels = st.multiselect(
                     "🔍 Select channels to compare:",
-                    channels,
+                    channels_with_all,
                     default=st.session_state.selected_channels_state,
-                    help="Search and select multiple channels. Use Ctrl+Click for multiple selections.",
+                    help="Search and select multiple channels. Use Ctrl+Click for multiple selections. Select 'All Channels' to include all.",
                     placeholder="Type to search channels...",
                     key="channel_comparison_multiselect"
                 )
                 
-                # Update session state
-                st.session_state.selected_channels_state = selected_channels
+                # Handle "All Channels" selection
+                if all_channels_option in selected_channels:
+                    # If "All Channels" is selected, select all actual channels
+                    selected_channels = [c for c in selected_channels if c != all_channels_option] + channels
+                    # Remove duplicates while preserving order
+                    selected_channels = list(dict.fromkeys(selected_channels))
+                
+                # Update session state (exclude "All Channels" from stored state)
+                # Store only actual channel names, not "All Channels"
+                stored_channels = [c for c in selected_channels if c != all_channels_option]
+                if all_channels_option in selected_channels:
+                    # If "All Channels" was selected, store all actual channels
+                    stored_channels = channels
+                st.session_state.selected_channels_state = stored_channels
             
             with col2:
                 st.markdown("**📊 Available Channels:**")
@@ -10519,7 +10582,8 @@ def charts_page():
                 st.markdown("**⚡ Quick Select:**")
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    if st.button("Select All", key="select_all_channels"):
+                    if st.button("Select All Channels", key="select_all_channels"):
+                        # Select all actual channels (not the "All Channels" option)
                         st.session_state.selected_channels_state = channels
                         st.rerun()
                 with col2:
@@ -10533,8 +10597,14 @@ def charts_page():
                         st.rerun()
             
             if selected_channels:
+                # Filter out "All Channels" from selected_channels for actual filtering
+                actual_selected_channels = [c for c in selected_channels if c != all_channels_option]
+                if all_channels_option in selected_channels or len(actual_selected_channels) == 0:
+                    # If "All Channels" is selected or nothing selected, use all channels
+                    actual_selected_channels = channels
+                
                 # Filter data
-                channel_comparison = df_compare[df_compare['channel'].isin(selected_channels)].groupby('channel').agg({
+                channel_comparison = df_compare[df_compare['channel'].isin(actual_selected_channels)].groupby('channel').agg({
                     'investment': 'sum',
                     'current_value': 'sum',
                     'pnl': 'sum'
@@ -10934,7 +11004,7 @@ def charts_page():
             
             with col1:
                 # Select channel
-                channels = ['All'] + df_compare['channel'].unique().tolist()
+                channels = ['All Channels'] + sorted(df_compare['channel'].unique().tolist())
                 selected_channel = st.selectbox("Filter by Channel:", channels)
             
             with col2:
@@ -10944,7 +11014,7 @@ def charts_page():
             
             # Apply filters
             filtered_df = df_compare.copy()
-            if selected_channel != 'All':
+            if selected_channel != 'All Channels':
                 filtered_df = filtered_df[filtered_df['channel'] == selected_channel]
             if selected_type != 'All':
                 filtered_df = filtered_df[filtered_df['asset_type'] == selected_type]
