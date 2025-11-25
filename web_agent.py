@@ -5268,38 +5268,74 @@ def update_bond_prices_with_ai(user_id, db, bonds=None):
 def run_portfolio_refresh(user_id: str, *, auto: bool = False) -> None:
     """Refresh current prices and weekly history on-demand or automatically."""
     spinner_message = "🔄 Refreshing portfolio data..." if not auto else "🔄 Initializing portfolio data..."
+    
+    # Create progress indicators
+    progress_bar = st.progress(0) if not auto else None
+    status_text = st.empty() if not auto else None
+    
+    def update_progress(step: int, total: int, message: str = ""):
+        """Update progress bar and status"""
+        if progress_bar:
+            progress_bar.progress(step / total)
+        if status_text and message:
+            status_text.text(message)
+    
+    total_steps = 5
+    current_step = 0
+    
     with st.spinner(spinner_message):
+        # Step 1: Update bond prices
+        current_step += 1
+        update_progress(current_step, total_steps, "📊 Updating bond prices...")
         try:
             update_bond_prices_with_ai(user_id, db)
         except Exception as exc:
             if not auto:
                 st.warning(f"Bond price refresh skipped: {str(exc)[:80]}")
 
+        # Step 2: Get holdings
+        current_step += 1
+        update_progress(current_step, total_steps, "📈 Loading holdings...")
         holdings = db.get_user_holdings(user_id)
 
         if holdings:
+            # Step 3: Fetch missing weekly prices (SLOWEST OPERATION)
+            current_step += 1
+            update_progress(current_step, total_steps, f"📅 Fetching historical weekly prices for {len(holdings)} holdings...")
             try:
                 missing_weeks = db.get_missing_weeks_for_user(user_id)
                 if missing_weeks:
+                    missing_count = len(missing_weeks)
+                    update_progress(current_step, total_steps, f"📅 Fetching {missing_count} missing weekly price(s)... (This may take 30-60 seconds)")
                     db.fetch_and_store_missing_weekly_prices(user_id, missing_weeks)
+                else:
+                    update_progress(current_step, total_steps, "✅ All weekly prices up-to-date")
             except Exception as exc:
                 if not auto:
                     st.warning(f"Weekly history refresh failed: {str(exc)[:120]}")
 
+            # Step 4: Update live prices
+            current_step += 1
+            update_progress(current_step, total_steps, "💰 Updating current prices...")
             try:
                 holdings_needing_update = should_update_prices_today(holdings, db)
-                if holdings_needing_update and bulk_ai_fetcher.available:
-                    unique_tickers = list({h['ticker'] for h in holdings_needing_update if h.get('ticker')})
-                    if unique_tickers:
-                        asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings_needing_update if h.get('ticker')}
-                        db.bulk_process_new_stocks_with_comprehensive_data(
-                            tickers=unique_tickers,
-                            asset_types=asset_types
-                        )
-                    else:
+                if holdings_needing_update:
+                    update_count = len(holdings_needing_update)
+                    update_progress(current_step, total_steps, f"💰 Updating prices for {update_count} holding(s)...")
+                    if holdings_needing_update and bulk_ai_fetcher.available:
+                        unique_tickers = list({h['ticker'] for h in holdings_needing_update if h.get('ticker')})
+                        if unique_tickers:
+                            asset_types = {h['ticker']: h.get('asset_type', 'stock') for h in holdings_needing_update if h.get('ticker')}
+                            db.bulk_process_new_stocks_with_comprehensive_data(
+                                tickers=unique_tickers,
+                                asset_types=asset_types
+                            )
+                        else:
+                            st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
+                    elif holdings_needing_update:
                         st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
-                elif holdings_needing_update:
-                    st.session_state.price_fetcher.update_live_prices_for_holdings(holdings_needing_update, db)
+                else:
+                    update_progress(current_step, total_steps, "✅ All prices up-to-date")
             except Exception as exc:
                 if not auto:
                     st.warning(f"Live price update failed: {str(exc)[:120]}")
@@ -5308,7 +5344,9 @@ def run_portfolio_refresh(user_id: str, *, auto: bool = False) -> None:
         st.session_state.needs_initial_refresh = False
         st.session_state.last_fetch_time = datetime.now()
         
-        # Detect corporate actions after price refresh (not just on login)
+        # Step 5: Detect corporate actions
+        current_step += 1
+        update_progress(current_step, total_steps, "🔍 Detecting corporate actions...")
         try:
             print(f"[CORP_ACTION] 🔍 Detecting corporate actions after price refresh...")
             holdings_after_refresh = db.get_user_holdings(user_id)
@@ -5326,6 +5364,9 @@ def run_portfolio_refresh(user_id: str, *, auto: bool = False) -> None:
             print(f"[CORP_ACTION] ⚠️ Error detecting corporate actions: {str(e)}")
             import traceback
             traceback.print_exc()
+        
+        # Complete
+        update_progress(total_steps, total_steps, "✅ Initialization complete!")
 
     if auto:
         st.success("✅ Portfolio refreshed automatically.")
