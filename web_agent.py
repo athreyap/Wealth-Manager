@@ -4852,7 +4852,33 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
                         print(f"[CORP_ACTION_ADJUST] ✅ Using matching transactions directly, found {len(transactions.data)} transactions")
         
         if not transactions.data:
-            print(f"[CORP_ACTION_ADJUST] ❌ No transactions found after all attempts for stock_id={stock_id}")
+            # Get stock info for better error message
+            try:
+                stock_info = db.supabase.table('stock_master').select('ticker, stock_name').eq('id', stock_id).execute()
+                ticker = stock_info.data[0].get('ticker', 'Unknown') if stock_info.data else 'Unknown'
+                stock_name = stock_info.data[0].get('stock_name', 'Unknown') if stock_info.data else 'Unknown'
+                
+                # Check if there are any holdings for this stock (might have been sold)
+                try:
+                    holdings_check = db.supabase.table('holdings').select('total_quantity').eq('stock_id', stock_id).execute()
+                    if holdings_check.data:
+                        total_qty = sum(float(h.get('total_quantity', 0) or 0) for h in holdings_check.data)
+                        if total_qty <= 0:
+                            print(f"[CORP_ACTION_ADJUST] ⚠️ Stock has holdings but quantity is 0 (all sold) - no transactions to adjust")
+                        else:
+                            print(f"[CORP_ACTION_ADJUST] ⚠️ Stock has holdings (qty={total_qty}) but no transactions found - possible data inconsistency")
+                    else:
+                        print(f"[CORP_ACTION_ADJUST] ⚠️ No holdings found for this stock either")
+                except Exception as e:
+                    print(f"[CORP_ACTION_ADJUST] ⚠️ Could not check holdings: {str(e)[:100]}")
+                
+                print(f"[CORP_ACTION_ADJUST] ❌ No transactions found after all attempts for stock_id={stock_id} (ticker={ticker}, name={stock_name})")
+                print(f"[CORP_ACTION_ADJUST] 💡 This might mean:")
+                print(f"[CORP_ACTION_ADJUST]    1. No transactions exist for this stock")
+                print(f"[CORP_ACTION_ADJUST]    2. Transactions exist but under a different stock_id")
+                print(f"[CORP_ACTION_ADJUST]    3. All transactions were already sold (quantity = 0)")
+            except Exception as e:
+                print(f"[CORP_ACTION_ADJUST] ❌ No transactions found for stock_id={stock_id} (error getting stock info: {str(e)[:100]})")
             return 0
         
         # Initialize counters
@@ -8145,7 +8171,37 @@ def main_dashboard():
                                     st.session_state.corporate_actions_detected = None
                                 st.rerun()
                             else:
-                                st.error(f"❌ No transactions found to adjust for {action['ticker']}")
+                                # Check if this is because holdings were sold (quantity = 0)
+                                # If so, don't show error - just remove from list
+                                try:
+                                    holdings_check = db.supabase.table('holdings').select('total_quantity').eq('stock_id', action['stock_id']).execute()
+                                    total_qty = 0
+                                    if holdings_check.data:
+                                        total_qty = sum(float(h.get('total_quantity', 0) or 0) for h in holdings_check.data)
+                                    
+                                    if total_qty <= 0:
+                                        # All sold - silently remove from list
+                                        st.info(f"ℹ️ {action['ticker']} - All holdings were sold (quantity = 0), no adjustment needed.")
+                                        remaining_actions = [a for a in corporate_actions if a['ticker'] != action['ticker']]
+                                        if remaining_actions:
+                                            st.session_state.corporate_actions_detected = remaining_actions
+                                        else:
+                                            st.session_state.corporate_actions_detected = None
+                                        st.rerun()
+                                    else:
+                                        # Provide more helpful error message
+                                        st.error(f"❌ No transactions found to adjust for {action['ticker']}")
+                                        st.info(f"💡 **Possible reasons:**\n"
+                                               f"- No transactions exist for this stock\n"
+                                               f"- Transactions exist but under a different stock_id\n"
+                                               f"- Data inconsistency between holdings and transactions\n\n"
+                                               f"**Stock ID:** {action.get('stock_id', 'N/A')}\n"
+                                               f"**Stock Name:** {action.get('stock_name', 'N/A')}\n"
+                                               f"**Current Quantity:** {total_qty}")
+                                except Exception as e:
+                                    # Fallback to simple error if check fails
+                                    st.error(f"❌ No transactions found to adjust for {action['ticker']}")
+                                    st.caption(f"Error checking holdings: {str(e)[:100]}")
                         except Exception as e:
                             st.error(f"❌ Error: {str(e)[:200]}")
             
