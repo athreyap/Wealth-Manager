@@ -4370,8 +4370,8 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                                         txn_date = datetime.strptime(txn_date, '%Y-%m-%d %H:%M:%S')
                                     except:
                                         continue
-                        elif hasattr(txn_date, 'date'):
-                            txn_date = datetime.combine(txn_date.date(), datetime.min.time())
+                            elif hasattr(txn_date, 'date'):
+                                txn_date = datetime.combine(txn_date.date(), datetime.min.time())
                         
                             if txn_date and txn_date.tzinfo is not None:
                                 txn_date = txn_date.replace(tzinfo=None)
@@ -4703,7 +4703,7 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
         traceback.print_exc()
         return []
 
-def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type='split', new_ticker=None, exchange_ratio=1.0, cash_per_share=0.0):
+def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type='split', new_ticker=None, exchange_ratio=1.0, cash_per_share=0.0, split_date=None):
     """
     Adjust transaction quantities and prices for a stock split/bonus/merger
     
@@ -4716,6 +4716,7 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
         new_ticker: New ticker symbol (for mergers)
         exchange_ratio: Exchange ratio for mergers (e.g., 2.0 means 1 old = 2 new)
         cash_per_share: Cash component per share (for mergers)
+        split_date: Date of the split (YYYY-MM-DD format) - used to fetch stock price on split date
     """
     try:
         # Get all transactions for this stock and user
@@ -4871,6 +4872,45 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
             new_stock_id = new_stock['id']
         
         already_adjusted_count = 0
+        
+        # Parse split date for comparison and fetch price on split date (once, before loop)
+        split_date_obj = None
+        price_on_split_date = None
+        
+        if split_date and action_type == 'split':
+            try:
+                if isinstance(split_date, str):
+                    split_date_obj = datetime.strptime(split_date, '%Y-%m-%d')
+                else:
+                    split_date_obj = split_date
+                
+                # Fetch stock price on split date (once, before processing transactions)
+                try:
+                    # Get ticker from stock_master
+                    stock_info = db.supabase.table('stock_master').select('ticker').eq('id', stock_id).execute()
+                    if stock_info.data:
+                        ticker = stock_info.data[0].get('ticker', '')
+                        if ticker:
+                            # Try to fetch price on split date using yfinance
+                            import yfinance as yf
+                            
+                            # Try NSE first, then BSE
+                            for ticker_suffix in ['.NS', '.BO', '']:
+                                try:
+                                    test_ticker = f"{ticker}{ticker_suffix}" if ticker_suffix else ticker
+                                    stock = yf.Ticker(test_ticker)
+                                    hist = stock.history(start=split_date_obj, end=split_date_obj + pd.Timedelta(days=1))
+                                    if not hist.empty:
+                                        price_on_split_date = float(hist['Close'].iloc[0])
+                                        print(f"[CORP_ACTION_ADJUST] ✅ Fetched price on split date ({split_date}): ₹{price_on_split_date:.2f} for {test_ticker}")
+                                        break
+                                except Exception as e:
+                                    continue
+                except Exception as e:
+                    print(f"[CORP_ACTION_ADJUST] ⚠️ Error fetching price on split date: {str(e)[:100]}")
+            except Exception as e:
+                print(f"[CORP_ACTION_ADJUST] ⚠️ Error parsing split date: {str(e)}")
+        
         for txn in transactions.data:
             # CRITICAL: Skip transactions that have already been adjusted
             notes = txn.get('notes', '') or ''
@@ -4879,15 +4919,44 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
                 print(f"[CORP_ACTION_ADJUST] ⏭️ Skipping transaction {txn.get('id', 'unknown')} - already adjusted (notes: {notes[:50]})")
                 continue
             
+            # CRITICAL: Only adjust transactions that occurred BEFORE the split date
+            # Transactions after the split date should not be adjusted
+            if action_type == 'split' and split_date_obj:
+                txn_date = txn.get('transaction_date')
+                if txn_date:
+                    try:
+                        if isinstance(txn_date, str):
+                            txn_date_obj = datetime.strptime(txn_date, '%Y-%m-%d')
+                        else:
+                            txn_date_obj = txn_date
+                            if hasattr(txn_date_obj, 'date'):
+                                txn_date_obj = datetime.combine(txn_date_obj.date(), datetime.min.time())
+                        
+                        # Skip transactions that occurred on or after the split date
+                        if txn_date_obj >= split_date_obj:
+                            print(f"[CORP_ACTION_ADJUST] ⏭️ Skipping transaction {txn.get('id', 'unknown')} - occurred on/after split date ({txn_date_obj.date()} >= {split_date_obj.date()})")
+                            continue
+                    except Exception as e:
+                        print(f"[CORP_ACTION_ADJUST] ⚠️ Error comparing dates: {str(e)}, proceeding with adjustment")
+            
             old_quantity = float(txn['quantity'])
             old_price = float(txn['price'])
             
             print(f"[CORP_ACTION_ADJUST] 📝 Transaction {txn.get('id', 'unknown')}: Before - qty={old_quantity}, price={old_price}")
             
             if action_type == 'split':
-                # Stock split: quantity increases, price decreases
+                # Stock split: quantity increases, price should be the stock price on split date
                 new_quantity = old_quantity * split_ratio
-                new_price = old_price / split_ratio
+                
+                # Use the price fetched on split date (fetched once before the loop)
+                if price_on_split_date and price_on_split_date > 0:
+                    new_price = price_on_split_date
+                    print(f"[CORP_ACTION_ADJUST] 📝 Using stock price on split date: ₹{new_price:.2f}")
+                else:
+                    # Fallback to calculated price if we couldn't fetch the price on split date
+                    new_price = old_price / split_ratio
+                    print(f"[CORP_ACTION_ADJUST] ⚠️ Using calculated price (could not fetch price on split date): ₹{new_price:.2f}")
+                
                 notes = f"Auto-adjusted for 1:{split_ratio} stock split"
                 print(f"[CORP_ACTION_ADJUST] 📝 Transaction {txn.get('id', 'unknown')}: After split - qty={new_quantity}, price={new_price} (ratio={split_ratio})")
                 
@@ -7982,7 +8051,8 @@ def main_dashboard():
                                 action_type=action.get('action_type', 'split'),
                                 new_ticker=action.get('new_ticker'),
                                 exchange_ratio=action.get('exchange_ratio', 1.0),
-                                cash_per_share=action.get('cash_per_share', 0.0)
+                                cash_per_share=action.get('cash_per_share', 0.0),
+                                split_date=action.get('split_date')
                             )
                             
                             if adjusted > 0:
@@ -8044,7 +8114,8 @@ def main_dashboard():
                                     action_type=action.get('action_type', 'split'),
                                     new_ticker=action.get('new_ticker'),
                                     exchange_ratio=action.get('exchange_ratio', 1.0),
-                                    cash_per_share=action.get('cash_per_share', 0.0)
+                                    cash_per_share=action.get('cash_per_share', 0.0),
+                                    split_date=action.get('split_date')
                                 )
                                 if adjusted > 0:
                                     total_adjusted += adjusted
