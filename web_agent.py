@@ -4855,13 +4855,22 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
             print(f"[CORP_ACTION_ADJUST] ❌ No transactions found after all attempts for stock_id={stock_id}")
             return 0
         
+        # Initialize counters
+        updated_count = 0
+        already_adjusted_count = 0
+        new_stock_id = None
+        
+        # Count how many transactions are already adjusted
+        if transactions.data:
+            for txn in transactions.data:
+                notes = txn.get('notes', '') or ''
+                if 'Auto-adjusted' in notes or 'auto-adjusted' in notes.lower():
+                    already_adjusted_count += 1
+        
         # If all transactions are already adjusted, return a special code
-        if already_adjusted_count > 0 and updated_count == 0:
+        if already_adjusted_count > 0 and already_adjusted_count == len(transactions.data):
             print(f"[CORP_ACTION_ADJUST] ✅ All {already_adjusted_count} transaction(s) already adjusted - no action needed")
             return -1  # Special return code: already adjusted
-        
-        updated_count = 0
-        new_stock_id = None
         
         # For mergers, get or create new stock
         if action_type == 'merger' and new_ticker:
@@ -4872,8 +4881,6 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
                 sector=None
             )
             new_stock_id = new_stock['id']
-        
-        already_adjusted_count = 0
         
         # Parse split date for comparison and fetch price on split date (once, before loop)
         split_date_obj = None
@@ -4915,9 +4922,9 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
         
         for txn in transactions.data:
             # CRITICAL: Skip transactions that have already been adjusted
+            # (already_adjusted_count was already counted above, so we just skip here)
             notes = txn.get('notes', '') or ''
             if 'Auto-adjusted' in notes or 'auto-adjusted' in notes.lower():
-                already_adjusted_count += 1
                 print(f"[CORP_ACTION_ADJUST] ⏭️ Skipping transaction {txn.get('id', 'unknown')} - already adjusted (notes: {notes[:50]})")
                 continue
             
