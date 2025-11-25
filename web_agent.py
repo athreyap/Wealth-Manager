@@ -11777,6 +11777,28 @@ def ai_assistant_page():
     holdings = get_cached_holdings(user['id'])
     user_pdfs = db.get_user_pdfs(user['id'])
     
+    # Load ALL data for AI analysis (holdings, transactions with channel/sector, portfolios, PDFs)
+    # This gives the AI complete context without needing function calls
+    all_holdings_data = None
+    all_transactions_data = None
+    all_portfolios_data = None
+    try:
+        # Get all holdings with portfolio names
+        holdings_response = db.supabase.table('user_holdings_detailed').select('*').eq('user_id', user['id']).execute()
+        all_holdings_data = holdings_response.data if holdings_response.data else []
+        
+        # Get all transactions with channel and sector info
+        txn_response = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user['id']).order('transaction_date', desc=True).limit(1000).execute()
+        all_transactions_data = txn_response.data if txn_response.data else []
+        
+        # Get all portfolios
+        all_portfolios_data = db.get_user_portfolios(user['id'])
+    except Exception as e:
+        print(f"[AI_ASSISTANT] Error loading data: {str(e)}")
+        all_holdings_data = []
+        all_transactions_data = []
+        all_portfolios_data = []
+    
     # Sidebar for chat threads (like ChatGPT)
     with st.sidebar:
         st.header("💬 Chat History")
@@ -12408,7 +12430,7 @@ def ai_assistant_page():
                         "type": "function",
                         "function": {
                             "name": "get_holdings",
-                            "description": "Get user holdings from the database. Use this to query portfolio holdings. CRITICAL: When user asks about a specific portfolio (e.g., 'deepak pf', 'main portfolio'), use portfolio_name parameter to filter. When user asks about a channel (e.g., 'deepak', 'Zerodha', 'HDFC'), use channel parameter - channel matching is case-insensitive. Can also filter by asset_type, sector, or portfolio_id.",
+                            "description": "Get user holdings from the database. Use this to query portfolio holdings. CRITICAL: Extract the EXACT portfolio name or channel name from the user's query dynamically. If user says 'karant pf', 'karanth pf', 'deepak pf', etc., use portfolio_name parameter with the EXACT name from their query. If user says 'deepak channel', 'zerodha channel', etc., use channel parameter with the EXACT channel name. Portfolio names typically end with 'pf' or 'portfolio'. Channel names are broker/platform names. Can also filter by asset_type, sector, or portfolio_id.",
                             "parameters": {
                                 "type": "object",
                                 "properties": {
@@ -12428,7 +12450,7 @@ def ai_assistant_page():
                         "type": "function",
                         "function": {
                             "name": "get_transactions",
-                            "description": "Get user transactions from the database. Use this to query transaction history. CRITICAL: When user asks about a specific portfolio (e.g., 'deepak pf'), use portfolio_name parameter. When user asks about a channel (e.g., 'Zerodha'), use channel parameter. Can filter by date range, transaction type (buy/sell), ticker, portfolio, channel, sector, or asset_type.",
+                            "description": "Get user transactions from the database. Use this to query transaction history. CRITICAL: Extract the EXACT portfolio name or channel name from the user's query dynamically. If user says 'karant pf', 'karanth pf', 'deepak pf', etc., use portfolio_name parameter with the EXACT name from their query. If user says 'deepak channel', 'zerodha channel', etc., use channel parameter with the EXACT channel name. Portfolio names typically end with 'pf' or 'portfolio'. Channel names are broker/platform names. Can filter by date range, transaction type (buy/sell), ticker, portfolio, channel, sector, or asset_type.",
                             "parameters": {
                                 "type": "object",
                                 "properties": {
@@ -12533,30 +12555,88 @@ def ai_assistant_page():
                 current_date = datetime.now().strftime("%Y-%m-%d")
                 current_year = datetime.now().year
                 
-                # Prepare session dataframes summary (available in memory)
-                session_data_summary = f"""
-📊 SESSION DATA AVAILABLE (Already loaded in memory):
-- Holdings DataFrame: {len(holdings)} holdings loaded
-- Portfolio Summary: Available
-- PDF Context: {len(user_pdfs)} PDFs loaded
-- User ID: {user['id']}
+                # Format all data for AI analysis
+                import pandas as pd
+                
+                # Format holdings data with portfolio names
+                holdings_text = ""
+                if all_holdings_data:
+                    holdings_df = pd.DataFrame(all_holdings_data)
+                    # Add portfolio names
+                    if 'portfolio_id' in holdings_df.columns and all_portfolios_data:
+                        portfolios_dict = {p['id']: p.get('portfolio_name', 'Unknown') for p in all_portfolios_data}
+                        holdings_df['portfolio_name'] = holdings_df['portfolio_id'].map(portfolios_dict)
+                    
+                    # Select key columns for display
+                    display_cols = ['ticker', 'stock_name', 'asset_type', 'sector', 'portfolio_name', 'total_quantity', 'average_price', 'current_price']
+                    display_cols = [col for col in display_cols if col in holdings_df.columns]
+                    
+                    holdings_display = holdings_df[display_cols].copy() if display_cols else holdings_df
+                    
+                    holdings_text = f"""
+📊 ALL HOLDINGS DATA ({len(all_holdings_data)} holdings - FULL DATA, NO TRUNCATION):
+Each holding includes: ticker, stock_name, asset_type, sector, portfolio_name, total_quantity, average_price, current_price
 
-💡 INSTRUCTIONS:
-- For data-related questions, use the database query functions (get_holdings, get_transactions, etc.) to fetch the exact data you need
-- IMPORTANT: The database functions return COMPLETE, UNFILTERED data - they query the database directly, not cropped context
-- The session dataframes are already loaded, but you can query the database for more specific or filtered data
-- Always query the database when you need:
-  * Filtered transactions (by date, type, ticker) - returns ALL matching records, not limited
-  * Historical prices for specific tickers - returns ALL available historical data
-  * Stock master metadata - returns ALL matching records
-  * PDF documents matching search terms - returns ALL matching PDFs
-  * PMS/AIF NAVs - returns complete NAV data with CAGR and historical values
-- Use the functions based on what the user is asking - don't query everything, only what's needed
-- The functions have NO data limits or cropping - they return complete database results
+{holdings_display.to_string(index=False)}
 """
                 
-                # Build system prompt with full database access instructions
-                system_prompt = f"""You are an expert portfolio analyst and financial advisor with DIRECT ACCESS to the complete database for user_id: {user['id']}.
+                # Format transactions data with channel and sector
+                transactions_text = ""
+                if all_transactions_data:
+                    txn_df = pd.DataFrame(all_transactions_data)
+                    # Add portfolio names
+                    if 'portfolio_id' in txn_df.columns and all_portfolios_data:
+                        portfolios_dict = {p['id']: p.get('portfolio_name', 'Unknown') for p in all_portfolios_data}
+                        txn_df['portfolio_name'] = txn_df['portfolio_id'].map(portfolios_dict)
+                    
+                    # Select key columns
+                    txn_display_cols = ['transaction_date', 'transaction_type', 'ticker', 'stock_name', 'sector', 'asset_type', 'channel', 'portfolio_name', 'quantity', 'price']
+                    txn_display_cols = [col for col in txn_display_cols if col in txn_df.columns]
+                    
+                    txn_display = txn_df[txn_display_cols].copy() if txn_display_cols else txn_df
+                    
+                    transactions_text = f"""
+💳 ALL TRANSACTIONS DATA ({len(all_transactions_data)} transactions - FULL DATA, NO TRUNCATION):
+Each transaction includes: transaction_date, transaction_type, ticker, stock_name, sector, asset_type, channel, portfolio_name, quantity, price
+
+{txn_display.to_string(index=False)}
+"""
+                
+                # Format portfolios data
+                portfolios_text = ""
+                if all_portfolios_data:
+                    portfolios_text = f"""
+📁 ALL PORTFOLIOS ({len(all_portfolios_data)} portfolios):
+{json.dumps(all_portfolios_data, indent=2, default=str)}
+"""
+                
+                # Format PDF data - FULL CONTENT, NO TRUNCATION
+                pdf_text = ""
+                if st.session_state.pdf_context:
+                    pdf_text = f"""
+📄 PDF DOCUMENTS CONTEXT (FULL CONTENT, NO TRUNCATION):
+{st.session_state.pdf_context}
+"""
+                
+                # Complete data context
+                complete_data_context = f"""
+{holdings_text}
+{transactions_text}
+{portfolios_text}
+{pdf_text}
+"""
+                
+                # Build system prompt with ALL DATA INCLUDED
+                system_prompt = f"""You are an expert portfolio analyst and financial advisor with COMPLETE ACCESS to all portfolio data for user_id: {user['id']}.
+
+🎯 IMPORTANT: ALL DATA IS PROVIDED BELOW - ANALYZE IT DIRECTLY!
+You have been given ALL holdings, transactions (with channel and sector), portfolios, and PDF context.
+You can analyze this data directly without needing to call functions.
+Only use function calls if you need historical prices, stock master metadata, or financial news.
+
+{complete_data_context}
+
+📅 CURRENT DATE: {current_date} (Year: {current_year})
 
 📅 CURRENT DATE: {current_date} (Year: {current_year})
 ⚠️ CRITICAL: Today's date is {current_date}. Always use this date when:
@@ -12566,44 +12646,16 @@ def ai_assistant_page():
 - Analyzing transaction dates and holding periods
 Do NOT use 2024 or any other year - use {current_year}.
 
-🔑 DATABASE ACCESS - COMPLETE FILTERING CAPABILITIES:
-You have DIRECT ACCESS to query the database using these functions with FULL FILTERING:
+🔑 OPTIONAL FUNCTION ACCESS (Use only if needed):
+You have access to these functions ONLY for data not provided above:
 
-1. get_portfolios(user_id) - Get all portfolios for user (returns portfolio_id and portfolio_name)
-   Use this to find portfolio_id when user mentions a portfolio name.
+1. get_historical_prices(ticker, date_from, date_to, limit) - Get historical price data
+2. get_stock_master(ticker, asset_type, limit) - Get stock metadata
+3. get_pms_aif_navs(user_id, ticker, limit) - Get PMS/AIF NAVs
+4. get_financial_news(ticker, company_name, sector, limit) - Get financial news
 
-2. get_holdings(user_id, asset_type, sector, portfolio_id, portfolio_name, channel, limit) - Query holdings
-   ✅ FILTERS: asset_type, sector, portfolio_id, portfolio_name, channel
-   ⚠️ CRITICAL: When user asks about a specific portfolio (e.g., "deepak pf", "main portfolio"), use portfolio_name parameter!
-   ⚠️ CRITICAL: When user asks about a channel (e.g., "deepak", "Zerodha", "HDFC"), use channel parameter! Channel matching is case-insensitive.
-   ⚠️ CRITICAL: When user asks about a sector (e.g., "tech stocks", "banking"), use sector parameter!
-
-3. get_transactions(user_id, date_from, date_to, transaction_type, ticker, portfolio_id, portfolio_name, channel, sector, asset_type, limit) - Query transactions
-   ✅ FILTERS: date_from, date_to, transaction_type, ticker, portfolio_id, portfolio_name, channel, sector, asset_type
-   ⚠️ CRITICAL: When user asks about transactions in a specific portfolio, use portfolio_name parameter!
-   ⚠️ CRITICAL: When user asks about transactions in a specific channel, use channel parameter!
-   ⚠️ CRITICAL: When user asks about transactions for a sector, use sector parameter!
-   Returns: All transaction details including channel, portfolio_id, ticker, sector, asset_type, quantity, price, date
-
-4. get_historical_prices(ticker, date_from, date_to, limit) - Query historical prices
-   ✅ FILTERS: ticker, date_from, date_to
-   Returns: Historical price data with dates
-
-5. get_stock_master(ticker, asset_type, limit) - Query stock metadata
-   ✅ FILTERS: ticker, asset_type
-   Returns: Stock master data including ticker, stock_name, asset_type, sector
-
-6. get_pdfs(user_id, search_term, limit) - Query PDF documents
-   ✅ FILTERS: user_id, search_term
-   Returns: PDF documents with summaries
-
-7. get_pms_aif_navs(user_id, ticker, limit) - Get PMS/AIF NAVs
-   ✅ FILTERS: user_id, ticker
-   Returns: PMS/AIF NAVs with CAGR, current NAV, and historical NAVs
-
-8. get_financial_news(ticker, company_name, sector, limit) - Get latest financial news
-   ✅ FILTERS: ticker, company_name, sector
-   Returns: Financial news from Moneycontrol, Economic Times, and other sources
+⚠️ IMPORTANT: You already have ALL holdings, transactions (with channel/sector), portfolios, and PDFs in the data above!
+Only use functions if you need historical prices, stock metadata, PMS/AIF NAVs, or financial news.
 
 📰 FINANCIAL NEWS ACCESS:
 - Use get_financial_news() to fetch latest market news, company updates, and sector trends
@@ -12611,25 +12663,23 @@ You have DIRECT ACCESS to query the database using these functions with FULL FIL
 - This helps you provide recommendations based on current market conditions and news
 - Note: Currently uses web scraping and AI knowledge - for true real-time news, consider integrating NewsAPI or Alpha Vantage News API
 
-📊 SESSION DATA:
-{session_data_summary}
+📊 ALL DATA PROVIDED ABOVE:
+The complete data context includes all holdings, transactions (with channel and sector), portfolios, and PDF documents.
 
-🎯 HOW TO USE:
-1. Analyze the user's question to determine what data you need
-2. Use the appropriate function(s) to query the database for the exact data needed
-3. Don't query everything - only query what's relevant to the question
-4. For example:
-   - "Show my tech stocks" → get_holdings(user_id="{user['id']}", asset_type="stock", sector="Technology")
-   - "Show deepak pf holdings" → get_holdings(user_id="{user['id']}", portfolio_name="deepak pf")
-   - "Show Zerodha holdings" → get_holdings(user_id="{user['id']}", channel="Zerodha")
-   - "Show deepak channel" or "analysis of deepak channel" → get_holdings(user_id="{user['id']}", channel="deepak")
-   - "Show tech stocks in Zerodha" → get_holdings(user_id="{user['id']}", asset_type="stock", sector="Technology", channel="Zerodha")
-   - "1 year buy transactions" → get_transactions(user_id="{user['id']}", date_from="{datetime.now().replace(year=current_year-1).strftime('%Y-%m-%d')}", transaction_type="buy")
-   - "Transactions in deepak pf" → get_transactions(user_id="{user['id']}", portfolio_name="deepak pf")
-   - "Zerodha transactions for tech stocks" → get_transactions(user_id="{user['id']}", channel="Zerodha", sector="Technology")
-   - "Price history of RELIANCE" → get_historical_prices(ticker="RELIANCE.NS")
-   - "PDFs about banking" → get_pdfs(search_term="banking")
-   - "What portfolios do I have?" → get_portfolios(user_id="{user['id']}")
+🎯 HOW TO ANALYZE:
+1. Look at the data provided above - ALL holdings, transactions (with channel/sector), portfolios, and PDFs are there
+2. When user asks about a portfolio (e.g., "karant pf", "deepak pf"), filter the holdings/transactions data by portfolio_name
+3. When user asks about a channel (e.g., "deepak channel", "Zerodha"), filter transactions by channel field
+4. When user asks about a sector, filter by sector field in holdings/transactions
+5. Extract the EXACT name from user's query dynamically - don't use hardcoded values!
+6. Analyze the filtered data and provide insights
+7. Only use function calls if you need historical prices, stock metadata, PMS/AIF NAVs, or financial news
+
+Examples:
+- "analysis of karant pf" → Filter holdings/transactions where portfolio_name contains "karant pf"
+- "analysis of deepak channel" → Filter transactions where channel contains "deepak" (case-insensitive)
+- "Show tech stocks" → Filter holdings where sector="Technology" or asset_type="stock"
+- "Transactions in Zerodha" → Filter transactions where channel="Zerodha"
 
 💡 CAPABILITIES:
 - ✅ Suggest BUY recommendations based on PDF research, market analysis, and portfolio gaps
@@ -12641,18 +12691,22 @@ You have DIRECT ACCESS to query the database using these functions with FULL FIL
 - ✅ Compare filtered results with overall portfolio when relevant
 
 Always:
-- Use the database functions to get the exact data you need based on the question
-- ⚠️ CRITICAL: When user mentions a portfolio name (e.g., "deepak pf"), ALWAYS filter by portfolio_name - don't show all portfolio data!
-- ⚠️ CRITICAL: When user mentions a channel (e.g., "deepak", "Zerodha", "deepak channel", "analysis of deepak channel"), ALWAYS filter by channel parameter - don't show all portfolio data!
-- ⚠️ CRITICAL: When user mentions a sector, ALWAYS filter by sector - don't show all sector data!
-- Combine multiple filters when user asks for specific combinations (e.g., "tech stocks in Zerodha" = sector="Technology" AND channel="Zerodha")
-- Examples of channel filtering:
-  * "deepak channel" → get_holdings(user_id=..., channel="deepak")
-  * "analysis of deepak channel" → get_holdings(user_id=..., channel="deepak")
-  * "show deepak holdings" → get_holdings(user_id=..., channel="deepak")
-- Cite specific tickers, dates, and amounts from the queried data
+- ⚠️ CRITICAL: ANALYZE THE DATA PROVIDED ABOVE DIRECTLY - don't call functions unless you need historical prices, stock metadata, PMS/AIF NAVs, or financial news!
+- ⚠️ CRITICAL: EXTRACT THE EXACT NAME FROM USER'S QUERY DYNAMICALLY - DO NOT USE HARDCODED VALUES!
+- ⚠️ CRITICAL: When user mentions a portfolio (e.g., "karant pf", "karanth pf", "deepak pf"), filter the holdings/transactions data by portfolio_name field - don't show all portfolio data!
+- ⚠️ CRITICAL: When user mentions a channel (e.g., "deepak channel", "Zerodha channel"), filter transactions by channel field (case-insensitive) - don't show all portfolio data!
+- ⚠️ CRITICAL: Portfolio names typically contain "pf" or "portfolio" - if user says "karant pf", filter by portfolio_name="karant pf" (NOT channel!)
+- ⚠️ CRITICAL: Channel names are broker/platform names - if user says "deepak channel", filter transactions where channel contains "deepak" (case-insensitive, NOT portfolio_name!)
+- ⚠️ CRITICAL: When user mentions a sector, filter by sector field - don't show all sector data!
+- Combine multiple filters when user asks for specific combinations (e.g., "tech stocks in Zerodha" = filter by sector="Technology" AND channel="Zerodha")
+- Examples (FILTER DATA DIRECTLY):
+  * "analysis of karant pf" → Filter holdings/transactions where portfolio_name contains "karant pf"
+  * "analysis of karanth pf" → Filter holdings/transactions where portfolio_name contains "karanth pf"
+  * "deepak channel" → Filter transactions where channel contains "deepak" (case-insensitive)
+  * "analysis of deepak channel" → Filter transactions where channel contains "deepak" (case-insensitive)
+- Cite specific tickers, dates, and amounts from the filtered data
 - Reference PDF research documents when making recommendations
-- Provide data-driven recommendations based on actual numbers from the database
+- Provide data-driven recommendations based on actual numbers from the data
 - If user asks about a portfolio/channel/sector, ONLY show data for that portfolio/channel/sector, not the entire portfolio!"""
                 
                 # Start conversation with chat history (if available) and user question
