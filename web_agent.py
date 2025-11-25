@@ -5091,7 +5091,24 @@ def adjust_for_corporate_action(user_id, stock_id, split_ratio, db, action_type=
                     holding = db.supabase.table('holdings').select('*').eq('user_id', user_id).eq('portfolio_id', portfolio_id).eq('stock_id', stock_id).execute()
                     if holding.data:
                         h = holding.data[0]
-                        print(f"[CORP_ACTION] 📊 Calculated holding: qty={h.get('total_quantity')}, avg_price={h.get('average_price')}")
+                        avg_price = float(h.get('average_price', 0))
+                        total_qty = float(h.get('total_quantity', 0))
+                        print(f"[CORP_ACTION] 📊 Calculated holding: qty={total_qty}, avg_price={avg_price:.2f}")
+                        
+                        # Verify the average price is reasonable (should be close to current price after split)
+                        if action_type == 'split' and split_date:
+                            # Get current price to compare
+                            try:
+                                stock_info = db.supabase.table('stock_master').select('live_price, ticker').eq('id', stock_id).execute()
+                                if stock_info.data:
+                                    current_price = float(stock_info.data[0].get('live_price', 0) or 0)
+                                    if current_price > 0:
+                                        price_diff_pct = abs(avg_price - current_price) / current_price * 100
+                                        if price_diff_pct > 20:  # More than 20% difference
+                                            print(f"[CORP_ACTION] ⚠️ WARNING: Average price ({avg_price:.2f}) differs significantly from current price ({current_price:.2f}) - {price_diff_pct:.1f}% difference")
+                                            print(f"[CORP_ACTION] 💡 This might indicate the split adjustment didn't work correctly")
+                            except Exception as e:
+                                print(f"[CORP_ACTION] ⚠️ Could not verify price: {str(e)[:100]}")
                 
                 print(f"[CORP_ACTION] ✅ Holdings recalculated for {len(portfolios.data)} portfolio(s)")
             except Exception as e:
@@ -8142,6 +8159,12 @@ def main_dashboard():
                                 # Clear cache to force fresh data on next load
                                 get_cached_holdings.clear()
                                 
+                                # Force refresh of holdings by clearing session state
+                                if 'cached_holdings' in st.session_state:
+                                    del st.session_state['cached_holdings']
+                                if 'cached_holdings_timestamp' in st.session_state:
+                                    del st.session_state['cached_holdings_timestamp']
+                                
                                 # Clear from session state
                                 remaining_actions = [
                                     a for a in corporate_actions if a['ticker'] != action['ticker']
@@ -8151,9 +8174,7 @@ def main_dashboard():
                                 else:
                                     st.session_state.corporate_actions_detected = None
                                 
-                                time.sleep(2)
-                                st.info("🔄 Redirecting to dashboard...")
-                                time.sleep(2)
+                                # Force immediate refresh
                                 st.rerun()
                             elif adjusted == -1:
                                 st.info(f"ℹ️ Corporate action for {action['ticker']} was already applied.")
