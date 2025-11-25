@@ -1907,6 +1907,8 @@ class SharedDatabaseManager:
             #st.caption("   🔍 Step 3: Checking existing prices (bulk query)...")
             
             existing_prices = {}
+            max_week_per_stock = {}  # Track max (year, week) for each stock
+            
             if stock_ids:
                 # Get all existing prices for user's stocks in one query
                 existing_response = self._retry_db_operation(
@@ -1918,22 +1920,49 @@ class SharedDatabaseManager:
                 )
                 
                 # Build a set of existing (stock_id, year, week) combinations
+                # AND track the maximum week for each stock
                 for row in existing_response.data:
-                    key = (row['stock_id'], row['iso_year'], row['iso_week'])
-                    existing_prices[key] = True
+                    stock_id = row['stock_id']
+                    year = row['iso_year']
+                    week = row['iso_week']
+                    
+                    if stock_id and year and week:
+                        key = (stock_id, year, week)
+                        existing_prices[key] = True
+                        
+                        # Track max week per stock
+                        if stock_id not in max_week_per_stock:
+                            max_week_per_stock[stock_id] = (year, week)
+                        else:
+                            current_max = max_week_per_stock[stock_id]
+                            # Compare: (year, week) > current_max if year > current_max[0] or (year == current_max[0] and week > current_max[1])
+                            if year > current_max[0] or (year == current_max[0] and week > current_max[1]):
+                                max_week_per_stock[stock_id] = (year, week)
                 
                 #st.caption(f"   ✅ Found {len(existing_prices)} existing price records")
+                print(f"[MISSING_WEEKS] Found max weeks per stock: {len(max_week_per_stock)} stocks with existing data")
             
-            # Check which combinations are missing
+            # OPTIMIZATION: Only fetch weeks AFTER the max week for each stock
+            # This avoids re-fetching all historical weeks if we already have data
             missing_weeks = []
             total_checks = len(stock_ids) * len(all_weeks)
+            skipped_old_weeks = 0
             
             #st.caption(f"   📊 Checking {total_checks} combinations ({len(stock_ids)} stocks × {len(all_weeks)} weeks)")
             
             for stock_id in stock_ids:
                 ticker = stock_details.get(stock_id, 'Unknown')
+                max_week = max_week_per_stock.get(stock_id)
                 
                 for year, week in all_weeks:
+                    # Skip if this week is before or equal to the max week we already have
+                    if max_week:
+                        max_year, max_week_num = max_week
+                        # Skip if (year, week) <= (max_year, max_week_num)
+                        if year < max_year or (year == max_year and week <= max_week_num):
+                            skipped_old_weeks += 1
+                            continue
+                    
                     key = (stock_id, year, week)
                     if key not in existing_prices:
                         missing_weeks.append({
@@ -1942,6 +1971,10 @@ class SharedDatabaseManager:
                             'year': year,
                             'week': week
                         })
+            
+            if skipped_old_weeks > 0:
+                print(f"[MISSING_WEEKS] ✅ Optimized: Skipped {skipped_old_weeks} old weeks (already have data up to max week)")
+                print(f"[MISSING_WEEKS] 📊 Only fetching {len(missing_weeks)} weeks AFTER max week for each stock")
             
             #st.caption(f"   ✅ Found {len(missing_weeks)} missing week prices to fetch")
             #st.caption(f"   📈 Includes: Transaction weeks + Last 52 weeks")
