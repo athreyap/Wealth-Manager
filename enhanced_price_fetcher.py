@@ -53,6 +53,7 @@ class EnhancedPriceFetcher:
         self._amfi_cache: Optional[Dict[str, Any]] = None
         self._cached_scheme_maps: Optional[Tuple[Dict[str, str], Dict[str, str]]] = None
         self._stock_alias_cache: Dict[str, List[str]] = {}
+        self._yfinance_ticker_cache: Dict[str, Any] = {}  # Cache for yfinance ticker objects
         self._manual_alias_map: Dict[str, List[str]] = {
             # Seed known corporate action aliases; will grow automatically via metadata lookup.
             "IDFC": ["IDFCFIRSTB.NS", "IDFCFIRSTB.BO"],
@@ -820,11 +821,12 @@ class EnhancedPriceFetcher:
         # Remove empty strings and duplicates
         possible_tickers = [t for t in set(possible_tickers) if t]
         print(f"[CORP_ACTION] [KNOWN_SPLITS] {ticker}: Checking against possible tickers: {possible_tickers}")
+        print(f"[CORP_ACTION] [KNOWN_SPLITS] {ticker}: Base ticker (normalized): '{base_ticker}', Working base: '{working_base}'")
         print(f"[CORP_ACTION] [KNOWN_SPLITS] {ticker}: Known splits DB keys: {list(known_splits_db.keys())}")
         
         for key, split_list in known_splits_db.items():
             if key in possible_tickers:
-                print(f"[CORP_ACTION] [KNOWN_SPLITS] {ticker}: MATCH FOUND for key '{key}' in possible_tickers")
+                print(f"[CORP_ACTION] [KNOWN_SPLITS] ✅ {ticker}: MATCH FOUND for key '{key}' in possible_tickers")
                 for split_info in split_list:
                     split_date = split_info['date']
                     # Normalize dates for comparison
