@@ -11785,7 +11785,7 @@ def ai_assistant_page():
         # Use already fetched PDFs
         pdf_count = len(user_pdfs)
         
-    if pdf_count > 0:
+        if pdf_count > 0:
             st.caption(f"📚 {pdf_count} PDFs loaded")
             # Show PDFs in expandable sections
             for pdf in user_pdfs[:10]:  # Show first 10 in sidebar
@@ -11801,22 +11801,24 @@ def ai_assistant_page():
                     if st.button("🗑️ Delete", key=f"sidebar_del_{pdf['id']}", use_container_width=True):
                         if db.delete_pdf(pdf['id']):
                             st.success("Deleted!")
-                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-                st.rerun()
+                            # Only rerun after successful delete
+                            st.rerun()
             if pdf_count > 10:
                 st.caption(f"... and {pdf_count - 10} more PDFs")
-            else:
-                st.caption("No PDFs uploaded yet")
+        else:
+            st.caption("No PDFs uploaded yet")
         
-    if st.button("🔄 Refresh PDFs", use_container_width=True):
-        st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
-        st.success("Refreshed!")
-        st.rerun()
+        if st.button("🔄 Refresh PDFs", use_container_width=True):
+            # Refresh PDF context (lazy load - only when needed)
+            if 'pdf_context' in st.session_state:
+                del st.session_state['pdf_context']
+            st.success("Refreshed!")
+            st.rerun()
         
-    st.markdown("---")
+        st.markdown("---")
         
         # Upload Documents Section
-    st.markdown("### 📤 Upload Documents")
+        st.markdown("### 📤 Upload Documents")
     _render_document_upload_section(
             section_key="document_ai_sidebar",
             user=user,
@@ -11842,8 +11844,15 @@ def ai_assistant_page():
     st.caption("Your intelligent portfolio advisor with access to all your data")
     
     
-    # Always load PDF context
-    st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+    # Lazy load PDF context (only when needed, not on every page load)
+    # This prevents slow loading when there are many PDFs
+    if 'pdf_context' not in st.session_state:
+        with st.spinner("Loading PDF context..."):
+            try:
+                st.session_state.pdf_context = db.get_all_pdfs_text(user['id'])
+            except Exception as e:
+                print(f"[AI_ASSISTANT] Error loading PDF context: {str(e)}")
+                st.session_state.pdf_context = ""
     
     # Get portfolio summary (holdings and user_pdfs already fetched for sidebar)
     portfolio_summary = get_cached_portfolio_summary(holdings)
