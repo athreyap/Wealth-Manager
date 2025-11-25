@@ -847,11 +847,40 @@ def _run_document_analysis(
 
         except Exception as exc:
             failure_count += 1
-            st.error(f"❌ Error processing '{doc.get('name', 'document')}': {str(exc)[:120]}")
+            error_msg = str(exc)
+            
+            # Check for OpenAI quota/rate limit errors
+            if "429" in error_msg or "quota" in error_msg.lower() or "rate limit" in error_msg.lower():
+                quota_exceeded = True  # Mark quota as exceeded
+                st.error(f"⚠️ **OpenAI API Quota Exceeded**\n\n"
+                        f"❌ Could not process '{doc.get('name', 'document')}'\n\n"
+                        f"**Reason:** You've exceeded your OpenAI API quota/rate limit.\n\n"
+                        f"**Solutions:**\n"
+                        f"1. Check your OpenAI billing and plan limits\n"
+                        f"2. Wait a few minutes and try again\n"
+                        f"3. Upgrade your OpenAI plan if needed\n"
+                        f"4. Try processing fewer files at once\n\n"
+                        f"**Note:** The system will try to use local PDF extraction (pdfplumber/PyPDF2) first before using OpenAI.")
+            else:
+                st.error(f"❌ Error processing '{doc.get('name', 'document')}': {error_msg[:200]}")
 
     if len(document_payloads) > 1:
         progress_placeholder.empty()
         status_placeholder.empty()
+
+    # Show summary if quota was exceeded
+    if quota_exceeded and failure_count > 0:
+        st.warning("⚠️ **OpenAI API Quota Exceeded**\n\n"
+                  "Some documents could not be processed due to OpenAI API quota limits.\n\n"
+                  "**What happened:**\n"
+                  "- The system tried to use OpenAI for PDF extraction/analysis\n"
+                  "- Your OpenAI account has exceeded its quota/rate limit\n\n"
+                  "**Solutions:**\n"
+                  "1. Check your OpenAI billing dashboard for quota status\n"
+                  "2. Wait a few minutes/hour and try again (rate limits reset)\n"
+                  "3. Upgrade your OpenAI plan if you need higher limits\n"
+                  "4. Process fewer files at once (split into smaller batches)\n\n"
+                  "**Note:** The system will try local extraction (pdfplumber/PyPDF2) first, but some PDFs may require OpenAI for image-based content.")
 
     if success_count > 0:
         try:
@@ -899,10 +928,18 @@ def _render_document_upload_section(
                     document_payloads.append(payload)
                     print(f"[DOC_UPLOAD] ✅ Successfully processed: {file_obj.name}")
                 elif error:
-                    extraction_errors.append(error)
+                    # Check if it's a quota error
+                    if "429" in error or "quota" in error.lower() or "rate limit" in error.lower():
+                        extraction_errors.append(f"⚠️ **OpenAI Quota Exceeded** for '{file_obj.name}'. Please check your OpenAI billing or try again later.")
+                    else:
+                        extraction_errors.append(error)
                     print(f"[DOC_UPLOAD] ❌ Error processing {file_obj.name}: {error}")
             except Exception as e:
-                error_msg = f"Unexpected error processing {file_obj.name}: {str(e)[:200]}"
+                error_msg = str(e)
+                if "429" in error_msg or "quota" in error_msg.lower() or "rate limit" in error_msg.lower():
+                    error_msg = f"⚠️ **OpenAI Quota Exceeded** for '{file_obj.name}'. Please check your OpenAI billing or try again later."
+                else:
+                    error_msg = f"Unexpected error processing {file_obj.name}: {error_msg[:200]}"
                 extraction_errors.append(error_msg)
                 print(f"[DOC_UPLOAD] ❌ Exception processing {file_obj.name}: {str(e)[:200]}")
         
@@ -11819,25 +11856,13 @@ def ai_assistant_page():
         
         # Upload Documents Section
         st.markdown("### 📤 Upload Documents")
-    _render_document_upload_section(
+        _render_document_upload_section(
             section_key="document_ai_sidebar",
             user=user,
             holdings=holdings,
             db=db,
             header_text="**📤 Upload for AI Analysis**"
         )
-        
-    st.markdown("---")
-        
-        # Quick Tips Section
-    st.markdown("### 💡 Quick Tips")
-    st.caption("Try asking me:")
-    st.caption("• 'How is my portfolio performing overall?'")
-    st.caption("• 'Which sectors are my best performers?'")
-    st.caption("• 'How can I reduce portfolio risk?'")
-    st.caption("• 'Which channels are giving me the best returns?'")
-    st.caption("• 'Should I rebalance my portfolio?'")
-    st.caption("• 'Upload a research report for analysis'")
     
     # Main chat area
     st.title("🤖 AI Assistant")
