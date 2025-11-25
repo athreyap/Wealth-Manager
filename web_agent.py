@@ -11933,23 +11933,85 @@ def ai_assistant_page():
                 # ===== DATABASE QUERY FUNCTIONS FOR AI =====
                 # These functions give the AI direct access to query the database
                 
-                def get_holdings(user_id: str, asset_type: str = None, sector: str = None, limit: int = None) -> str:
-                    """Get user holdings from database. Returns JSON string of holdings data."""
+                def get_holdings(user_id: str, asset_type: str = None, sector: str = None, portfolio_id: str = None, portfolio_name: str = None, channel: str = None, limit: int = None) -> str:
+                    """Get user holdings from database. Returns JSON string of holdings data.
+                    
+                    Args:
+                        user_id: User ID (required)
+                        asset_type: Filter by asset type (stock, mutual_fund, bond, pms, aif)
+                        sector: Filter by sector (e.g., 'Technology', 'Banking')
+                        portfolio_id: Filter by portfolio ID (UUID)
+                        portfolio_name: Filter by portfolio name (e.g., 'deepak pf', 'Main Portfolio')
+                        channel: Filter by channel (e.g., 'Zerodha', 'HDFC Securities')
+                        limit: Maximum number of holdings to return
+                    """
                     try:
                         query = db.supabase.table('user_holdings_detailed').select('*').eq('user_id', user_id)
                         if asset_type:
                             query = query.eq('asset_type', asset_type)
                         if sector:
                             query = query.eq('sector', sector)
+                        if portfolio_id:
+                            query = query.eq('portfolio_id', portfolio_id)
+                        if channel:
+                            # Channel is in transactions, need to join or filter differently
+                            # For now, get all holdings and filter by channel from transactions
+                            pass
                         if limit:
                             query = query.limit(limit)
                         response = query.execute()
+                        
+                        # If portfolio_name is provided, find portfolio_id first
+                        if portfolio_name and not portfolio_id:
+                            portfolios = db.get_user_portfolios(user_id)
+                            matching_portfolio = None
+                            for p in portfolios:
+                                if portfolio_name.lower() in p.get('portfolio_name', '').lower() or p.get('portfolio_name', '').lower() in portfolio_name.lower():
+                                    matching_portfolio = p
+                                    break
+                            if matching_portfolio:
+                                portfolio_id = matching_portfolio['id']
+                                # Re-query with portfolio_id
+                                query = db.supabase.table('user_holdings_detailed').select('*').eq('user_id', user_id).eq('portfolio_id', portfolio_id)
+                                if asset_type:
+                                    query = query.eq('asset_type', asset_type)
+                                if sector:
+                                    query = query.eq('sector', sector)
+                                if limit:
+                                    query = query.limit(limit)
+                                response = query.execute()
+                        
+                        # If channel filter is needed, filter results by checking transactions
+                        if channel and response.data:
+                            # Get all transactions for this user to find holdings by channel
+                            txn_query = db.supabase.table('user_transactions_detailed').select('stock_id, channel').eq('user_id', user_id).eq('channel', channel).execute()
+                            if txn_query.data:
+                                # Get unique stock_ids for this channel
+                                channel_stock_ids = set(txn['stock_id'] for txn in txn_query.data if txn.get('stock_id'))
+                                # Filter holdings to only those in this channel
+                                filtered_holdings = [h for h in response.data if h.get('stock_id') in channel_stock_ids]
+                                response.data = filtered_holdings
+                        
                         return json.dumps(response.data if response.data else [], indent=2)
                     except Exception as e:
                         return json.dumps({"error": str(e)})
                 
-                def get_transactions(user_id: str, date_from: str = None, date_to: str = None, transaction_type: str = None, ticker: str = None, limit: int = 200) -> str:
-                    """Get user transactions from database. Returns JSON string of transactions data."""
+                def get_transactions(user_id: str, date_from: str = None, date_to: str = None, transaction_type: str = None, ticker: str = None, portfolio_id: str = None, portfolio_name: str = None, channel: str = None, sector: str = None, asset_type: str = None, limit: int = 200) -> str:
+                    """Get user transactions from database. Returns JSON string of transactions data.
+                    
+                    Args:
+                        user_id: User ID (required)
+                        date_from: Start date (YYYY-MM-DD format)
+                        date_to: End date (YYYY-MM-DD format)
+                        transaction_type: Filter by transaction type (buy, sell)
+                        ticker: Filter by ticker symbol
+                        portfolio_id: Filter by portfolio ID (UUID)
+                        portfolio_name: Filter by portfolio name (e.g., 'deepak pf', 'Main Portfolio')
+                        channel: Filter by channel/broker/platform (e.g., 'Zerodha', 'HDFC Securities')
+                        sector: Filter by sector (e.g., 'Technology', 'Banking')
+                        asset_type: Filter by asset type (stock, mutual_fund, bond, pms, aif)
+                        limit: Maximum number of records to return (default 200)
+                    """
                     try:
                         query = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user_id)
                         if date_from:
@@ -11960,9 +12022,48 @@ def ai_assistant_page():
                             query = query.eq('transaction_type', transaction_type.lower())
                         if ticker:
                             query = query.eq('ticker', ticker)
+                        if portfolio_id:
+                            query = query.eq('portfolio_id', portfolio_id)
+                        if channel:
+                            query = query.eq('channel', channel)
+                        if sector:
+                            query = query.eq('sector', sector)
+                        if asset_type:
+                            query = query.eq('asset_type', asset_type)
                         if limit:
                             query = query.limit(limit)
                         response = query.order('transaction_date', desc=True).execute()
+                        
+                        # If portfolio_name is provided, find portfolio_id first
+                        if portfolio_name and not portfolio_id:
+                            portfolios = db.get_user_portfolios(user_id)
+                            matching_portfolio = None
+                            for p in portfolios:
+                                if portfolio_name.lower() in p.get('portfolio_name', '').lower() or p.get('portfolio_name', '').lower() in portfolio_name.lower():
+                                    matching_portfolio = p
+                                    break
+                            if matching_portfolio:
+                                portfolio_id = matching_portfolio['id']
+                                # Re-query with portfolio_id
+                                query = db.supabase.table('user_transactions_detailed').select('*').eq('user_id', user_id).eq('portfolio_id', portfolio_id)
+                                if date_from:
+                                    query = query.gte('transaction_date', date_from)
+                                if date_to:
+                                    query = query.lte('transaction_date', date_to)
+                                if transaction_type:
+                                    query = query.eq('transaction_type', transaction_type.lower())
+                                if ticker:
+                                    query = query.eq('ticker', ticker)
+                                if channel:
+                                    query = query.eq('channel', channel)
+                                if sector:
+                                    query = query.eq('sector', sector)
+                                if asset_type:
+                                    query = query.eq('asset_type', asset_type)
+                                if limit:
+                                    query = query.limit(limit)
+                                response = query.order('transaction_date', desc=True).execute()
+                        
                         return json.dumps(response.data if response.data else [], indent=2)
                     except Exception as e:
                         return json.dumps({"error": str(e)})
@@ -12002,6 +12103,14 @@ def ai_assistant_page():
                             query = query.limit(limit)
                         response = query.execute()
                         return json.dumps(response.data if response.data else [], indent=2)
+                    except Exception as e:
+                        return json.dumps({"error": str(e)})
+                
+                def get_portfolios(user_id: str) -> str:
+                    """Get all portfolios for a user. Returns JSON string with portfolio_id and portfolio_name. Use this to find portfolio_id when user mentions a portfolio name."""
+                    try:
+                        portfolios = db.get_user_portfolios(user_id)
+                        return json.dumps(portfolios if portfolios else [], indent=2, default=str)
                     except Exception as e:
                         return json.dumps({"error": str(e)})
                 
@@ -12268,14 +12377,31 @@ def ai_assistant_page():
                     {
                         "type": "function",
                         "function": {
+                            "name": "get_portfolios",
+                            "description": "Get all portfolios for a user. Returns list of portfolios with portfolio_id and portfolio_name. Use this to find portfolio_id when user mentions a portfolio name (e.g., 'deepak pf', 'main portfolio'). Then use get_holdings() or get_transactions() with portfolio_id or portfolio_name to filter holdings/transactions.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "user_id": {"type": "string", "description": "User ID (required)"}
+                                },
+                                "required": ["user_id"]
+                            }
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "function": {
                             "name": "get_holdings",
-                            "description": "Get user holdings from the database. Use this to query portfolio holdings, filter by asset_type (stock, mutual_fund, bond, pms, aif) or sector, and limit results.",
+                            "description": "Get user holdings from the database. Use this to query portfolio holdings. CRITICAL: When user asks about a specific portfolio (e.g., 'deepak pf', 'main portfolio'), use portfolio_name parameter to filter. When user asks about a channel (e.g., 'Zerodha', 'HDFC'), use channel parameter. Can also filter by asset_type, sector, or portfolio_id.",
                             "parameters": {
                                 "type": "object",
                                 "properties": {
                                     "user_id": {"type": "string", "description": "User ID (required)"},
                                     "asset_type": {"type": "string", "description": "Filter by asset type: stock, mutual_fund, bond, pms, aif"},
-                                    "sector": {"type": "string", "description": "Filter by sector"},
+                                    "sector": {"type": "string", "description": "Filter by sector (e.g., 'Technology', 'Banking')"},
+                                    "portfolio_id": {"type": "string", "description": "Filter by portfolio ID (UUID). Use get_portfolios() first to find portfolio_id if you only have portfolio_name."},
+                                    "portfolio_name": {"type": "string", "description": "Filter by portfolio name (e.g., 'deepak pf', 'Main Portfolio', 'Personal'). This will find matching portfolios and filter holdings. USE THIS when user mentions a specific portfolio name."},
+                                    "channel": {"type": "string", "description": "Filter by channel/broker/platform (e.g., 'Zerodha', 'HDFC Securities', 'ICICI Direct'). USE THIS when user asks about holdings in a specific channel."},
                                     "limit": {"type": "integer", "description": "Maximum number of records to return"}
                                 },
                                 "required": ["user_id"]
@@ -12286,7 +12412,7 @@ def ai_assistant_page():
                         "type": "function",
                         "function": {
                             "name": "get_transactions",
-                            "description": "Get user transactions from the database. Use this to query transaction history, filter by date range, transaction type (buy/sell), or ticker.",
+                            "description": "Get user transactions from the database. Use this to query transaction history. CRITICAL: When user asks about a specific portfolio (e.g., 'deepak pf'), use portfolio_name parameter. When user asks about a channel (e.g., 'Zerodha'), use channel parameter. Can filter by date range, transaction type (buy/sell), ticker, portfolio, channel, sector, or asset_type.",
                             "parameters": {
                                 "type": "object",
                                 "properties": {
@@ -12295,6 +12421,11 @@ def ai_assistant_page():
                                     "date_to": {"type": "string", "description": "End date (YYYY-MM-DD format)"},
                                     "transaction_type": {"type": "string", "description": "Filter by transaction type: buy or sell"},
                                     "ticker": {"type": "string", "description": "Filter by ticker symbol"},
+                                    "portfolio_id": {"type": "string", "description": "Filter by portfolio ID (UUID). Use get_portfolios() first to find portfolio_id if you only have portfolio_name."},
+                                    "portfolio_name": {"type": "string", "description": "Filter by portfolio name (e.g., 'deepak pf', 'Main Portfolio'). USE THIS when user mentions a specific portfolio name."},
+                                    "channel": {"type": "string", "description": "Filter by channel/broker/platform (e.g., 'Zerodha', 'HDFC Securities', 'ICICI Direct'). USE THIS when user asks about transactions in a specific channel."},
+                                    "sector": {"type": "string", "description": "Filter by sector (e.g., 'Technology', 'Banking')"},
+                                    "asset_type": {"type": "string", "description": "Filter by asset type: stock, mutual_fund, bond, pms, aif"},
                                     "limit": {"type": "integer", "description": "Maximum number of records to return (default 200)"}
                                 },
                                 "required": ["user_id"]
@@ -12444,9 +12575,15 @@ You have DIRECT ACCESS to query the database using these functions:
 3. Don't query everything - only query what's relevant to the question
 4. For example:
    - "Show my tech stocks" → get_holdings(user_id="{user['id']}", asset_type="stock", sector="Technology")
+   - "Show deepak pf holdings" → get_holdings(user_id="{user['id']}", portfolio_name="deepak pf")
+   - "Show Zerodha holdings" → get_holdings(user_id="{user['id']}", channel="Zerodha")
+   - "Show tech stocks in Zerodha" → get_holdings(user_id="{user['id']}", asset_type="stock", sector="Technology", channel="Zerodha")
    - "1 year buy transactions" → get_transactions(user_id="{user['id']}", date_from="{datetime.now().replace(year=current_year-1).strftime('%Y-%m-%d')}", transaction_type="buy")
+   - "Transactions in deepak pf" → get_transactions(user_id="{user['id']}", portfolio_name="deepak pf")
+   - "Zerodha transactions for tech stocks" → get_transactions(user_id="{user['id']}", channel="Zerodha", sector="Technology")
    - "Price history of RELIANCE" → get_historical_prices(ticker="RELIANCE.NS")
    - "PDFs about banking" → get_pdfs(search_term="banking")
+   - "What portfolios do I have?" → get_portfolios(user_id="{user['id']}")
 
 💡 CAPABILITIES:
 - ✅ Suggest BUY recommendations based on PDF research, market analysis, and portfolio gaps
@@ -12459,9 +12596,14 @@ You have DIRECT ACCESS to query the database using these functions:
 
 Always:
 - Use the database functions to get the exact data you need based on the question
+- ⚠️ CRITICAL: When user mentions a portfolio name (e.g., "deepak pf"), ALWAYS filter by portfolio_name - don't show all portfolio data!
+- ⚠️ CRITICAL: When user mentions a channel (e.g., "Zerodha"), ALWAYS filter by channel - don't show all channel data!
+- ⚠️ CRITICAL: When user mentions a sector, ALWAYS filter by sector - don't show all sector data!
+- Combine multiple filters when user asks for specific combinations (e.g., "tech stocks in Zerodha" = sector="Technology" AND channel="Zerodha")
 - Cite specific tickers, dates, and amounts from the queried data
 - Reference PDF research documents when making recommendations
-- Provide data-driven recommendations based on actual numbers from the database"""
+- Provide data-driven recommendations based on actual numbers from the database
+- If user asks about a portfolio/channel/sector, ONLY show data for that portfolio/channel/sector, not the entire portfolio!"""
                 
                 # Start conversation with chat history (if available) and user question
                 messages = [{"role": "system", "content": system_prompt}]
@@ -12566,11 +12708,13 @@ Always:
                             function_args = json.loads(tool_call.function.arguments)
                             
                             # Add user_id to function calls that need it
-                            if function_name in ['get_holdings', 'get_transactions'] and 'user_id' not in function_args:
+                            if function_name in ['get_portfolios', 'get_holdings', 'get_transactions', 'get_pms_aif_navs'] and 'user_id' not in function_args:
                                 function_args['user_id'] = user['id']
                             
                             # Execute the function
-                            if function_name == 'get_holdings':
+                            if function_name == 'get_portfolios':
+                                function_result = get_portfolios(**function_args)
+                            elif function_name == 'get_holdings':
                                 function_result = get_holdings(**function_args)
                             elif function_name == 'get_transactions':
                                 function_result = get_transactions(**function_args)
