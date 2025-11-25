@@ -4382,7 +4382,12 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
             except Exception as e:
                 print(f"[CORPORATE_ACTIONS] ⚠️ Error batch fetching purchase dates: {str(e)[:100]}")
         
-        for holding in stock_holdings:
+        # OPTIMIZATION: Process holdings in parallel using ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
+        def process_holding(holding):
+            """Process a single holding for corporate actions"""
             ticker = str(holding.get('ticker') or '').strip()
             avg_price = float(holding.get('average_price') or 0)
             current_price = holding.get('current_price')
@@ -4402,6 +4407,60 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
             # Check if ticker still exists (might be merged/delisted)
             ticker_exists = _check_ticker_exists(ticker)
             
+            result = {
+                'holding': holding,
+                'ticker': ticker,
+                'avg_price': avg_price,
+                'current_price': current_price,
+                'quantity': quantity,
+                'stock_id': stock_id,
+                'stock_name': stock_name,
+                'latest_purchase_date': latest_purchase_date,
+                'ticker_exists': ticker_exists
+            }
+            return result
+        
+        # Process holdings in parallel (max 10 concurrent threads to avoid rate limiting)
+        print(f"[CORPORATE_ACTIONS] 🚀 Processing {len(stock_holdings)} holdings in parallel (max 10 concurrent)...")
+        processed_holdings = []
+        
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            # Submit all holdings for processing
+            future_to_holding = {executor.submit(process_holding, holding): holding for holding in stock_holdings}
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_holding):
+                try:
+                    result = future.result(timeout=30)  # 30 second timeout per holding
+                    processed_holdings.append(result)
+                except Exception as e:
+                    holding = future_to_holding[future]
+                    ticker = holding.get('ticker', 'Unknown')
+                    print(f"[CORPORATE_ACTIONS] ⚠️ Error processing {ticker}: {str(e)[:100]}")
+                    # Add with error flag
+                    processed_holdings.append({
+                        'holding': holding,
+                        'ticker': ticker,
+                        'error': str(e)
+                    })
+        
+        print(f"[CORPORATE_ACTIONS] ✅ Processed {len(processed_holdings)} holdings in parallel")
+        
+        # Now process the results sequentially (to avoid race conditions when appending to corporate_actions)
+        for result in processed_holdings:
+            if 'error' in result:
+                continue  # Skip holdings that had errors
+                
+            holding = result['holding']
+            ticker = result['ticker']
+            avg_price = result['avg_price']
+            current_price = result['current_price']
+            quantity = result['quantity']
+            stock_id = result['stock_id']
+            stock_name = result['stock_name']
+            latest_purchase_date = result['latest_purchase_date']
+            ticker_exists = result['ticker_exists']
+            
             if not ticker_exists:
                 # Ticker might be delisted or merged
                 # Check if we can find a successor ticker via yfinance
@@ -4417,8 +4476,8 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                                 if info['symbol'].upper() != test_ticker.upper():
                                     corporate_actions.append({
                                         'ticker': ticker,
-                                        'stock_name': holding.get('stock_name'),
-                                        'stock_id': holding.get('stock_id'),
+                                        'stock_name': stock_name,
+                                        'stock_id': stock_id,
                                         'avg_price': avg_price,
                                         'current_price': current_price or 0,
                                         'quantity': quantity,
@@ -4436,8 +4495,8 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                 if not current_price:
                     corporate_actions.append({
                         'ticker': ticker,
-                        'stock_name': holding.get('stock_name'),
-                        'stock_id': holding.get('stock_id'),
+                        'stock_name': stock_name,
+                        'stock_id': stock_id,
                         'avg_price': avg_price,
                         'current_price': 0,
                         'quantity': quantity,
@@ -4455,6 +4514,11 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
             print(f"[CORPORATE_ACTIONS] 🔍 {ticker}: Will call _fetch_corporate_actions_from_yfinance which includes known splits check")
 
             # Get actual corporate actions from yfinance (enhanced_price_fetcher has this function)
+            # NOTE: This is done SEQUENTIALLY (not in parallel) to:
+            # 1. Avoid rate limiting from yfinance API (they may throttle concurrent requests)
+            # 2. Ensure proper error handling and logging
+            # 3. Prevent race conditions when appending to corporate_actions list
+            # The initial ticker existence checks are already parallelized above for speed
             try:
                 from enhanced_price_fetcher import EnhancedPriceFetcher
                 price_fetcher = EnhancedPriceFetcher()
@@ -4464,7 +4528,7 @@ def detect_corporate_actions(user_id, db, holdings=None, skip_if_recent=True):
                 from_date = latest_purchase_date if latest_purchase_date else (datetime.now() - timedelta(days=730))
                 to_date = datetime.now() + timedelta(days=365)  # Include future splits (announced but not yet executed)
                 
-                # Fetch actual corporate actions from yfinance
+                # Fetch actual corporate actions from yfinance (sequential for safety)
                 actual_actions = price_fetcher._fetch_corporate_actions_from_yfinance(ticker, from_date, to_date)
                 
                 # Filter to only corporate actions (splits and demergers) that happened AFTER LATEST purchase date
