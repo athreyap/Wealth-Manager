@@ -12613,6 +12613,15 @@ Always:
                     st.error("❌ Empty response from AI. Please try again.")
                     st.stop()
                 
+                # Add user question to thread messages FIRST (before displaying)
+                # Check if this question was already added (to avoid duplicates on rerun)
+                last_message = st.session_state.current_thread_messages[-1] if st.session_state.current_thread_messages else None
+                if not last_message or last_message.get('content') != user_question or last_message.get('role') != 'user':
+                    st.session_state.current_thread_messages.append({
+                        'role': 'user',
+                        'content': user_question
+                    })
+                
                 # Display the response in chat format
                 with st.chat_message("user"):
                     st.write(user_question)
@@ -12626,20 +12635,19 @@ Always:
                             st.caption(f"🤖 **{model_used}** (Fallback)")
                     st.markdown(ai_response)
                 
+                # Add assistant response to thread messages
+                # Check if this response was already added (to avoid duplicates on rerun)
+                last_message = st.session_state.current_thread_messages[-1] if st.session_state.current_thread_messages else None
+                if not last_message or last_message.get('content') != ai_response or last_message.get('role') != 'assistant':
+                    st.session_state.current_thread_messages.append({
+                        'role': 'assistant',
+                        'content': ai_response
+                    })
+                
                 # Store in chat history (session state) - backward compatibility
                 st.session_state.chat_history.append({
                     "q": user_question,
                     "a": ai_response
-                })
-                
-                # Add to current thread messages
-                st.session_state.current_thread_messages.append({
-                    'role': 'user',
-                    'content': user_question
-                })
-                st.session_state.current_thread_messages.append({
-                    'role': 'assistant',
-                    'content': ai_response
                 })
                 
                 # Create or update thread
